@@ -156,7 +156,11 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 self._send_json(400, {"ok": False, "error": "Invalid body"})
                 return
-            email = str(data.get("email", "")).strip()
+            raw_email = data.get("email", "")
+            if not isinstance(raw_email, str):
+                self._send_json(400, {"ok": False, "error": "Please provide a valid email address."})
+                return
+            email = raw_email.strip()
         else:  # form-encoded fallback
             from urllib.parse import parse_qs
             email = parse_qs(raw).get("email", [""])[0].strip()

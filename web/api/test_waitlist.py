@@ -41,6 +41,17 @@ class SaveEmailTests(unittest.TestCase):
             self.assertTrue(first_field.startswith("\"'") or first_field.startswith("'"),
                             f"not neutralized: {line}")
 
+    def test_direct_save_formula_prefixes(self):
+        # every FORMULA_PREFIXES char must be neutralized even for direct callers
+        for ch in wl.FORMULA_PREFIXES:
+            addr = ch + "x@a.io"
+            if not wl.EMAIL_RE.match(addr):
+                continue  # tab/CR are whitespace and can't appear in a valid email anyway
+            wl.save_email(addr)
+            first = wl.WAITLIST_CSV.read_text().splitlines()[-1].split(",", 1)[0]
+            self.assertTrue(first.startswith("\"'") or first.startswith("'"),
+                            f"not neutralized: {addr} -> {first}")
+
     def test_concurrent_writes_no_dup_no_double_header(self):
         results = []
         def worker():
