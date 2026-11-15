@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# RAW VENDOR DATA NEVER LEAVES THE SERVER (v3 scope doc section 4.1/12.2):
+# this repository is public — no bars, no symbol lists, no tokens.
+data/warehouse/
+state/
+/trials/
+*.db
