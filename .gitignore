@@ -1,0 +1,7 @@
+# Runtime data (waitlist signups) — not part of the site.
+data/waitlist.csv
+data/*.json
+
+# Python bytecode
+__pycache__/
+*.pyc
