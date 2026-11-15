@@ -23,6 +23,7 @@ import json
 import os
 import re
 import sys
+import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -34,6 +35,9 @@ DATA_DIR = Path(os.environ.get("SIFT_DATA_DIR", ROOT / "data"))
 WAITLIST_CSV = DATA_DIR / "waitlist.csv"
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]{2,}$")
 MAX_BODY = 16 * 1024  # 16 KiB is far more than an email needs
+# spreadsheet formula prefixes — neutralize CSV/formula injection on export
+FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_WRITE_LOCK = threading.Lock()
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -48,21 +52,31 @@ MIME = {
 
 
 def save_email(email: str) -> bool:
-    """Append email to waitlist CSV. Returns False if it was a duplicate."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    exists = WAITLIST_CSV.exists() and WAITLIST_CSV.stat().st_size > 0
-    # Duplicate check against existing rows (small file at beta scale).
-    if exists:
-        with WAITLIST_CSV.open(newline="", encoding="utf-8") as f:
-            for row in csv.reader(f):
-                if len(row) >= 1 and row[0].lower() == email.lower():
-                    return False
-    with WAITLIST_CSV.open("a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if not exists:
-            w.writerow(["email", "ts_utc", "source"])
-        w.writerow([email, datetime.now(timezone.utc).isoformat(timespec="seconds"), "landing"])
-    return True
+    """Append email to waitlist CSV. Returns False if it was a duplicate.
+
+    Serialized with a lock: the server is threaded, and the
+    exists-check/read/append sequence must be atomic to avoid duplicated
+    header rows or duplicate signups under concurrent POSTs.
+    """
+    # Neutralize CSV/formula injection: a leading =, +, -, @, tab or CR would
+    # be interpreted as a formula when the CSV is opened in a spreadsheet.
+    if email[:1] in FORMULA_PREFIXES:
+        email = "'" + email
+    with _WRITE_LOCK:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        exists = WAITLIST_CSV.exists() and WAITLIST_CSV.stat().st_size > 0
+        # Duplicate check against existing rows (small file at beta scale).
+        if exists:
+            with WAITLIST_CSV.open(newline="", encoding="utf-8") as f:
+                for row in csv.reader(f):
+                    if len(row) >= 1 and row[0].lower() == email.lower():
+                        return False
+        with WAITLIST_CSV.open("a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if not exists:
+                w.writerow(["email", "ts_utc", "source"])
+            w.writerow([email, datetime.now(timezone.utc).isoformat(timespec="seconds"), "landing"])
+        return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -137,9 +151,12 @@ class Handler(BaseHTTPRequestHandler):
         if ctype == "application/json":
             try:
                 data = json.loads(raw)
-                email = str(data.get("email", "")).strip()
             except json.JSONDecodeError:
-                email = ""
+                data = None
+            if not isinstance(data, dict):
+                self._send_json(400, {"ok": False, "error": "Invalid body"})
+                return
+            email = str(data.get("email", "")).strip()
         else:  # form-encoded fallback
             from urllib.parse import parse_qs
             email = parse_qs(raw).get("email", [""])[0].strip()

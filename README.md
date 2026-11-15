@@ -14,6 +14,7 @@ web/                  static landing page (plain HTML/CSS/JS, no framework)
   styles.css          styles
   app.js              waitlist form handling (progressive enhancement)
   api/waitlist.py     optional stdlib-only server: static host + POST /api/waitlist
+  api/test_waitlist.py  stdlib unittest suite for the endpoint (run below)
 data/                 waitlist storage (waitlist.csv, created on first signup; gitignored)
 ```
 
@@ -43,6 +44,19 @@ with header `email,ts_utc,source`; duplicates are ignored).
 On a pure static host without the stub, map any tiny endpoint to
 `POST /api/waitlist` that accepts the same payload and persists the email —
 or run the stub behind any reverse proxy. Sign-ups are email-only.
+
+The stub is a dev tool: single process, plain HTTP, no auth — put it behind a
+reverse proxy (TLS + rate limiting) in any real deployment. It writes one
+append-only CSV (`data/waitlist.csv`, gitignored), guards the body size,
+blocks path traversal, never serves `.py`/`.csv`/`.json`/`.md` under `web/`,
+neutralizes spreadsheet formula prefixes (`=`, `+`, `-`, `@`) in stored
+emails, and serializes writes so concurrent signups can't duplicate rows.
+
+Tests (stdlib only):
+
+```bash
+python3 -m unittest discover -s web/api -p "test_*.py" -v
+```
 
 ## Beta
 
