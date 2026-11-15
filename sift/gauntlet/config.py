@@ -4,7 +4,7 @@ Source: FL research/design/2026-11-15-sift-gauntlet-s5-design.md §2-§3 and
 SIFT v3 scope doc §8.1. The free 5-yr scope hurdle is the scope-matched
 tau_cal = 3.5 (= 3.0 / (f_min * sqrt(T_F/T_scope)) with f_min = 0.5,
 sqrt(4032/1260) ~ 1.79); S5's own thresholds stay at full strength and are
-never weakened — S5 wiring belongs to task 3/8.
+never weakened (S5 wired in sift/gauntlet/runner.py::run_s5, task 3/8).
 """
 
 from __future__ import annotations
@@ -17,6 +17,14 @@ SCOPE_T = {
     "pro_full": 4032,          # full history 2010-01-01..2025-12-31
     "registry_depth": 4032,    # S5 validation scope (same data as pro_full)
 }
+
+# S5 registry-depth validation (v3 §8.1-§8.4, design doc §2 S5 / §3.2):
+# automatic on every S0-S4 survivor, NEVER opt-in, thresholds at full strength.
+# Full-depth t hurdle is 3.0 (Harvey-Liu-Zhu) vs the free scope's tau_cal=3.5;
+# survivors that fail full-depth become on-watch-amber, not validated-green.
+S5_SCOPE = "registry_depth"
+S5_T_FULL = 3.0             # = S4_T_NET_FULL, full-depth hurdle — S5's own bar, never weakened (design doc §3.2 rule 2)
+S5_PBO_MAX = 0.5            # = S4_PBO_MAX, PBO <= 0.5 at registry depth (CSCV, S=16)
 
 # S1 discovery screen
 S1_THRESHOLD = 2.0            # |t| >= 2.0 to proceed
@@ -34,7 +42,7 @@ S3_BH_Q = 0.10                # BH-FDR q at family level
 S4_T_NET_5Y = 3.5             # scope-matched tau_cal for the 5-yr free scope
 S4_T_NET_FULL = 3.0           # full-depth hurdle (Harvey-Liu-Zhu), used at pro_full
 S4_NET_SR_MIN = 0.0           # net SR > 0 after costs
-S4_PBO_MAX = 0.5              # registry-depth only (task 3/8), kept here for reference
+S4_PBO_MAX = 0.5              # PBO <= 0.5 at registry depth (S5, CSCV S=16)
 
 # S0 calibration tolerances
 S0_BETA_TOL = 0.05

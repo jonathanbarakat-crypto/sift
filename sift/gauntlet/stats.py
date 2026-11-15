@@ -112,6 +112,7 @@ def calibrate_ar1_fixture(
     half_life_true: float,
     beta_tol: float = 0.05,
     hl_rel_tol: float = 0.20,
+    spread: np.ndarray | None = None,
 ) -> CalibrationResult:
     """S0 golden fixture: an AR(1) cointegrated pair must reproduce the known
     hedge ratio and half-life within pre-registered tolerances
@@ -120,12 +121,16 @@ def calibrate_ar1_fixture(
     Both are estimated on the *true-beta* hedge convention of the fixture
     check: beta* is the planted cointegrating coefficient, so the spread is
     y - beta* x (levels) and its AR(1) half-life is the assertion; beta_hat
-    is the OLS hedge on levels and must recover beta*."""
+    is the OLS hedge on levels and must recover beta*.
+
+    `spread` (optional) is the planted spread series itself (used by
+    log-space fixtures where the level hedge is not exactly beta*); when
+    given, the half-life assertion runs on it directly."""
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     beta_hat = ols_hedge_ratio(x, y)
-    spread = y - beta_true * x
-    _, hl_hat = estimate_ar1(spread)
+    sp = np.asarray(spread, float) if spread is not None else y - beta_true * x
+    _, hl_hat = estimate_ar1(sp)
     beta_ok = abs(beta_hat - beta_true) <= beta_tol
     hl_ok = math.isfinite(hl_hat) and abs(hl_hat - half_life_true) <= hl_rel_tol * half_life_true
     return CalibrationResult(
