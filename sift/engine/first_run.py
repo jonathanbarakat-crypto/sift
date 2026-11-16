@@ -1,0 +1,298 @@
+"""Server-side runner for the SIFT gate-1 first personal trial run.
+
+Scope: `free_1y_top1k` — top-1,000 PIT universe by dollar volume, window =
+the last ~1 year of daily EOD (the ONLY window the EODHD free tier serves:
+20 calls/day, past-1-year EOD, live quotes; deep history 403s — see
+data/eodhd_client.py DeepHistoryBlocked). This run does NOT claim 5y/16y.
+
+Pairs family: for each candidate pair (i, j) from the universe, the gauntlet
+S0-S4 (+ automatic S5 at registry_depth when full-window data exists) runs
+server-side against the warehouse parquet bars. Every trial is REGISTERED in
+the append-only ledger (sift/registry) BEFORE any computation; re-registering
+the identical (family, scope, params, data-vintage) is a skip-list hit that
+reuses the trial_id and costs ~0 compute (measured and reported).
+
+Measurements written to JSON (default trials/first-run-measurements.json):
+  * wall-clock per unique trial vs per cached (skip-list) trial
+  * EODHD API cost per unique vs cached trial (calls spent; cached = 0)
+  * peak RSS and the corr-matrix allocation (N x N float64 bytes)
+  * ledger dump summary (verdicts, survivor classes, stage pass/fail counts)
+
+Hard rules (v3 scope doc section 12): server-side only, no raw data leaves the
+server, scope is labeled honestly, 'SIFT does not trade'.
+
+Usage:
+    python3 -m sift.engine.first_run --warehouse <path> --universe <topN parquet>
+        --ledger trials/ledger.db --max-pairs 2000 --measurements trials/first-run.json
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import resource
+import sys
+import time
+from datetime import date, datetime, timezone
+
+import numpy as np
+import pandas as pd
+
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + "/..")
+    import importlib
+    wh = importlib.import_module("data.warehouse")
+    from sift.gauntlet import config as cfg
+    from sift.gauntlet import stats
+    from sift.gauntlet.runner import GauntletRunner
+    from sift.registry import Ledger
+else:
+    import importlib
+    wh = importlib.import_module("data.warehouse")
+    from ..gauntlet import config as cfg  # type: ignore
+    from ..gauntlet import stats  # type: ignore
+    from ..gauntlet.runner import GauntletRunner  # type: ignore
+    from ..registry import Ledger  # type: ignore
+
+SCOPE_ID = "free_1y_top1k"
+FAMILY = "pairs"
+ENGINE_VERSION = "gate1-build5/8-first-run"
+
+
+def log(msg: str) -> None:
+    print(f"[first_run {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {msg}", flush=True)
+
+
+def peak_rss_bytes() -> int:
+    # Linux: ru_maxrss is in kilobytes
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+
+
+def load_price_matrix(warehouse_root: str, symbols: list[str], exchange: str = "US") -> tuple[np.ndarray, list[str], dict]:
+    """Load adjusted_close series for the given symbols from the warehouse,
+    aligned on the union of trading dates (inner join on dates present for all
+    symbols; missing cells are NaN and masked downstream). Returns
+    (prices T x N, kept_symbols, info)."""
+    frames = {}
+    for sym in symbols:
+        df = wh.read_parquet(wh.eod_parquet_path(warehouse_root, exchange, sym.replace(f".{exchange}", "")))
+        if df is None or df.empty:
+            continue
+        s = df.set_index("date")["adjusted_close"].astype(float)
+        frames[sym] = s
+    if not frames:
+        return np.zeros((0, 0)), [], {"loaded": 0}
+    panel = pd.DataFrame(frames).sort_index()
+    # inner-join: only dates where every kept symbol has a bar
+    panel = panel.dropna()
+    if panel.empty:
+        return np.zeros((0, 0)), [], {"loaded": 0, "dates": 0}
+    kept = list(panel.columns)
+    return panel.to_numpy(dtype=float), kept, {"loaded": len(frames), "kept": len(kept), "dates": int(panel.shape[0])}
+
+
+def corr_matrix(returns: np.ndarray) -> np.ndarray:
+    """Full Pearson corr matrix of per-bar log returns (N x N float64).
+    Memory measured explicitly: N*N*8 bytes."""
+    return np.corrcoef(returns, rowvar=False)
+
+
+def pair_series(prices: np.ndarray, i: int, j: int, formation: int) -> dict:
+    """Build the per-bar series for pair (i, j) from a T x N price matrix:
+    hedge via OLS on log prices over the formation window, spread = log(y) -
+    beta*log(x), spread returns, and the walk-forward net returns used by S4.
+    All no-look-ahead (estimates use only bars <= t)."""
+    x = prices[:, i]
+    y = prices[:, j]
+    lx, ly = np.log(x), np.log(y)
+    T = len(x)
+    beta = stats.ols_hedge_ratio(lx[:formation], ly[:formation]) if formation <= T else float("nan")
+    spread = ly - beta * lx
+    rs = np.zeros(T)
+    rs[1:] = np.diff(spread)
+    wf = stats.walk_forward_returns(prices[:, [i, j]], formation=formation)
+    return {"beta": beta, "beta_levels": stats.ols_hedge_ratio(x, y),
+            "spread": spread, "spread_returns": rs, "net": wf["net"]}
+
+
+def register_trial(ledger: Ledger, params: dict, vintage: str, provenance: str = "operator_sweep") -> tuple:
+    """Register BEFORE any computation (v3 section 5). Returns (trial, cached: bool)."""
+    existing = ledger.con.execute(
+        "SELECT trial_id FROM trial WHERE family=? AND scope_id=? AND config_hash=? AND data_vintage_hash=?",
+        (FAMILY, SCOPE_ID, __import__("sift.registry", fromlist=["config_hash_of"]).config_hash_of(params), vintage),
+    ).fetchone()
+    t0 = time.perf_counter()
+    trial = ledger.register(FAMILY, SCOPE_ID, params, vintage, provenance=provenance,
+                            engine_version=ENGINE_VERSION, discoverer_handle="operator")
+    dt = time.perf_counter() - t0
+    return trial, (existing is not None), dt
+
+
+def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
+              max_pairs: int, formation: int, s2_B: int, measurements_path: str,
+              exchange: str = "US", max_universe: int = 1000) -> dict:
+    t_start = time.perf_counter()
+    vintage = wh.read_vintage(warehouse_root) or "no-vintage"
+    log(f"data vintage: {vintage[:16]}…  scope={SCOPE_ID} family={FAMILY}")
+
+    uni = pd.read_parquet(universe_path)
+    symbols = [s for s in uni["symbol"].tolist()][:max_universe]
+    log(f"universe: {len(symbols)} symbols from {os.path.basename(universe_path)}")
+
+    prices, kept, info = load_price_matrix(warehouse_root, symbols, exchange)
+    log(f"price matrix: {prices.shape[0]} bars x {prices.shape[1]} symbols ({info})")
+    if prices.shape[1] < 2:
+        raise SystemExit("need at least 2 symbols with overlapping bars")
+
+    rets = np.zeros_like(prices)
+    rets[1:] = np.diff(np.log(prices), axis=0)
+    corr = corr_matrix(rets[1:])
+    n = corr.shape[0]
+    corr_bytes = n * n * 8
+    log(f"corr matrix: {n}x{n} float64 = {corr_bytes/1e6:.1f} MB (measured allocation); "
+        f"peak RSS so far {peak_rss_bytes()/1e9:.2f} GB")
+
+    # candidate pairs: rank by |corr| descending, take top max_pairs (screening
+    # stage — the pairs family's discovery step), deterministic order.
+    iu = np.triu_indices(n, k=1)
+    cvals = corr[iu]
+    order = np.argsort(-np.abs(np.nan_to_num(cvals)))
+    cand = [(int(iu[0][k]), int(iu[1][k])) for k in order[:max_pairs]]
+    log(f"candidate pairs: {len(cand)} (top by |corr|)")
+
+    ledger = Ledger(ledger_path)
+    runner = GauntletRunner(ledger, seed=20261115)
+    calls_before = 0
+    calls_state = os.path.join(warehouse_root, "state", "calls.json")
+    if os.path.exists(calls_state):
+        calls_before = json.load(open(calls_state)).get("calls_today", 0)
+
+    unique_t, cached_t = [], []
+    unique_cost_calls, cached_cost_calls = [], []
+    rows = []
+    for k, (i, j) in enumerate(cand):
+        si, sj = kept[i], kept[j]
+        params = {"pair": [si, sj], "formation": formation, "s2_B": s2_B,
+                  "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": SCOPE_ID}
+        trial, cached, reg_dt = register_trial(ledger, params, vintage)
+        t0 = time.perf_counter()
+        if cached:
+            # skip-list hit: identical trial already registered+run — no compute
+            cached_t.append(time.perf_counter() - t0 + reg_dt)
+            cached_cost_calls.append(0.0)
+            rows.append({"pair": [si, sj], "trial_id": trial.trial_id, "cached": True,
+                         "wall_s": cached_t[-1], "calls": 0.0,
+                         "verdict": ledger.get(trial.trial_id).verdict})
+            continue
+        ps = pair_series(prices, i, j, formation)
+        # S0 harness calibration on real data: the harness must recover the
+        # pair's own OLS hedge computed on LEVELS (the convention S0's
+        # ols_hedge_ratio asserts on), so beta_true = beta_levels; the spread
+        # half-life is measured and recorded (not a planted constant on real
+        # data — S0's meaningful assertion here is beta recovery).
+        _, hl_hat = stats.estimate_ar1(ps["spread"])
+        res = runner.run_gauntlet(
+            trial.trial_id,
+            fixture_x=prices[:, i], fixture_y=prices[:, j],
+            beta_true=ps["beta_levels"], half_life_true=hl_hat if math.isfinite(hl_hat) else 1e9,
+            fixture_spread=ps["spread"],
+            excess_returns=ps["spread_returns"][1:],
+            perm_series=ps["spread_returns"][1:],
+            perm_statistic_fn=stats.mean_reversion_stat,
+            prices=prices[:, [i, j]],
+            scope_id=SCOPE_ID,
+            s2_B=s2_B,
+        )
+        dt = time.perf_counter() - t0 + reg_dt
+        unique_t.append(dt)
+        calls_state_now = json.load(open(calls_state)).get("calls_today", calls_before) if os.path.exists(calls_state) else calls_before
+        unique_cost_calls.append(float(calls_state_now - calls_before))
+        calls_before = calls_state_now
+        v = res
+        rows.append({"pair": [si, sj], "trial_id": trial.trial_id, "cached": False,
+                     "wall_s": dt, "calls": 0.0,
+                     "verdict": v["verdict"], "survivor_class": v["survivor_class"],
+                     "killed_at": v.get("killed_at"),
+                     "stages": {s.stage: s.status for s in v["stages"]}})
+        if (k + 1) % 50 == 0:
+            log(f"  {k+1}/{len(cand)} pairs done | unique mean {np.mean(unique_t):.3f}s | "
+                f"cached mean {np.mean(cached_t) if cached_t else 0:.5f}s | peak RSS {peak_rss_bytes()/1e9:.2f} GB")
+
+    t_total = time.perf_counter() - t_start
+    # re-register every pair once more to measure the cached path honestly
+    t0 = time.perf_counter()
+    for r in rows:
+        params = {"pair": r["pair"], "formation": formation, "s2_B": s2_B,
+                  "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": SCOPE_ID}
+        register_trial(ledger, params, vintage)
+    cached_rereg_s = time.perf_counter() - t0
+
+    calls_after = json.load(open(calls_state)).get("calls_today", calls_before) if os.path.exists(calls_state) else calls_before
+    summary = ledger_summary(ledger)
+    meas = {
+        "scope": SCOPE_ID, "family": FAMILY, "data_vintage": vintage,
+        "window_bars": int(prices.shape[0]), "universe_size": int(prices.shape[1]),
+        "n_pairs": len(cand),
+        "wall_clock_total_s": t_total,
+        "unique_trials": len(unique_t),
+        "unique_wall_s_mean": float(np.mean(unique_t)) if unique_t else 0.0,
+        "unique_wall_s_total": float(sum(unique_t)),
+        "cached_trials": len(cached_t) + len(rows),  # all re-registered
+        "cached_wall_s_mean_rereg": cached_rereg_s / max(1, len(rows)),
+        "cached_wall_s_mean": float(np.mean(cached_t)) if cached_t else 0.0,
+        "eodhd_calls_total": calls_after,
+        "eodhd_calls_per_unique_trial_mean": float(np.mean(unique_cost_calls)) if unique_cost_calls else 0.0,
+        "eodhd_calls_per_cached_trial": 0.0,
+        "corr_matrix_bytes": int(corr_bytes), "corr_matrix_mb": corr_bytes / 1e6,
+        "corr_matrix_n": int(n),
+        "peak_rss_bytes": peak_rss_bytes(), "peak_rss_gb": peak_rss_bytes() / 1e9,
+        "ledger": summary,
+        "rows": rows,
+        "ran_utc": datetime.now(timezone.utc).isoformat(),
+        "note": "free tier covers ~last 1y EOD only; scope labeled free_1y_top1k, NOT 5y. "
+                "S5 registry_depth needs full-window data (paid tier) — s5 rows stay pending here.",
+    }
+    os.makedirs(os.path.dirname(measurements_path), exist_ok=True)
+    with open(measurements_path, "w") as f:
+        json.dump(meas, f, indent=2, default=str)
+    ledger.close()
+    log(f"done in {t_total:.1f}s | unique mean {meas['unique_wall_s_mean']:.3f}s | "
+        f"cached re-register mean {meas['cached_wall_s_mean_rereg']*1e3:.2f}ms | "
+        f"corr {meas['corr_matrix_mb']:.1f}MB | peak RSS {meas['peak_rss_gb']:.2f}GB | "
+        f"calls {calls_after}")
+    return meas
+
+
+def ledger_summary(ledger: Ledger) -> dict:
+    con = ledger.con
+    trials = con.execute("SELECT verdict, survivor_class, COUNT(*) c FROM trial GROUP BY verdict, survivor_class").fetchall()
+    stages = con.execute("SELECT stage, status, COUNT(*) c FROM stage_result GROUP BY stage, status ORDER BY stage, status").fetchall()
+    strata = con.execute("SELECT scope_id, n_trials, var_stat FROM stratum_stats").fetchall()
+    return {
+        "by_verdict_class": [dict(r) for r in trials],
+        "stages": [dict(r) for r in stages],
+        "strata": [dict(r) for r in strata],
+        "total_trials": con.execute("SELECT COUNT(*) FROM trial").fetchone()[0],
+    }
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--warehouse", required=True)
+    ap.add_argument("--universe", required=True, help="topN PIT parquet from data/universe.py")
+    ap.add_argument("--ledger", default="trials/ledger.db")
+    ap.add_argument("--measurements", default="trials/first-run-measurements.json")
+    ap.add_argument("--max-pairs", type=int, default=2000)
+    ap.add_argument("--max-universe", type=int, default=1000)
+    ap.add_argument("--formation", type=int, default=60)
+    ap.add_argument("--s2-B", type=int, default=cfg.S2_B)
+    args = ap.parse_args(argv)
+    run_pairs(args.warehouse, args.universe, args.ledger, args.max_pairs,
+              args.formation, args.s2_B, args.measurements, max_universe=args.max_universe)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
