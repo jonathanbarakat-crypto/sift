@@ -3,9 +3,10 @@
 Server-side cross-stock pattern mining with a pre-registered statistical
 gauntlet. **SIFT does not trade** — signals only, never execution. No raw
 market data is ever served to clients — browsers receive derived outputs only
-(v3 scope doc §3, §4.1, §12). Every trial is recorded in an append-only,
-scope-stratified trial registry (the honesty ledger), which is the
-denominator for all multiplicity-corrected statistics.
+(v3 scope doc §3, §4.1, §12). Public content shows survival facts only — no
+returns, no win rates, no directional calls. Every trial is recorded in an
+append-only, scope-stratified trial registry (the honesty ledger), which is
+the denominator for all multiplicity-corrected statistics.
 
 Hard rules (v3 scope doc §12): server-side mining only; no raw data to any
 client; registry-depth validation (S5) is automatic and never opt-in;
@@ -91,6 +92,45 @@ python3 -m pytest tests/ -q
 `data/warehouse/` (raw vendor data + any tokens) is **gitignored** — this
 repo is public; raw data lives only on the server under the internal
 commercial license.
+
+## Landing page + waitlist (gate 1)
+
+```
+web/                  static landing page (plain HTML/CSS/JS, no framework)
+  index.html          landing page
+  styles.css          styles
+  app.js              waitlist form handling (progressive enhancement)
+  api/waitlist.py     optional stdlib-only server: static host + POST /api/waitlist
+  api/test_waitlist.py  stdlib unittest suite for the endpoint
+```
+
+The page deploys to **any static host** as-is (GitHub Pages, Netlify,
+Cloudflare Pages, S3, nginx, ...). From this repo:
+
+```bash
+# Option A — any static server pointed at web/
+python3 -m http.server 8080 --directory web
+
+# Option B — the bundled stub, which also provides the waitlist endpoint
+python3 web/api/waitlist.py            # http://127.0.0.1:8080/
+PORT=9000 python3 web/api/waitlist.py  # custom port
+```
+
+The form POSTs to `/api/waitlist` with `{"email": "..."}` (JSON, or
+form-encoded `email=...` as fallback); the bundled stdlib stub appends to
+`data/waitlist.csv` (gitignored; duplicates ignored). Sign-ups are
+email-only. The stub never serves `.py`/`.csv`/`.json`/`.md` under `web/`,
+guards body size, blocks path traversal, neutralizes spreadsheet formula
+prefixes, and serializes writes. Endpoint tests (stdlib only):
+
+```bash
+python3 -m unittest discover -s web/api -p "test_*.py" -v
+```
+
+## Beta
+
+The first beta cohort is 50–100 quantitative traders, invited in waves, free
+during the beta.
 
 ## Non-negotiables (scope doc v3 §12)
 
