@@ -1,8 +1,8 @@
-"""SIFT — server-side cross-stock pattern mining with a staged statistical gauntlet.
+"""SIFT — server-side cross-stock pattern mining with a statistical gauntlet.
 
-Scope doc v3 §1.1 (jonathanbarakat-crypto/sift-research, docs/sift-scope-v3):
-all mining runs server-side; clients receive derived outputs only (never raw
-market data); SIFT does not trade. This package is the mining/gauntlet core.
+Hard rules (v3 scope doc §12): server-side mining only; no raw data to
+clients; registry-depth validation (S5) is never opt-in; denominators are
+scope-stratified; public cards show survival facts only; SIFT does not trade.
 """
 
 __version__ = "0.1.0"

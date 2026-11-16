@@ -1,46 +1,10 @@
-"""SIFT gauntlet package — staged statistical admission (v3 §8).
+"""The SIFT gauntlet: pre-registered stages S0-S4 (+ S5, wired by task 3/8).
 
-Stages (FL research/design/2026-11-15-sift-gauntlet-s5-design.md):
-  S0 calibration (harness certification)  S1 discovery screen (|t| >= 2.0)
-  S2 block-permutation null               S3 DSR + BH-FDR (scope-stratified)
-  S4 cost-aware walk-forward              S5 registry-depth validation (never opt-in)
-
-Pure statistics live in `sift.gauntlet.stats`; the ledger protocol and the
-stage runner live in `sift.gauntlet.runner` (the runner records stage rows
-into the append-only ledger in `sift.registry` when bound to it).
-Hard rules (v3 §12): server-side mining only, no raw data to clients,
-scope-stratified denominators, S5 never opt-in, public cards show survival
-facts only, SIFT does not trade.
+Stage map (FL research/design/2026-11-15-sift-gauntlet-s5-design.md §2):
+  S0 harness calibration · S1 discovery screen · S2 block-permutation null ·
+  S3 scope-stratified DSR + BH-FDR · S4 cost-aware walk-forward ·
+  S5 registry-depth validation (automatic, never opt-in — out of scope here).
 """
 
 from sift.gauntlet import stats  # noqa: F401  (pure stat functions)
-from sift.gauntlet.runner import (
-    DEFAULT_COST_PARAMS,
-    GauntletConfig,
-    Ledger,
-    SQLiteLedger,
-    StageRow,
-    Trial,
-    run_gauntlet_s0_s4,
-    stage_s0_calibrate,
-    stage_s1_screen,
-    stage_s2_permutation,
-    stage_s3_multiplicity,
-    stage_s4_walk_forward,
-)
-
-__all__ = [
-    "stats",
-    "DEFAULT_COST_PARAMS",
-    "GauntletConfig",
-    "Ledger",
-    "SQLiteLedger",
-    "StageRow",
-    "Trial",
-    "run_gauntlet_s0_s4",
-    "stage_s0_calibrate",
-    "stage_s1_screen",
-    "stage_s2_permutation",
-    "stage_s3_multiplicity",
-    "stage_s4_walk_forward",
-]
+from sift.gauntlet.runner import GauntletRunner, StageResult  # noqa: F401
