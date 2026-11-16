@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SIFT — honest pattern mining for systematic traders</title>
+  <meta name="description" content="SIFT mines cross-stock patterns server-side against a pre-registered statistical gauntlet. It does not trade. Public registry shows survival facts only.">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b1220'/%3E%3Cpath d='M8 22 L16 9 L24 22' stroke='%2338bdf8' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='22' r='2.4' fill='%23a3e635'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap nav-row">
+      <a class="brand" href="/" aria-label="SIFT home">
+        <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#16213a"/><path d="M8 22 L16 9 L24 22" stroke="#38bdf8" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="22" r="2.4" fill="#a3e635"/></svg>
+        <span>SIFT</span>
+      </a>
+      <nav class="nav-links" aria-label="Sections">
+        <a href="#how">How it works</a>
+        <a href="#registry">The registry</a>
+        <a href="#honesty">What we don't do</a>
+        <a href="#beta" class="nav-cta">Join the beta</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ HERO ============ -->
+    <section class="hero">
+      <div class="wrap">
+        <p class="eyebrow">Server-side pattern mining &middot; Beta opening soon</p>
+        <h1>A tool designed to tell you<br>your pattern <em>doesn't</em> work.</h1>
+        <p class="lede">
+          SIFT mines cross-stock relationship patterns &mdash; pairs, lead-lag chains, ripples, drifts &mdash;
+          server-side, and tests every candidate against a pre-registered, multiplicity-aware statistical
+          gauntlet. Most patterns die there. That honesty is the product.
+        </p>
+        <p class="promise-line"><strong>SIFT mines patterns server-side; it does not trade.</strong></p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="#beta">Request a beta invite</a>
+          <a class="btn btn-ghost" href="#how">See how it works</a>
+        </div>
+        <p class="hero-note">No raw market data ever reaches your browser. You get derived outputs only &mdash; and you execute with your own methods.</p>
+      </div>
+    </section>
+
+    <!-- ============ HOW IT WORKS ============ -->
+    <section id="how" class="section">
+      <div class="wrap">
+        <h2>How it works</h2>
+        <p class="section-intro">One pipeline. No backtesting IDE, no signal-selling, no noise.</p>
+        <ol class="steps">
+          <li class="step">
+            <div class="step-num" aria-hidden="true">1</div>
+            <h3>Define a pattern</h3>
+            <p>Describe a cross-stock relationship in a graphical canvas &mdash; a pair, a lead-lag chain, a ripple, a drift. The pattern is pre-registered before anything is measured.</p>
+          </li>
+          <li class="step">
+            <div class="step-num" aria-hidden="true">2</div>
+            <h3>The gauntlet runs server-side</h3>
+            <p>Your candidate goes through staged, pre-registered tests: calibration, discovery screen, permutation nulls, multiplicity correction against the full trial ledger, and walk-forward validation. All mining runs on SIFT's servers.</p>
+          </li>
+          <li class="step">
+            <div class="step-num" aria-hidden="true">3</div>
+            <h3>Automatic full-depth validation</h3>
+            <p>Every survivor is re-tested automatically at full universe and full history. This stage is never opt-in and never skipped &mdash; coverage is complete by construction.</p>
+          </li>
+          <li class="step">
+            <div class="step-num" aria-hidden="true">4</div>
+            <h3>Save, monitor, decide yourself</h3>
+            <p>Surviving patterns become saved connections with live signal matching and decay monitoring. SIFT tells you what survived everything tried &mdash; what you do with it is yours.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <!-- ============ REGISTRY ============ -->
+    <section id="registry" class="section section-alt">
+      <div class="wrap">
+        <h2>The public trial registry</h2>
+        <p class="section-intro">
+          Every trial &mdash; pass or fail &mdash; is recorded in a global, public, scope-stratified ledger.
+          A mining run that finds nothing is a successful run: the kill count is the point.
+        </p>
+        <div class="card-grid">
+          <div class="fact-card">
+            <h3>Survival facts only</h3>
+            <p>Public discovery cards show what a pattern survived &mdash; permutation counts, control passes, scope &mdash; and nothing else. Never returns, never win rates, never directional calls.</p>
+          </div>
+          <div class="fact-card">
+            <h3>Scope-stratified denominators</h3>
+            <p>A 5-year-window trial and a full-history trial are different tests and never share a denominator. Every scope limit is labeled, never hidden.</p>
+          </div>
+          <div class="fact-card">
+            <h3>Cards can visibly die</h3>
+            <p>When full-depth validation resolves, a public card updates &mdash; promoted, or killed. A card that can die in public is the most honest artifact we can publish.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ HONESTY / WHAT WE DON'T DO ============ -->
+    <section id="honesty" class="section">
+      <div class="wrap">
+        <h2>What SIFT never does</h2>
+        <ul class="never-list">
+          <li><strong>Trade.</strong> No execution, no order routing, no brokerage &mdash; for you or for us. Signals, never execution.</li>
+          <li><strong>Serve raw data.</strong> No market data reaches any user device in any form. Your browser receives derived outputs only: candidates, scores, stage transitions, signal events.</li>
+          <li><strong>Sell hype.</strong> No win rates, no P&amp;L leaderboards, no profit testimonials, no picks, no &ldquo;hidden alpha&rdquo; lottery framing. In any SIFT-published content, a ticker never appears next to a directional call.</li>
+          <li><strong>Let validation be optional.</strong> Registry-depth validation runs for every survivor, automatically &mdash; never opt-in, never popularity-gated.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============ BETA / WAITLIST ============ -->
+    <section id="beta" class="section section-alt">
+      <div class="wrap wrap-narrow">
+        <h2>Private beta</h2>
+        <p class="section-intro">
+          The first cohort is <strong>50&ndash;100 quantitative traders</strong>, invited in waves.
+          SIFT is <strong>free during the beta</strong>. We are specifically looking for people who run
+          systematic strategies and are tired of backtests they can't trust.
+        </p>
+
+        <form id="waitlist-form" class="waitlist-form" action="/api/waitlist" method="POST" novalidate>
+          <label for="email">Work email</label>
+          <div class="field-row">
+            <input type="email" id="email" name="email" placeholder="you@fund.com" autocomplete="email" required>
+            <button type="submit" class="btn btn-primary">Request invite</button>
+          </div>
+          <p class="form-msg" id="form-msg" role="status" aria-live="polite"></p>
+          <p class="fine-print">Email only. No newsletter unless you ask; no data sharing; you can leave the waitlist with one click.</p>
+        </form>
+
+        <div class="beta-facts">
+          <div><span class="beta-fact-num">50&ndash;100</span><span class="beta-fact-label">quants in the first cohort</span></div>
+          <div><span class="beta-fact-num">$0</span><span class="beta-fact-label">free during beta</span></div>
+          <div><span class="beta-fact-num">0</span><span class="beta-fact-label">raw data to your device</span></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-row">
+      <span class="brand-footer">SIFT</span>
+      <p>SIFT mines patterns server-side; it does not trade. Public content shows survival facts only &mdash; no returns, no win rates, no directional calls.</p>
+      <p class="fine-print">&copy; 2026 SIFT. Not investment advice. Signals only, never execution.</p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
