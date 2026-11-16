@@ -8,10 +8,16 @@ ever served to clients — browsers receive derived outputs only (v3 scope doc
 trial registry (the honesty ledger), which is the denominator for all
 multiplicity-corrected statistics.
 
+Hard rules (v3 §12): server-side mining only; no raw data to any client;
+registry-depth validation (S5) is automatic and never opt-in; DSR denominators
+are scope-stratified; public cards show survival facts only.
+
 ## Layout
 
 - `sift/engine/` — server-side mining engine (sessions, seeded runs)
 - `sift/gauntlet/` — staged gauntlet S0–S5 statistics and stage runner
+  (`stats.py` pure statistics; `runner.py` stage runner wiring stats into
+  pre-registered trials recorded in the ledger)
 - `sift/registry/` — append-only trial registry ledger (SQLite now,
   Postgres-compatible schema)
 - `sift/data/` — data ingestion, versioned warehouse, PIT universe
