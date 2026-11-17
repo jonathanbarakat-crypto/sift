@@ -11,6 +11,15 @@ Mechanics (v4.1 middle-ground spec §4 item 6 + §4.7):
   the same card; verified email + phone OTP before the first grant, KYC-lite
   (name+DOB) for higher caps; minimum account age + >=1 completed mining
   run before the first grant.
+  NOTE on re-grant semantics: uniqueness is enforced by
+  `share_unique.PRIMARY KEY (owner, card_id)` — an ABSOLUTE constraint,
+  not a "revoked_at IS NULL" soft check. Once ANY row exists for the
+  (owner, card_id) pair, every future grant for that pair is refused
+  ("one slot per (account, card) EVER"), including after an abuse
+  revocation — a revoked grant can never be re-granted. This is the
+  intended spec behavior (the slot is one-time-per-card), documented here
+  because the runtime duplicate check only inspects `share_unique` rows,
+  while the DB constraint is absolute.
 - Anti-abuse stack (§4.7): device ID + IP/ASN clustering with multi-account
   rejection and per-device rate limits (max 3 grants/device/30d); velocity
   caps (5 accounts from one device/IP are all FLAGGED, not auto-granted);
@@ -282,9 +291,15 @@ class ShareService:
         (/cards/<card-id>/face) AND the attribution tag. Unverifiable
         shares grant nothing.
 
-        `post_url` is fetched server-side; the fetch result must contain
-        the card link for THIS card and the attribution tag. In tests the
-        fetch is injected via `post_fetcher` on the service."""
+        THIS IS THE SINGLE CHOKE POINT for live-post verification
+        (`verify_share_post` in the PR branch is the same interface under
+        the old name): every grant path calls it, and it is the one place
+        the real platform-API verifier (server-side fetch of the public
+        post via the platform's API, checking the card link + attribution
+        tag) plugs in. Today the fetch is injected via `post_fetcher` on
+        the service (tests inject a stub); production wires a real
+        platform-API fetcher behind this same method — no other code
+        path verifies shares."""
         if not post_url:
             return False
         fetcher = getattr(self, "post_fetcher", None)
@@ -297,6 +312,10 @@ class ShareService:
         if ATTRIBUTION_TAG not in body:
             return False
         return _CARD_LINK_RE.search(body) is not None and card_id in body
+
+    # Alias kept so the PR-branch name `verify_share_post` resolves to the
+    # one verifier interface above.
+    verify_share_post = verify_live_post
 
     # -- grant -------------------------------------------------------------------
 

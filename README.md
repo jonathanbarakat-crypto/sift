@@ -19,6 +19,9 @@ DSR denominators are scope-stratified; public cards show survival facts only.
 - `sift/gauntlet/` — stages S0–S5: `stats.py` (pure stat functions),
   `s5.py` (registry-depth validation + delist-safe panel helpers),
   `config.py` (pre-registered thresholds), `runner.py` (stage wiring + ledger)
+- `sift/cards/` — the whole v4.1 card layer behind `cards_v4_1` (registry,
+  minting, vault, faces, anchored, share, badges, notify, decay, metrics,
+  `service.py` composition root) — see "Feature flags (v4.1)" below
 - `sift/engine/` — server-side mining engine (first trial run)
 - `sift/data/`, `sift/web/` — scaffolded packages (ingest/landing live at
   repo-root `data/` and `web/`)
@@ -146,11 +149,50 @@ during the beta.
 ## Feature flags (v4.1)
 
 `sift/flags.py` holds server-side flags. `cards_v4_1` wraps the whole v4.1
-card layer (minting, vault, ghosts, card faces, anchored runs,
-share-for-capacity, badges) and defaults **ON for the beta cohort**.
+card layer and defaults **ON for the beta cohort**:
+
+- `sift/cards/` — card registry + minting on validated-green survivors
+  (pull/13), per-user vault + ghost FIFO (pull/14), server-rendered
+  anonymized card faces with share watermark (pull/15), anchored run mode
+  (pull/16)
+- `sift/cards/share.py` — share-for-capacity: +1 permanent vault slot per
+  verified share of a card's anonymized face, one per (account, card),
+  hard cap +5, with the anti-abuse stack (device/IP clustering, per-device
+  rate limits, live-post verification, append-only audit log, fraud queue)
+- `sift/cards/badges.py` — knowledge-reward badges computed read-only from
+  the trial registry (kill rate, pre-registration streak, peer re-test,
+  scope honesty), opt-in display, fail-closed guard against any
+  P&L/win-rate/directional payload
+- `sift/cards/notify.py` — per-card opt-in hit notifications; free tier
+  defaults to a rate-capped digest, paid may go live; signals-only
+- `sift/cards/decay.py` — registry re-evaluation job: downgrade-ONLY tier
+  transitions (amber on decay), publicly explained, notification hook
+- `sift/cards/metrics.py` — gate-1 metric hooks (instrumentation stubs over
+  the server-side stores until the event-store measurement pipeline lands):
+  D90 retention split card-holders vs non, ghost ratio, vault turnover,
+  share-grant -> D30 retention, anchored-vs-unanchored hit rates
+- `sift/cards/service.py` — `CardLayer`, the composition root wiring all of
+  the above behind the flag
 
 **Kill-switch:** set env `SIFT_CARDS_V4_1=0` (global) or call
-`flags.disable_for_user("cards_v4_1", handle)` (per user). With the flag off
-the gauntlet is unchanged but no cards mint and no new engagement is
-granted; already-minted cards stay readable (append-only) and are never
-destroyed or randomized.
+`flags.set_flag("cards_v4_1", False)` / `flags.disable_for_user("cards_v4_1", handle)`
+(per user). With the flag off every cards module fails closed with its own
+error type (`VaultError` / `FaceError` / `ShareError` / `BadgeError` /
+`NotifyError` / `DecayError` / `LayerError`, all carrying `flag_off`), the
+runner mints no cards, and no new engagement is granted. Reads stay
+available — already-minted cards are append-only registry records and are
+never hidden, destroyed, or randomized by the kill-switch. Unknown flags
+fail closed (`is_enabled` -> False, `set_flag` raises). The gauntlet itself
+(S0-S5) is unchanged by the flag.
+
+**Legal posture (v3 §12 + v4.1 mechanics, restated for the card layer):**
+cards are **non-transferable** (ownership is asserted on every path);
+share-for-capacity slots are non-transferable, expire with the account,
+and are never sellable — no money changes hands; there is **no P&L, no win
+rates, no directional calls, no market language** anywhere in card content
+(the face renderer and the badge guard fail closed on any such token);
+there is **no randomness for sale** (no lotteries, no paid random draws —
+decay is downgrade-only and never re-randomizes); and there is **no
+marketplace** (cards and slots cannot be bought, sold, or traded).
+
+## Non-negotiables (scope doc v3 §12)
