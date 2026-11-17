@@ -210,4 +210,19 @@ there is **no randomness for sale** (no lotteries, no paid random draws —
 decay is downgrade-only and never re-randomizes); and there is **no
 marketplace** (cards and slots cannot be bought, sold, or traded).
 
-## Non-negotiables (scope doc v3 §12)
+## v4.1 card layer (behind `cards_v4_1`)
+
+| # | Mechanic | Module |
+|---|----------|--------|
+| 1 | Card minting on validated-green gauntlet survivors (HMAC card id, tier from pre-registered stats, downgrade-only decay; F-REGIME/F-DELIST mint nothing; duplicate spec -> ghost) | `sift/cards/__init__.py`, `sift/cards/minting.py` |
+| 2 | Per-user vault: capacity by tier, keep/discard -> personal archive + aggregate registry pool (never destroyed, never randomized) | `sift/cards/vault.py` |
+| 3 | Ghost cards: numbered FIFO per canonical spec; discard shifts all below up one slot; never transferable | `sift/cards/vault.py` |
+| 4 | Server-rendered anonymized card face (aggregates + gauntlet stats only; fail-closed ticker guard; watermarked handle+timestamp share object) | `sift/cards/face.py`, `sift/cards/render.py` |
+| 5 | Anchored run mode: locked anchor slots + sampled subspace; anchor+subspace+N_eff in the §12.11 scope record; per-stage kill report | `sift/cards/anchored.py` |
+| 6 | Share-for-capacity: +1 permanent vault slot per verified share, cap +5, non-transferable, revocable; full anti-abuse stack | `sift/cards/share.py` |
+| 7 | Knowledge-reward badges (kill-rate, pre-registration streak, peer re-test, scope-honesty) — deterministic, opt-in, no P&L; plus per-card opt-in hit notifications and downgrade-only decay re-evaluation | `sift/cards/badges.py` (pull/17, open), `sift/cards/notify.py`, `sift/cards/decay.py` |
+| 8 | End-to-end flag wiring + kill-switch verification + integration suite through the `CardLayer` composition root | `sift/cards/service.py`, `tests/cards/test_e2e_v41.py` (pull/23, merged) |
+
+Dependency note: the scope-fold doc (sift-research `docs/sift-scope-v4`,
+pull/7 there) is still open — the code above is built against the quoted
+v4.1 mechanics, which are authoritative for this layer.
