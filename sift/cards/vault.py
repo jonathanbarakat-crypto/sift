@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS registry_pool (
     discarded_at REAL NOT NULL,
     PRIMARY KEY (card_id)
 );
+CREATE TABLE IF NOT EXISTS vault_owner_slots (
+    owner       TEXT PRIMARY KEY,          -- mechanics 6: authoritative per-owner share slots
+    extra_slots INTEGER NOT NULL DEFAULT 0, -- capped at +5 (see set_permanent_slots)
+    updated_at  REAL NOT NULL
+);
 """
 
 
@@ -94,15 +99,26 @@ class Vault:
             raise VaultError(f"unknown tier {tier!r}")
         return BASE_CAPACITY[tier]
 
+    def share_slots(self, handle: str) -> int:
+        """Permanent share-for-capacity slots for the account (mechanics 6).
+        Authoritative source is vault_owner_slots (works even before the
+        account owns a card); the vault_entry.extra_slots column is kept in
+        sync as a mirror for per-card reads. Read-back from the DB."""
+        row = self.con.execute(
+            "SELECT extra_slots FROM vault_owner_slots WHERE owner=?", (handle,)
+        ).fetchone()
+        if row is not None:
+            return row["extra_slots"]
+        row = self.con.execute(
+            "SELECT MAX(extra_slots) m FROM vault_entry WHERE owner=?", (handle,)
+        ).fetchone()
+        return row["m"] if row and row["m"] is not None else 0
+
     def effective_capacity(self, handle: str, tier: str) -> int:
         """Base capacity by tier + permanent share-for-capacity slots
-        (mechanics 6; stored on the vault row, capped at +5 there)."""
-        row = self.con.execute(
-            "SELECT extra_slots FROM vault_entry WHERE owner=? ORDER BY updated_at DESC LIMIT 1",
-            (handle,),
-        ).fetchone()
-        extra = row["extra_slots"] if row else 0
-        return self.base_capacity(tier) + extra
+        (mechanics 6, cap +5 — never combined with paid-tier purchases to
+        exceed caps). Read-back from the DB."""
+        return self.base_capacity(tier) + self.share_slots(handle)
 
     def _require_flag(self, handle: str) -> None:
         if not flags.cards_v4_1_enabled(handle):
@@ -265,31 +281,44 @@ class Vault:
     def add_permanent_slots(self, handle: str, n: int) -> int:
         """Mechanics 6 hook: add permanent (non-transferable) vault slots.
         Capped at +5 total per account; returns the new extra_slots total.
-        Revocation subtracts (see revoke_permanent_slots)."""
+        Writes the authoritative vault_owner_slots row AND mirrors onto the
+        vault rows, then READS BACK before returning."""
         if n < 0:
             raise VaultError("n must be >= 0")
-        row = self.con.execute(
-            "SELECT COALESCE(MAX(extra_slots),0) m FROM vault_entry WHERE owner=?", (handle,)
-        ).fetchone()
-        cur = row["m"]
+        cur = self.share_slots(handle)
         new = min(cur + n, 5)
-        self.con.execute(
-            "UPDATE vault_entry SET extra_slots=?, updated_at=? WHERE owner=?",
-            (new, time.time(), handle),
-        )
-        self.con.commit()
-        return new
+        self.set_permanent_slots(handle, new)
+        return self.share_slots(handle)                  # read-back
 
     def revoke_permanent_slots(self, handle: str) -> int:
-        row = self.con.execute(
-            "SELECT COALESCE(MAX(extra_slots),0) m FROM vault_entry WHERE owner=?", (handle,)
-        ).fetchone()
+        """Remove ALL permanent share slots (abuse revocation path, mechanics
+        6/§4.7). Returns the previous total. Read-back before returning."""
+        prev = self.share_slots(handle)
+        self.set_permanent_slots(handle, 0)
+        self.share_slots(handle)                          # read-back
+        return prev
+
+    def set_permanent_slots(self, handle: str, value: int) -> int:
+        """Set the permanent share-slot count (clamped to 0..5) in the
+        authoritative vault_owner_slots row and mirror it onto every
+        vault_entry of the owner. Used by sift/cards/share.py after each
+        grant/revoke. Read-back."""
+        if value < 0:
+            raise VaultError("slots must be >= 0")
+        value = min(value, 5)
+        now = time.time()
         self.con.execute(
-            "UPDATE vault_entry SET extra_slots=0, updated_at=? WHERE owner=?",
-            (time.time(), handle),
+            "INSERT INTO vault_owner_slots (owner, extra_slots, updated_at)"
+            " VALUES (?,?,?) ON CONFLICT(owner) DO UPDATE SET"
+            " extra_slots=excluded.extra_slots, updated_at=excluded.updated_at",
+            (handle, value, now),
+        )
+        self.con.execute(
+            "UPDATE vault_entry SET extra_slots=?, updated_at=? WHERE owner=?",
+            (value, now, handle),
         )
         self.con.commit()
-        return row["m"]
+        return self.share_slots(handle)                  # read-back
 
 
 __all__ = [
