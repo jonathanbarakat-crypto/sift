@@ -269,6 +269,12 @@ class CardRegistry:
         ).fetchall()
         return [self._to_card(r) for r in rows]
 
+    def all_cards(self) -> list[Card]:
+        """Every card in the registry (regular + ghosts), oldest first.
+        Read used by the decay re-evaluation pass (sift/cards/decay.py)."""
+        rows = self.con.execute("SELECT * FROM card ORDER BY minted_at, card_id").fetchall()
+        return [self._to_card(r) for r in rows]
+
     def ghosts_for_spec(self, spec_hash: str) -> list[Card]:
         """ACTIVE ghost cards for one canonical spec, FIFO order (mechanics
         3). Ghosts discarded from the FIFO carry ghost_no<=0 and are excluded

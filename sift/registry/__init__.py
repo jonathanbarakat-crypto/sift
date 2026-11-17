@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS stratum_stats (
 
 CREATE INDEX IF NOT EXISTS idx_stage_stage ON stage_result(stage);
 CREATE INDEX IF NOT EXISTS idx_trial_scope ON trial(scope_id);
+
+CREATE TABLE IF NOT EXISTS ledger_event (
+    event_id     INTEGER PRIMARY KEY AUTOINCREMENT,   -- append-only; rows never deleted
+    trial_id     TEXT REFERENCES trial(trial_id),
+    event_type   TEXT NOT NULL,                        -- e.g. 'card_decay'
+    payload_json TEXT NOT NULL,                        -- canonical JSON, immutable
+    created_at   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_event_type ON ledger_event(event_type);
 """
 
 
@@ -326,6 +335,33 @@ class Ledger:
     def trial_count(self) -> int:
         """Global registered-trial counter (read by multiplicity corrections)."""
         return self.con.execute("SELECT COUNT(*) FROM trial").fetchone()[0]
+
+    # -- append-only registry events -------------------------------------------
+
+    def record_event(self, event_type: str, payload: dict,
+                     trial_id: str | None = None, now: float | None = None) -> int:
+        """Append a registry event (card decay, audit, ...) to the ledger.
+        Append-only: the row is never updated or deleted. Returns event_id."""
+        now = time.time() if now is None else now
+        cur = self.con.execute(
+            "INSERT INTO ledger_event (trial_id, event_type, payload_json, created_at)"
+            " VALUES (?,?,?,?)",
+            (trial_id, event_type, canonical_json(payload), now),
+        )
+        self.con.commit()
+        assert cur.lastrowid is not None
+        return int(cur.lastrowid)
+
+    def events(self, event_type: str | None = None) -> list[sqlite3.Row]:
+        """Read append-only registry events, oldest first."""
+        if event_type is None:
+            return self.con.execute(
+                "SELECT * FROM ledger_event ORDER BY event_id"
+            ).fetchall()
+        return self.con.execute(
+            "SELECT * FROM ledger_event WHERE event_type=? ORDER BY event_id",
+            (event_type,),
+        ).fetchall()
 
     def trials_in_scope(self, scope_id: str) -> list[Trial]:
         rows = self.con.execute(
