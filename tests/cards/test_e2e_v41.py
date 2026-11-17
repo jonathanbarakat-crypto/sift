@@ -43,7 +43,7 @@ import pytest
 
 from sift import flags
 from sift.cards import CardRegistry
-from sift.cards.badges import BadgeError, BadgeService
+from sift.cards.badges import BADGE_KINDS, BadgeError
 from sift.cards.decay import DecayError, RegistryDecayJob
 from sift.cards.face import CardFaceRenderer, FaceError
 from sift.cards.metrics import MetricError, Metrics
@@ -188,12 +188,17 @@ def test_full_path_mint_vault_face_share_badge_notify_decay(layer, tmp_path):
     log = layer.shares.grants_for(HANDLE)
     assert any(r.outcome == "granted" and r.verified == 1 for r in log)
 
-    # -- 5. badge award (kill_rate from the ledger, guard-checked) --------------
-    badge = layer.badges.award(HANDLE, "kill_rate", opt_in=True, now=NOW)
-    assert badge.payload["badge"] == "kill_rate"
-    assert badge.payload["trials"] >= 1
-    # opt-in respected on read
-    assert [b.badge for b in layer.badges.badges_for(HANDLE)] == ["kill_rate"]
+    # -- 5. badges (kill_rate etc. computed from the ledger, guard-checked) -----
+    badges = layer.badges.compute_badges(HANDLE, now=NOW)
+    assert {b["kind"] for b in badges} == set(BADGE_KINDS)
+    kr = next(b for b in badges if b["kind"] == "kill_rate")
+    assert kr["detail"]["trials"] >= 1
+    # opt-in required: nothing displayed before set_visibility
+    assert layer.badges.badges_for(HANDLE, now=NOW) == []
+    row = layer.badges.set_visibility(HANDLE, True, now=NOW)
+    assert row["opt_in"] is True                    # read-back
+    shown = layer.badges.badges_for(HANDLE, now=NOW)
+    assert all(b["earned"] for b in shown)          # earned badges only
 
     # -- 6. notification (per-card opt-in; free tier -> digest) -----------------
     pref = layer.notify.set_pref(card_id, HANDLE, enabled=True, mode="live",
@@ -287,9 +292,9 @@ def test_flag_off_fails_closed_and_touches_no_tables(layer, tmp_path):
             layer.shares.request_share(HANDLE, card_id,
                                        post_url="https://x.example/p",
                                        device_id="dev-1", now=NOW)
-        # badge award
+        # badges
         with pytest.raises(BadgeError):
-            layer.badges.award(HANDLE, "kill_rate", now=NOW)
+            layer.badges.compute_badges(HANDLE, now=NOW)
         # notification
         with pytest.raises(NotifyError):
             layer.notify.set_pref(card_id, HANDLE, enabled=True, mode="live",
@@ -530,30 +535,36 @@ def test_share_device_rate_limit_and_cluster_flag(layer):
 # Badges + notify + decay mechanics (quoted from the 6/8 and 7/8 cards)
 # ============================================================================
 
-def test_badge_payload_guard_rejects_pnl_language(layer):
-    verdict, _ = _run_and_mint(layer)
-    from sift.cards.badges import _guard_payload
+def test_badge_guard_rejects_pnl_language(layer):
+    _run_and_mint(layer)
+    from sift.cards.badges import _guard_obj
     # forbidden FIELD names are refused (fail closed)
     with pytest.raises(BadgeError):
-        _guard_payload({"badge": "kill_rate", "win_rate": 0.9})
+        _guard_obj({"kind": "kill_rate", "win_rate": 0.9})
     with pytest.raises(BadgeError):
-        _guard_payload({"badge": "kill_rate", "nested": {"pnl": 12.3}})
-    # a bare forbidden term as a leaf VALUE is refused
+        _guard_obj({"kind": "kill_rate", "nested": {"pnl": 12.3}})
+    # forbidden terms / ticker-like tokens in badge text are refused
     with pytest.raises(BadgeError):
-        _guard_payload({"badge": "kill_rate", "note": "win_rate"})
-    # ...but legal disclaimer prose mentioning the words is fine
-    _guard_payload({"badge": "kill_rate",
-                    "note": "validation survival only — never P&L (v3 §12.4)"})
-    # ALL four badge kinds can be awarded (guard must not reject its own notes)
-    for b in ("kill_rate", "pre_registration_streak", "peer_retest", "scope_honesty"):
-        badge = layer.badges.award(HANDLE, b, opt_in=True, now=NOW)
-        assert badge.payload["badge"] == b
-    # opt-out respected: award without opt-in -> not visible
-    layer.badges.set_opt_in(HANDLE, "kill_rate", False, now=NOW)
-    assert "kill_rate" not in [b.badge for b in layer.badges.badges_for(HANDLE)]
-    assert "kill_rate" in [b.badge for b in layer.badges.all_badges(HANDLE)]
+        _guard_obj({"kind": "kill_rate", "label": "great win rate"})
     with pytest.raises(BadgeError):
-        layer.badges.award(HANDLE, "no_such_badge", now=NOW)
+        _guard_obj({"kind": "kill_rate", "label": "AAPL killed at s2"})
+    # ...but a clean artifact passes the guard (handle masked)
+    _guard_obj({"kind": "kill_rate", "handle": "alice",
+                "label": "12 trials, 11 killed",
+                "detail": {"trials": 12, "killed": 11},
+                "earned": True, "earned_at": 1_800_000_000.0},
+               mask=("alice",))
+    # ALL four badge kinds compute and emit guard-checked
+    badges = layer.badges.compute_badges(HANDLE, now=NOW)
+    assert {b["kind"] for b in badges} == set(BADGE_KINDS)
+    # opt-in / opt-out respected on the display path
+    layer.badges.set_visibility(HANDLE, True, now=NOW)
+    layer.badges.set_visibility(HANDLE, False, now=NOW)
+    assert layer.badges.badges_for(HANDLE, now=NOW) == []
+    # unknown trial in the re-test ladder -> BadgeError
+    with pytest.raises(BadgeError):
+        layer.badges.record_retest("trial-999999", HANDLE,
+                                   n_retests=2, n_robust=2, now=NOW)
 
 
 def test_notify_rate_caps_and_digest_batching(layer):

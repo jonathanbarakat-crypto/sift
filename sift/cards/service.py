@@ -9,7 +9,7 @@ card layer:
       -> CardFaceRenderer            (anonymized shareable face, pull/15)
       -> anchored run mode           (pull/16)
       -> ShareService                (share-for-capacity, cards 5/8, pull/18)
-      -> BadgeService                (knowledge-reward badges, cards 6/8)
+      -> BadgeEngine                 (knowledge-reward badges, cards 6/8, pull/17)
       -> Notifier                    (per-card opt-in notifications, cards 7/8, pull/19)
       -> RegistryDecayJob            (downgrade-only re-evaluation, cards 7/8, pull/19)
       -> Metrics                     (gate-1 metric hooks)
@@ -29,7 +29,7 @@ from pathlib import Path
 from sift import flags
 from sift.cards import CardRegistry
 from sift.cards.anchored import AnchoredRunError  # noqa: F401  (re-export surface)
-from sift.cards.badges import BadgeService
+from sift.cards.badges import BadgeEngine
 from sift.cards.decay import RegistryDecayJob
 from sift.cards.face import CardFaceRenderer
 from sift.cards.metrics import Metrics
@@ -57,7 +57,7 @@ class CardLayer:
         self.vault = Vault(self.cards, db_dir / "vault.db")
         self.face = CardFaceRenderer(ledger, self.cards)
         self.shares = ShareService(self.cards, self.vault, db_dir / "shares.db")
-        self.badges = BadgeService(ledger, db_dir / "badges.db")
+        self.badges = BadgeEngine(ledger, db_dir / "badges.db")
         self.notify = Notifier(self.cards, db_dir / "notify.db")
         self.decay = RegistryDecayJob(self.cards, ledger, notifier=self.notify)
         self.metrics = Metrics(ledger, self.cards, self.vault, self.shares)
