@@ -235,4 +235,13 @@ SIFT_ENV=test python3 -m sift.sim.run --sim all --n-users 50 --runs-per-user 3 -
 CI runs the full suite plus a small-N (20 users) smoke soak
 (`.github/workflows/ci.yml`, job `sim-smoke`); tests live in `tests/sim/`.
 
+**Persona spec** — `sift/sim/personas.json` (72 simulated-user personas,
+schema-validated by `sift/sim/personas.py`) + `sift/sim/bots.py` (seeded,
+deterministic bot sessions) + rationale/distribution tables in
+`docs/sim-user-personas.md`. Personas parameterize the bots ONLY — the mix
+is a design choice for coverage, **not** a market estimate, and is never
+user-behavior evidence (spec §8 is answered from the limited alpha/beta,
+pull/25). Every bot run logs persona id + seed; every report carries the
+SIMULATED banner.
+
 ## Non-negotiables (scope doc v3 §12)

@@ -1,0 +1,2132 @@
+{
+  "sim": true,
+  "header": "SIMULATED - infrastructure validation, not user-behavior evidence. Persona mix/shares are a DESIGN CHOICE for behavior-space coverage, not a market estimate; never cite as user-behavior evidence (spec sec.8).",
+  "schema_version": 1,
+  "purpose": "Deterministic simulated-user personas for the SIFT test-bot harness (sift/sim, pull/27): infrastructure soak + v4.1 sec.4.7 anti-abuse attack sims ONLY. NOT user-behavior evidence; the mix is a design choice for coverage, not a market estimate.",
+  "constraints": [
+    "synthetic instruments only (SIM#### from the sim world); personas never name real tickers",
+    "bot inputs only; never in product copy; no tickers + directional calls in anything SIFT ships",
+    "bot share posts are non-directional test fixtures; no profit-expectation/value language anywhere",
+    "bots see only the anonymized aggregates a real card-holder would; raw market data stays server-side",
+    "every bot run logs persona id + deterministic_seed; every report carries the SIMULATED header",
+    "runs require SIFT_ENV=test (ephemeral test DB only)"
+  ],
+  "personas": [
+    {
+      "id": "big-name-anchor",
+      "name": "Big-name anchor",
+      "archetype": "anchor",
+      "sophistication": 1,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "name-anchored random",
+          "sector-of-big-name"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 12,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 671599283826852716,
+      "description": "Does not know much; locks onto big household names and searches randomly around them. Low session count, few ticks per session."
+    },
+    {
+      "id": "megacap-orbit",
+      "name": "Megacap orbit",
+      "archetype": "anchor",
+      "sophistication": 2,
+      "information_sources": [
+        "random",
+        "screeners"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "big-name + random neighbor",
+          "screener top"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 15,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 58588173606384267,
+      "description": "Picks a couple of mega-cap names from memory and probes whatever the screener surfaces next to them."
+    },
+    {
+      "id": "brand-hunter",
+      "name": "Brand hunter",
+      "archetype": "anchor",
+      "sophistication": 1,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "brand -> product theme"
+        ],
+        "queries_per_session": 5,
+        "session_minutes": 10,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 476560701821385108,
+      "description": "Thinks in consumer brands; maps brands to tickers by association and runs narrative searches."
+    },
+    {
+      "id": "ticker-familiar",
+      "name": "Ticker-familiar",
+      "archetype": "anchor",
+      "sophistication": 2,
+      "information_sources": [
+        "random",
+        "wsb"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "known name mention",
+          "random around it"
+        ],
+        "queries_per_session": 7,
+        "session_minutes": 14,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 716898527957934539,
+      "description": "Recognizes a handful of tickers from headlines; everything else is random exploration around those."
+    },
+    {
+      "id": "headline-anchor",
+      "name": "Headline anchor",
+      "archetype": "anchor",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb",
+        "influencers"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "headline name",
+          "momentum around headline"
+        ],
+        "queries_per_session": 9,
+        "session_minutes": 18,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 3,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 185391962418932295,
+      "description": "Anchors on whatever name is in the news this week and chases momentum around it."
+    },
+    {
+      "id": "mega-etf-anchor",
+      "name": "Mega-ETF anchor",
+      "archetype": "anchor",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "etf top holding"
+        ],
+        "queries_per_session": 4,
+        "session_minutes": 8,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 831279975395402359,
+      "description": "Uses the biggest ETF holdings as the anchor set; searches randomly among them."
+    },
+    {
+      "id": "dow-anchor",
+      "name": "Dow-anchor",
+      "archetype": "anchor",
+      "sophistication": 1,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "index component"
+        ],
+        "queries_per_session": 5,
+        "session_minutes": 10,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 655370805968575752,
+      "description": "Knows the Dow components by name; treats them as the whole universe."
+    },
+    {
+      "id": "sp500-top-anchor",
+      "name": "S&P-top anchor",
+      "archetype": "anchor",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners",
+        "random"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "top-of-index pair"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 16,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 688764786940273081,
+      "description": "Takes the top of the index list and pairs the first two names it sees."
+    },
+    {
+      "id": "wsb-trender",
+      "name": "WSB trender",
+      "archetype": "trender",
+      "sophistication": 1,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "trending mention",
+          " YOLO-size session"
+        ],
+        "queries_per_session": 10,
+        "session_minutes": 20,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 4,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 1110989791385360892,
+      "description": "Takes whatever is trending on the casino board and tries to find connections for it; short sessions, momentum strategy."
+    },
+    {
+      "id": "wsb-dd-trender",
+      "name": "WSB DD trender",
+      "archetype": "trender",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "due-diligence thread",
+          "narrative hunt"
+        ],
+        "queries_per_session": 12,
+        "session_minutes": 25,
+        "ticks_per_session": 8
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 3,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 429890937499240122,
+      "description": "Reads the long DD posts and hunts narrative connections between the mentioned names."
+    },
+    {
+      "id": "wsb-options-trender",
+      "name": "WSB options trender",
+      "archetype": "trender",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "options flow mention",
+          "momentum"
+        ],
+        "queries_per_session": 14,
+        "session_minutes": 18,
+        "ticks_per_session": 7
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 5,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 541912567825280362,
+      "description": "Follows unusual-options-flow chatter and momentum-chases the flagged names."
+    },
+    {
+      "id": "wsb-squeeze-trender",
+      "name": "Squeeze trender",
+      "archetype": "trender",
+      "sophistication": 1,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "short-squeeze chatter"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 12,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 6,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 36628834105702645,
+      "description": "Hops on short-squeeze chatter; high share-post frequency about whatever is moving."
+    },
+    {
+      "id": "wsb-comment-trender",
+      "name": "Comment-section trender",
+      "archetype": "trender",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "top comment ticker",
+          "copy top comment"
+        ],
+        "queries_per_session": 10,
+        "session_minutes": 22,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 4,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 856619028325548301,
+      "description": "Takes tickers from the top comments rather than the post itself; copycat strategy."
+    },
+    {
+      "id": "trending-gainers",
+      "name": "Gainers-board trender",
+      "archetype": "trender",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners",
+        "wsb"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "top gainer",
+          "momentum follow"
+        ],
+        "queries_per_session": 9,
+        "session_minutes": 16,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 3,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 157275370055921657,
+      "description": "Runs the top-gainers screener each morning and momentum-chases."
+    },
+    {
+      "id": "reddit-cross-trender",
+      "name": "Cross-subreddit trender",
+      "archetype": "trender",
+      "sophistication": 3,
+      "information_sources": [
+        "wsb",
+        "r/stocktips"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "cross-posted ticker",
+          "momentum"
+        ],
+        "queries_per_session": 11,
+        "session_minutes": 24,
+        "ticks_per_session": 7
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 4,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 525322332213974430,
+      "description": "Watches for the same ticker appearing in multiple subreddits and rides it."
+    },
+    {
+      "id": "trender-reversal",
+      "name": "Reversal trender",
+      "archetype": "trender",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "overextended trend",
+          "pair vs hedge"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 15,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 832484873147654409,
+      "description": "Looks for overextended trends and tries to pair the extended name against something comparably sized."
+    },
+    {
+      "id": "top-of-list-pairer",
+      "name": "Top-of-list pairer",
+      "archetype": "list_pairer",
+      "sophistication": 1,
+      "information_sources": [
+        "r/stocktips"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "first two of the list",
+          "pairs run"
+        ],
+        "queries_per_session": 4,
+        "session_minutes": 10,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 957286376504018550,
+      "description": "Takes the first two tickers on the tips list and runs a pairs analysis, no further research."
+    },
+    {
+      "id": "screener-pairer",
+      "name": "Screener pairer",
+      "archetype": "list_pairer",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "screener row 1+2",
+          "pairs"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 14,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 274219965035667761,
+      "description": "Pairs the first two rows of whatever screener is open."
+    },
+    {
+      "id": "gainers-pairer",
+      "name": "Gainers pairer",
+      "archetype": "list_pairer",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "top gainer + runner-up"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 12,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 572091476841593929,
+      "description": "Pairs the top gainer with the runner-up and checks the spread."
+    },
+    {
+      "id": "losers-pairer",
+      "name": "Losers pairer",
+      "archetype": "list_pairer",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "top loser + next"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 12,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 1099401872448843277,
+      "description": "Pairs the biggest losers, expecting mean reversion."
+    },
+    {
+      "id": "most-active-pairer",
+      "name": "Most-active pairer",
+      "archetype": "list_pairer",
+      "sophistication": 3,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "most active 1+2"
+        ],
+        "queries_per_session": 7,
+        "session_minutes": 15,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 583148152406258475,
+      "description": "Pairs the two most-active names of the day."
+    },
+    {
+      "id": "analyst-upgrade-pairer",
+      "name": "Upgrade-list pairer",
+      "archetype": "list_pairer",
+      "sophistication": 3,
+      "information_sources": [
+        "r/stocktips",
+        "substack_free"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "upgrade list rows 1+2"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 18,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 232173209457936276,
+      "description": "Takes the first two names on the analyst-upgrade list and pairs them."
+    },
+    {
+      "id": "substack-verifier",
+      "name": "Substack verifier",
+      "archetype": "verifier",
+      "sophistication": 2,
+      "information_sources": [
+        "substack_free"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "newsletter pick",
+          "verify via cards"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 20,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 609252131330054520,
+      "description": "Follows free-tier stock-pick newsletters and tries to verify each pick through card runs."
+    },
+    {
+      "id": "substack-weekly-verifier",
+      "name": "Weekly newsletter verifier",
+      "archetype": "verifier",
+      "sophistication": 3,
+      "information_sources": [
+        "substack_free"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "weekly letter picks",
+          "verify each"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 30,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 289466534166784566,
+      "description": "Verifies each pick in the weekly free letter; longer sessions, methodical."
+    },
+    {
+      "id": "substack-portfolio-verifier",
+      "name": "Portfolio verifier",
+      "archetype": "verifier",
+      "sophistication": 3,
+      "information_sources": [
+        "substack_free",
+        "fundamentals"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "model portfolio names",
+          "verify + fundamentals check"
+        ],
+        "queries_per_session": 9,
+        "session_minutes": 35,
+        "ticks_per_session": 8
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 530843222963469270,
+      "description": "Verifies the newsletter's model portfolio against fundamentals before running cards."
+    },
+    {
+      "id": "free-picks-verifier",
+      "name": "Free-picks verifier",
+      "archetype": "verifier",
+      "sophistication": 2,
+      "information_sources": [
+        "substack_free",
+        "influencers"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "free pick",
+          "cross-check"
+        ],
+        "queries_per_session": 10,
+        "session_minutes": 22,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 3,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 428875261757012281,
+      "description": "Collects free picks from several sources and cross-verifies them."
+    },
+    {
+      "id": "discord-tip-verifier",
+      "name": "Discord tip verifier",
+      "archetype": "verifier",
+      "sophistication": 2,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "tip",
+          "verify via cards"
+        ],
+        "queries_per_session": 9,
+        "session_minutes": 18,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 4,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 89376897453543719,
+      "description": "Verifies tips from free Discord communities; posts about verification results."
+    },
+    {
+      "id": "telegram-signal-verifier",
+      "name": "Telegram signal verifier",
+      "archetype": "verifier",
+      "sophistication": 2,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "signal",
+          "momentum check"
+        ],
+        "queries_per_session": 12,
+        "session_minutes": 15,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 6,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 710490476926243652,
+      "description": "Verifies Telegram signals quickly; high post frequency, momentum-leaning."
+    },
+    {
+      "id": "youtube-pick-verifier",
+      "name": "YouTube pick verifier",
+      "archetype": "verifier",
+      "sophistication": 2,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "video pick",
+          "narrative verify"
+        ],
+        "queries_per_session": 7,
+        "session_minutes": 25,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 1125080788860975505,
+      "description": "Watches finance YouTube picks and runs narrative verification on them."
+    },
+    {
+      "id": "newsletter-pairs-verifier",
+      "name": "Newsletter pairs verifier",
+      "archetype": "verifier",
+      "sophistication": 4,
+      "information_sources": [
+        "substack_free",
+        "fundamentals"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "newsletter pair idea",
+          "verify spread"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 40,
+        "ticks_per_session": 10
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 66400563721226276,
+      "description": "Specializes in verifying newsletter pair ideas with longer, fundamentals-backed sessions."
+    },
+    {
+      "id": "influencer-miner",
+      "name": "Influencer miner",
+      "archetype": "miner",
+      "sophistication": 2,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "influencer mention",
+          "mine connections"
+        ],
+        "queries_per_session": 10,
+        "session_minutes": 20,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 5,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 46361825572782401,
+      "description": "Listens to hype finance influencers and mines for cards based on whatever they mention."
+    },
+    {
+      "id": "twitter-hype-miner",
+      "name": "X hype miner",
+      "archetype": "miner",
+      "sophistication": 2,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "hype post",
+          "momentum mine"
+        ],
+        "queries_per_session": 12,
+        "session_minutes": 16,
+        "ticks_per_session": 7
+      },
+      "minting_goal": {
+        "cards_per_week": 5
+      },
+      "sharing_behavior": {
+        "posts_per_week": 8,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 1003325996213361266,
+      "description": "Mines trending finance posts; high minting intent and very high share-post frequency."
+    },
+    {
+      "id": "tiktok-finance-miner",
+      "name": "FinTok miner",
+      "archetype": "miner",
+      "sophistication": 1,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "viral clip ticker"
+        ],
+        "queries_per_session": 14,
+        "session_minutes": 10,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 10,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 700852859546923283,
+      "description": "Chases tickers from viral short-video finance clips; very short sessions, very frequent posting."
+    },
+    {
+      "id": "podcast-miner",
+      "name": "Podcast miner",
+      "archetype": "miner",
+      "sophistication": 3,
+      "information_sources": [
+        "influencers",
+        "substack_free"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "podcast mention",
+          "theme mine"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 35,
+        "ticks_per_session": 8
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 626539777875900190,
+      "description": "Mines themes from finance podcasts during long sessions."
+    },
+    {
+      "id": "streamer-miner",
+      "name": "Streamer miner",
+      "archetype": "miner",
+      "sophistication": 2,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "live stream ticker",
+          "momentum"
+        ],
+        "queries_per_session": 11,
+        "session_minutes": 30,
+        "ticks_per_session": 9
+      },
+      "minting_goal": {
+        "cards_per_week": 5
+      },
+      "sharing_behavior": {
+        "posts_per_week": 6,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 703237454710266817,
+      "description": "Mines tickers called out during live streams; long sessions while the stream runs."
+    },
+    {
+      "id": "influencer-pair-miner",
+      "name": "Influencer pair miner",
+      "archetype": "miner",
+      "sophistication": 3,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "influencer 'pair' claim",
+          "verify pair"
+        ],
+        "queries_per_session": 9,
+        "session_minutes": 28,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 3,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 111190481827184468,
+      "description": "Turns influencer pair claims into actual pairs runs."
+    },
+    {
+      "id": "card-farmer",
+      "name": "Card farmer",
+      "archetype": "farmer",
+      "sophistication": 2,
+      "information_sources": [
+        "random",
+        "screeners"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "easy connection",
+          "mint"
+        ],
+        "queries_per_session": 15,
+        "session_minutes": 25,
+        "ticks_per_session": 8
+      },
+      "minting_goal": {
+        "cards_per_week": 10
+      },
+      "sharing_behavior": {
+        "posts_per_week": 3,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 1097615493560170770,
+      "description": "Likes the cards themselves; researches easy connections to mint as many cards as possible regardless of quality."
+    },
+    {
+      "id": "easy-mint-farmer",
+      "name": "Easy-mint farmer",
+      "archetype": "farmer",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "obvious pair",
+          "mint"
+        ],
+        "queries_per_session": 16,
+        "session_minutes": 20,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 12
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 235628208679691511,
+      "description": "Hunts the most obvious pairs on screeners purely to mint cards; very high weekly minting goal."
+    },
+    {
+      "id": "ghost-farmer",
+      "name": "Ghost-farmer",
+      "archetype": "farmer",
+      "sophistication": 3,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "re-run same spec",
+          "collect ghosts"
+        ],
+        "queries_per_session": 18,
+        "session_minutes": 30,
+        "ticks_per_session": 10
+      },
+      "minting_goal": {
+        "cards_per_week": 15
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 11934125481966228,
+      "description": "Re-runs the same specs to collect numbered ghost cards; highest minting goal in the spec."
+    },
+    {
+      "id": "share-slot-farmer",
+      "name": "Share-slot farmer",
+      "archetype": "farmer",
+      "sophistication": 3,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "mint then share"
+        ],
+        "queries_per_session": 14,
+        "session_minutes": 25,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 10
+      },
+      "sharing_behavior": {
+        "posts_per_week": 20,
+        "verifiable": true
+      },
+      "abuse_flags": [
+        "velocity"
+      ],
+      "deterministic_seed": 464774136422080643,
+      "description": "Mints easy cards and immediately tries to convert shares into vault slots; velocity-flag target."
+    },
+    {
+      "id": "badge-farmer",
+      "name": "Badge-farmer",
+      "archetype": "farmer",
+      "sophistication": 3,
+      "information_sources": [
+        "random",
+        "wsb"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "badge-eligible runs"
+        ],
+        "queries_per_session": 12,
+        "session_minutes": 20,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 8
+      },
+      "sharing_behavior": {
+        "posts_per_week": 5,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 660504535698111696,
+      "description": "Optimizes runs for badge-shaped activity rather than discovery quality."
+    },
+    {
+      "id": "copycat-farmer",
+      "name": "Copycat farmer",
+      "archetype": "farmer",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb",
+        "influencers"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "copy shared card spec"
+        ],
+        "queries_per_session": 13,
+        "session_minutes": 18,
+        "ticks_per_session": 6
+      },
+      "minting_goal": {
+        "cards_per_week": 9
+      },
+      "sharing_behavior": {
+        "posts_per_week": 6,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 865529232614667066,
+      "description": "Copies whatever specs are being shared and mints them; copycat strategy with high minting goal."
+    },
+    {
+      "id": "systematic-quant",
+      "name": "Systematic quant",
+      "archetype": "power_user",
+      "sophistication": 5,
+      "information_sources": [
+        "fundamentals",
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "screened universe",
+          "pairs + lead-lag"
+        ],
+        "queries_per_session": 20,
+        "session_minutes": 90,
+        "ticks_per_session": 20
+      },
+      "minting_goal": {
+        "cards_per_week": 6
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 512542198587355625,
+      "description": "Sophisticated systematic user: screened universe, pairs and lead-lag runs in long sessions, low posting."
+    },
+    {
+      "id": "leadlag-hunter",
+      "name": "Lead-lag hunter",
+      "archetype": "power_user",
+      "sophistication": 4,
+      "information_sources": [
+        "fundamentals",
+        "screeners"
+      ],
+      "strategy": "lead_lag",
+      "search_behavior": {
+        "query_patterns": [
+          "leader candidates",
+          "lag scan"
+        ],
+        "queries_per_session": 16,
+        "session_minutes": 70,
+        "ticks_per_session": 15
+      },
+      "minting_goal": {
+        "cards_per_week": 5
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 638034676745580592,
+      "description": "Hunts lead-lag relationships across a screened universe with long, focused sessions."
+    },
+    {
+      "id": "multifactor-screener",
+      "name": "Multifactor screener",
+      "archetype": "power_user",
+      "sophistication": 4,
+      "information_sources": [
+        "fundamentals",
+        "screeners"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "factor screen",
+          "theme cross"
+        ],
+        "queries_per_session": 18,
+        "session_minutes": 80,
+        "ticks_per_session": 18
+      },
+      "minting_goal": {
+        "cards_per_week": 5
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 91892446197423958,
+      "description": "Combines factor screens with theme analysis; very low sharing."
+    },
+    {
+      "id": "pit-aware-researcher",
+      "name": "PIT-aware researcher",
+      "archetype": "power_user",
+      "sophistication": 5,
+      "information_sources": [
+        "fundamentals"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "filings",
+          "registry-depth check"
+        ],
+        "queries_per_session": 12,
+        "session_minutes": 120,
+        "ticks_per_session": 25
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 916260850901599752,
+      "description": "Reads filings, checks registry depth before running; longest sessions, no sharing."
+    },
+    {
+      "id": "backtest-first",
+      "name": "Backtest-first user",
+      "archetype": "power_user",
+      "sophistication": 4,
+      "information_sources": [
+        "fundamentals",
+        "screeners"
+      ],
+      "strategy": "lead_lag",
+      "search_behavior": {
+        "query_patterns": [
+          "historical scan first"
+        ],
+        "queries_per_session": 15,
+        "session_minutes": 75,
+        "ticks_per_session": 12
+      },
+      "minting_goal": {
+        "cards_per_week": 5
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 708018842848491268,
+      "description": "Always scans history before running live; methodical, low posting."
+    },
+    {
+      "id": "small-universe-specialist",
+      "name": "Small-universe specialist",
+      "archetype": "power_user",
+      "sophistication": 4,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "niche watchlist"
+        ],
+        "queries_per_session": 10,
+        "session_minutes": 60,
+        "ticks_per_session": 8
+      },
+      "minting_goal": {
+        "cards_per_week": 4
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 136490049673451358,
+      "description": "Works a small niche watchlist deeply instead of scanning wide."
+    },
+    {
+      "id": "retest-specialist",
+      "name": "Re-test specialist",
+      "archetype": "power_user",
+      "sophistication": 5,
+      "information_sources": [
+        "fundamentals"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "re-test existing cards"
+        ],
+        "queries_per_session": 14,
+        "session_minutes": 100,
+        "ticks_per_session": 20
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 296370843962375750,
+      "description": "Re-tests existing registry cards rather than discovering new ones; zero sharing."
+    },
+    {
+      "id": "anchored-run-user",
+      "name": "Anchored-run user",
+      "archetype": "power_user",
+      "sophistication": 4,
+      "information_sources": [
+        "fundamentals",
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "locked anchors",
+          "anchored subspace"
+        ],
+        "queries_per_session": 12,
+        "session_minutes": 65,
+        "ticks_per_session": 10
+      },
+      "minting_goal": {
+        "cards_per_week": 5
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 897508211429666209,
+      "description": "Uses anchored run mode: locks anchors and samples the subspace around them."
+    },
+    {
+      "id": "weekend-casual",
+      "name": "Weekend casual",
+      "archetype": "casual",
+      "sophistication": 1,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "weekend browse"
+        ],
+        "queries_per_session": 3,
+        "session_minutes": 20,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 865177231414592566,
+      "description": "Browses on weekends, occasional random runs, minimal minting."
+    },
+    {
+      "id": "lunch-break-casual",
+      "name": "Lunch-break casual",
+      "archetype": "casual",
+      "sophistication": 2,
+      "information_sources": [
+        "r/stocktips"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "quick list scan"
+        ],
+        "queries_per_session": 4,
+        "session_minutes": 15,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 35809026917673984,
+      "description": "Quick lunchtime scan of the tips list; one pairs run occasionally."
+    },
+    {
+      "id": "occasional-explorer",
+      "name": "Occasional explorer",
+      "archetype": "casual",
+      "sophistication": 1,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "random poke"
+        ],
+        "queries_per_session": 3,
+        "session_minutes": 10,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 999283889372440089,
+      "description": "Rarely opens the app; purely random pokes when they do."
+    },
+    {
+      "id": "news-reader-casual",
+      "name": "News-reader casual",
+      "archetype": "casual",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb",
+        "influencers"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "news name",
+          "story run"
+        ],
+        "queries_per_session": 5,
+        "session_minutes": 18,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 2,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 1062680400720758863,
+      "description": "Follows market news casually and runs occasional narrative checks."
+    },
+    {
+      "id": "paper-trader-casual",
+      "name": "Paper-trader casual",
+      "archetype": "casual",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "screener momentum"
+        ],
+        "queries_per_session": 5,
+        "session_minutes": 22,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 647759740396004692,
+      "description": "Paper-trades off screener momentum; small weekly runs."
+    },
+    {
+      "id": "retirement-account-casual",
+      "name": "Retirement-account casual",
+      "archetype": "casual",
+      "sophistication": 3,
+      "information_sources": [
+        "fundamentals"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "holdings review"
+        ],
+        "queries_per_session": 4,
+        "session_minutes": 30,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 899753921361208928,
+      "description": "Reviews long-term holdings occasionally; no minting, no sharing."
+    },
+    {
+      "id": "friend-referred-casual",
+      "name": "Friend-referred casual",
+      "archetype": "casual",
+      "sophistication": 2,
+      "information_sources": [
+        "wsb"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "friend suggestion",
+          "copy"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 16,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 2
+      },
+      "sharing_behavior": {
+        "posts_per_week": 3,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 957663456971980017,
+      "description": "Joined because a friend shared a card; copies suggested specs occasionally."
+    },
+    {
+      "id": "mobile-only-casual",
+      "name": "Mobile-only casual",
+      "archetype": "casual",
+      "sophistication": 1,
+      "information_sources": [
+        "influencers"
+      ],
+      "strategy": "momentum",
+      "search_behavior": {
+        "query_patterns": [
+          "phone scroll",
+          "quick momentum"
+        ],
+        "queries_per_session": 7,
+        "session_minutes": 8,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 4,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 511768249817828686,
+      "description": "Short mobile sessions between other things; posts more than they research."
+    },
+    {
+      "id": "dormant-reactivated",
+      "name": "Dormant reactivated",
+      "archetype": "casual",
+      "sophistication": 2,
+      "information_sources": [
+        "random",
+        "wsb"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "catch-up scan"
+        ],
+        "queries_per_session": 5,
+        "session_minutes": 25,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 1,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 951732922598682061,
+      "description": "Was dormant, reactivated after seeing a post; catches up with a burst of random runs."
+    },
+    {
+      "id": "email-digest-casual",
+      "name": "Email-digest casual",
+      "archetype": "casual",
+      "sophistication": 3,
+      "information_sources": [
+        "substack_free"
+      ],
+      "strategy": "narrative",
+      "search_behavior": {
+        "query_patterns": [
+          "digest picks"
+        ],
+        "queries_per_session": 3,
+        "session_minutes": 25,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 1
+      },
+      "sharing_behavior": {
+        "posts_per_week": 0,
+        "verifiable": true
+      },
+      "abuse_flags": [],
+      "deterministic_seed": 691066841953158516,
+      "description": "Acts only on the email digest; never shares."
+    },
+    {
+      "id": "day-zero-sharer",
+      "name": "Day-zero sharer",
+      "archetype": "abusive",
+      "sophistication": 1,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "share before first run"
+        ],
+        "queries_per_session": 5,
+        "session_minutes": 5,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 30,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "day_zero",
+        "unverifiable_shares"
+      ],
+      "deterministic_seed": 429592136144181754,
+      "description": "Creates an account and immediately tries to share before any completed run; posts are unverifiable. Target: day-zero denial."
+    },
+    {
+      "id": "burner-account-sharer",
+      "name": "Burner sharer",
+      "archetype": "abusive",
+      "sophistication": 1,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "fresh account share"
+        ],
+        "queries_per_session": 4,
+        "session_minutes": 4,
+        "ticks_per_session": 1
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 50,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "day_zero",
+        "unverifiable_shares",
+        "ip_cluster"
+      ],
+      "deterministic_seed": 863011212023185287,
+      "description": "Burner accounts created and used the same day to attempt share grants from rotating IPs."
+    },
+    {
+      "id": "device-farm",
+      "name": "Device farm",
+      "archetype": "abusive",
+      "sophistication": 2,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "one account many devices"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 6,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 40,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "multi_device",
+        "velocity",
+        "ip_cluster",
+        "asn_cluster"
+      ],
+      "deterministic_seed": 434407187084792108,
+      "description": "One account driven from dozens of device ids on shared IPs/ASNs to farm share slots. Target: cluster velocity flag."
+    },
+    {
+      "id": "ip-ring",
+      "name": "IP ring",
+      "archetype": "abusive",
+      "sophistication": 2,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "many accounts one IP"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 6,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 40,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "ip_cluster",
+        "asn_cluster",
+        "velocity"
+      ],
+      "deterministic_seed": 961007240888659036,
+      "description": "A ring of accounts all claiming grants from one IP/ASN. Target: >=5 accounts on one device/IP flagged, never granted."
+    },
+    {
+      "id": "vpn-hopper",
+      "name": "VPN hopper",
+      "archetype": "abusive",
+      "sophistication": 2,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "rotating IP share"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 8,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 35,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "ip_cluster",
+        "velocity"
+      ],
+      "deterministic_seed": 210988026891922554,
+      "description": "Rotates exit IPs to dodge per-device rate limits while hammering grants. Target: rate-limit + cluster controls."
+    },
+    {
+      "id": "velocity-hammer",
+      "name": "Velocity hammer",
+      "archetype": "abusive",
+      "sophistication": 2,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "mint fast, share faster"
+        ],
+        "queries_per_session": 20,
+        "session_minutes": 10,
+        "ticks_per_session": 4
+      },
+      "minting_goal": {
+        "cards_per_week": 8
+      },
+      "sharing_behavior": {
+        "posts_per_week": 100,
+        "verifiable": true
+      },
+      "abuse_flags": [
+        "velocity"
+      ],
+      "deterministic_seed": 934695574144470614,
+      "description": "Mints easy cards then hammers share grants far past 3/device/30d. Target: denied_ratelimit."
+    },
+    {
+      "id": "cap-buster",
+      "name": "Cap buster",
+      "archetype": "abusive",
+      "sophistication": 3,
+      "information_sources": [
+        "screeners"
+      ],
+      "strategy": "pairs",
+      "search_behavior": {
+        "query_patterns": [
+          "mint 6+ distinct, share all"
+        ],
+        "queries_per_session": 15,
+        "session_minutes": 15,
+        "ticks_per_session": 5
+      },
+      "minting_goal": {
+        "cards_per_week": 10
+      },
+      "sharing_behavior": {
+        "posts_per_week": 60,
+        "verifiable": true
+      },
+      "abuse_flags": [
+        "cap_buster",
+        "velocity"
+      ],
+      "deterministic_seed": 392630351290883493,
+      "description": "Mints more distinct cards than the +5 slot cap allows and shares each with a fresh device. Target: cap refusal at 6th."
+    },
+    {
+      "id": "duplicate-sharer",
+      "name": "Duplicate re-sharer",
+      "archetype": "abusive",
+      "sophistication": 2,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "re-share same card"
+        ],
+        "queries_per_session": 8,
+        "session_minutes": 8,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 3
+      },
+      "sharing_behavior": {
+        "posts_per_week": 25,
+        "verifiable": true
+      },
+      "abuse_flags": [
+        "duplicate_shares"
+      ],
+      "deterministic_seed": 1051256517895207586,
+      "description": "Re-shares the same card from new post URLs to try to stack slots. Target: one slot per (account, card)."
+    },
+    {
+      "id": "unverifiable-poster",
+      "name": "Unverifiable poster",
+      "archetype": "abusive",
+      "sophistication": 2,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "post without link/tag"
+        ],
+        "queries_per_session": 6,
+        "session_minutes": 6,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 60,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "unverifiable_shares"
+      ],
+      "deterministic_seed": 955603486446269225,
+      "description": "Posts shares whose content fails live-post verification (no card link / no attribution tag). Target: grant must NOT fire."
+    },
+    {
+      "id": "screenshot-poster",
+      "name": "Screenshot poster",
+      "archetype": "abusive",
+      "sophistication": 1,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "screenshot instead of link"
+        ],
+        "queries_per_session": 5,
+        "session_minutes": 5,
+        "ticks_per_session": 1
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 45,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "unverifiable_shares",
+        "day_zero"
+      ],
+      "deterministic_seed": 1115500912375179973,
+      "description": "Shares screenshots instead of public links; nothing verifiable. Target: unverifiable_post denial."
+    },
+    {
+      "id": "honeypot-prober",
+      "name": "Honeypot prober",
+      "archetype": "abusive",
+      "sophistication": 3,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "random",
+      "search_behavior": {
+        "query_patterns": [
+          "probe canary account"
+        ],
+        "queries_per_session": 10,
+        "session_minutes": 10,
+        "ticks_per_session": 2
+      },
+      "minting_goal": {
+        "cards_per_week": 0
+      },
+      "sharing_behavior": {
+        "posts_per_week": 20,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "honeypot_probe",
+        "unverifiable_shares"
+      ],
+      "deterministic_seed": 1048538425995687383,
+      "description": "Deliberately attempts grants against planted canary accounts to detect share-farming services. Target: flagged, never granted."
+    },
+    {
+      "id": "coordinated-farm",
+      "name": "Coordinated share farm",
+      "archetype": "abusive",
+      "sophistication": 3,
+      "information_sources": [
+        "random"
+      ],
+      "strategy": "copycat",
+      "search_behavior": {
+        "query_patterns": [
+          "farm script share"
+        ],
+        "queries_per_session": 12,
+        "session_minutes": 12,
+        "ticks_per_session": 3
+      },
+      "minting_goal": {
+        "cards_per_week": 5
+      },
+      "sharing_behavior": {
+        "posts_per_week": 80,
+        "verifiable": false
+      },
+      "abuse_flags": [
+        "share_farm",
+        "ip_cluster",
+        "asn_cluster",
+        "velocity",
+        "multi_device"
+      ],
+      "deterministic_seed": 121239739947124264,
+      "description": "A coordinated farm: many accounts, shared devices/IPs/ASNs, scripted share posts. Target: the full \u00a74.7 stack at once."
+    }
+  ]
+}
