@@ -360,6 +360,7 @@ def test_engine_run_pairs_yf_source_labels_research(tmp_path):
             rows.append({"date": d, "open": px[t], "high": px[t], "low": px[t],
                          "close": px[t], "adjusted_close": px[t], "volume": 1e6,
                          "dollar_volume": px[t] * 1e6, "symbol": s, "exchange": "US"})
+        # yfinance path writes the BARE yahoo ticker as the parquet name
         wh.write_parquet_atomic(pd.DataFrame(rows), wh.eod_parquet_path(root, "US", s.replace(".US", "")))
     uroot = os.path.join(root, "universe")
     os.makedirs(uroot, exist_ok=True)
@@ -373,6 +374,13 @@ def test_engine_run_pairs_yf_source_labels_research(tmp_path):
     wh.write_parquet_atomic(uni, uni_path)
     wh.write_vintage(root, extra={"built_by": "ingest_yf", "vendor": "yfinance",
                                   "research_grade": True, "scope_id": "research_5y_top2"})
+    # suffixed universe symbols must resolve to the bare-ticker parquet files
+    prices, kept, info = fr.load_price_matrix(root, rng_symbols, "US")
+    assert prices.shape == (120, 2) and kept == rng_symbols and info["loaded"] == 2
+    # bare symbols resolve too (Yahoo-style class shares keep their raw name)
+    prices2, kept2, _ = fr.load_price_matrix(root, ["AAA", "BBB"], "US")
+    assert prices2.shape == (120, 2)
+
     meas = fr.run_pairs(root, uni_path, str(tmp_path / "l.db"), max_pairs=1, formation=30,
                         s2_B=20, measurements_path=str(tmp_path / "m.json"),
                         max_universe=2, source="yf", window="5y")

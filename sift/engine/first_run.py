@@ -111,10 +111,23 @@ def load_price_matrix(warehouse_root: str, symbols: list[str], exchange: str = "
     """Load adjusted_close series for the given symbols from the warehouse,
     aligned on the union of trading dates (inner join on dates present for all
     symbols; missing cells are NaN and masked downstream). Returns
-    (prices T x N, kept_symbols, info)."""
+    (prices T x N, kept_symbols, info).
+
+    Symbols are accepted both bare (``AAPL``) and exchange-suffixed
+    (``AAPL.US``): the EODHD ingest path writes ``AAPL`` parquet files whose
+    ``symbol`` column is ``AAPL.US``, and the yfinance path writes Yahoo-style
+    bare tickers (``AAPL``, ``BRK-B``) whose ``symbol`` column is ``AAPL.US``.
+    Both resolve to the same ``eod/<EX>/<base>.parquet`` file; the lookup
+    strips the ``.EX`` suffix exactly like the EODHD path did, and falls back
+    to the raw name for Yahoo-style class shares (``BRK-B``).
+    """
     frames = {}
+    ex_suffix = f".{exchange.upper()}"
     for sym in symbols:
-        df = wh.read_parquet(wh.eod_parquet_path(warehouse_root, exchange, sym.replace(f".{exchange}", "")))
+        base = sym[:-len(ex_suffix)] if sym.upper().endswith(ex_suffix) else sym
+        df = wh.read_parquet(wh.eod_parquet_path(warehouse_root, exchange, base))
+        if (df is None or df.empty) and base != sym:
+            df = wh.read_parquet(wh.eod_parquet_path(warehouse_root, exchange, sym))
         if df is None or df.empty:
             continue
         s = df.set_index("date")["adjusted_close"].astype(float)
@@ -122,10 +135,26 @@ def load_price_matrix(warehouse_root: str, symbols: list[str], exchange: str = "
     if not frames:
         return np.zeros((0, 0)), [], {"loaded": 0}
     panel = pd.DataFrame(frames).sort_index()
-    # inner-join: only dates where every kept symbol has a bar
-    panel = panel.dropna()
+    # Align on the COMMON trading-date window of the kept symbols: a strict
+    # full-panel dropna() is empty as soon as one of N names IPO'd later (or
+    # has a single missing bar) inside the window, so instead drop the symbols
+    # that do not span the window and inner-join on the dates all remaining
+    # symbols share. Still no look-ahead: only dates every kept symbol has.
+    min_bars = max(2, int(0.5 * panel.shape[0]))
+    counts = panel.count()
+    spanning = counts[counts >= min_bars].index.tolist()
+    if len(spanning) < 2:
+        # fall back to the top-2 by bar count so a degenerate universe still runs
+        spanning = counts.sort_values(ascending=False).index.tolist()[:2]
+    panel = panel[spanning]
+    first_valid = panel.apply(lambda c: c.first_valid_index())
+    last_valid = panel.apply(lambda c: c.last_valid_index())
+    lo, hi = first_valid.max(), last_valid.min()
+    if pd.isna(lo) or pd.isna(hi) or lo > hi:
+        return np.zeros((0, 0)), [], {"loaded": len(frames), "dates": 0}
+    panel = panel.loc[lo:hi].dropna()
     if panel.empty:
-        return np.zeros((0, 0)), [], {"loaded": 0, "dates": 0}
+        return np.zeros((0, 0)), [], {"loaded": len(frames), "dates": 0}
     kept = list(panel.columns)
     return panel.to_numpy(dtype=float), kept, {"loaded": len(frames), "kept": len(kept), "dates": int(panel.shape[0])}
 
