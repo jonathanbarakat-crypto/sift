@@ -79,9 +79,15 @@ data at every tier):
   universe) by average dollar volume over the available window as of
   `--asof`. **No survivorship bias**: names whose series ended before the
   as-of date stay in the ranking/listing with `ended_before_asof` /
-  `delisted` flags and their `last_date`.
+  `delisted` flags and their `last_date`. On a **research-grade** vintage
+  (yfinance/Yahoo) the universe is active-only: `delist_idx_available=False`
+  and the manifest says `survivorship_bias: "BIASED …"` (v3 §4.5/§12.8).
 - `data/warehouse.py` — parquet IO + data-vintage hash (sha256 over all
   warehouse data files).
+- `data/yf_client.py` + `data/ingest_yf.py` — **RESEARCH-ONLY** yfinance
+  (Yahoo) feed, ~5y daily for initial testing; writes `research_grade: true`
+  + `vendor: yfinance` into the vintage. EODHD stays the production vendor —
+  see `docs/research-feeds.md` and `docs/vendor-licensing.md` (pull/26).
 
 ```bash
 python3 -m data.ingest_eodhd --warehouse data/warehouse --max-calls 19
@@ -90,6 +96,9 @@ python3 -m data.ingest_eodhd --exchanges-list-only
 python3 -m data.ingest_eodhd --probe-deep-history AAPL   # expected to fail on free tier
 python3 -m data.universe --warehouse data/warehouse --n 1000 --asof 2026-11-15
 python3 -m pytest tests/ -q
+# research feed (yfinance/Yahoo, RESEARCH-ONLY — never production):
+python3 -m data.ingest_yf --warehouse data/warehouse --period 5y --seed-list sec --top 500 --sleep 1.5
+python3 -m sift.engine.first_run --warehouse data/warehouse --universe data/warehouse/universe/top500_pit_<asof>.parquet --source yf --window 5y
 ```
 
 `data/warehouse/` (raw vendor data + any tokens) is **gitignored** — this
