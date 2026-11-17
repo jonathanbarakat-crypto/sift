@@ -265,7 +265,7 @@ class Vault:
     def add_permanent_slots(self, handle: str, n: int) -> int:
         """Mechanics 6 hook: add permanent (non-transferable) vault slots.
         Capped at +5 total per account; returns the new extra_slots total.
-        Revocation subtracts (see revoke_permanent_slots)."""
+        Revocation subtracts (see remove_permanent_slots / revoke_permanent_slots)."""
         if n < 0:
             raise VaultError("n must be >= 0")
         row = self.con.execute(
@@ -273,6 +273,23 @@ class Vault:
         ).fetchone()
         cur = row["m"]
         new = min(cur + n, 5)
+        self.con.execute(
+            "UPDATE vault_entry SET extra_slots=?, updated_at=? WHERE owner=?",
+            (new, time.time(), handle),
+        )
+        self.con.commit()
+        return new
+
+    def remove_permanent_slots(self, handle: str, n: int) -> int:
+        """Mechanics 6 revocation hook: subtract permanent share slots
+        (one grant revoked -> -1), floored at 0, never negative, never
+        transferable. Returns the new extra_slots total."""
+        if n < 0:
+            raise VaultError("n must be >= 0")
+        row = self.con.execute(
+            "SELECT COALESCE(MAX(extra_slots),0) m FROM vault_entry WHERE owner=?", (handle,)
+        ).fetchone()
+        new = max(row["m"] - n, 0)
         self.con.execute(
             "UPDATE vault_entry SET extra_slots=?, updated_at=? WHERE owner=?",
             (new, time.time(), handle),
