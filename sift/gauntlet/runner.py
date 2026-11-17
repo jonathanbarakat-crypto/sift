@@ -39,9 +39,13 @@ class GauntletRunner:
     """Runs stages S0-S4 against a Ledger. Pure orchestration; all statistics
     live in sift.gauntlet.stats."""
 
-    def __init__(self, ledger: Ledger, seed: int = 0):
+    def __init__(self, ledger: Ledger, seed: int = 0, card_minter=None):
         self.ledger = ledger
         self.seed = seed
+        # v4.1: optional CardMinter (sift.cards.minting). When set, a
+        # validated-green survivor mints exactly one card (flag-gated);
+        # killed/amber trials mint nothing. None keeps v3 behavior.
+        self.card_minter = card_minter
 
     # -- individual stages -------------------------------------------------
     def run_s0(self, trial_id: str, x: np.ndarray, y: np.ndarray,
@@ -328,16 +332,32 @@ class GauntletRunner:
             self.ledger.update_var_stat("registry_depth")
             cls = s5.detail["survivor_class"]
             self.ledger.decide(trial_id, "survivor", cls)
+            card_id = self._maybe_mint_card(trial_id, "survivor", cls)
             return {"trial_id": trial_id, "verdict": "survivor",
                     "survivor_class": cls, "stages": results,
-                    "killed_at": None, "s5": s5.detail}
+                    "killed_at": None, "s5": s5.detail, "card_id": card_id}
 
         self.ledger.decide(trial_id, "survivor", "on-watch-amber")
+        card_id = self._maybe_mint_card(trial_id, "survivor", "on-watch-amber")
         return {"trial_id": trial_id, "verdict": "survivor",
                 "survivor_class": "on-watch-amber", "stages": results,
-                "killed_at": None}
+                "killed_at": None, "card_id": card_id}
+
+    def _maybe_mint_card(self, trial_id: str, verdict: str, survivor_class: str) -> str | None:
+        """v4.1 mechanics 1: mint a card on validated-green survivors only,
+        behind the cards_v4_1 flag. Killed/amber mint nothing. Owner handle:
+        the trial's discoverer; operator sweeps use 'operator'. Returns the
+        read-back-verified card id or None."""
+        if self.card_minter is None:
+            return None
+        handle = self.ledger.con.execute(
+            "SELECT discoverer_handle FROM trial WHERE trial_id=?", (trial_id,)
+        ).fetchone()["discoverer_handle"] or "operator"
+        return self.card_minter.maybe_mint(trial_id, handle, verdict, survivor_class)
 
     def _verdict(self, trial_id: str, results: list[StageResult], killed_at: str) -> dict:
         self.ledger.decide(trial_id, "killed", "none")
+        card_id = self._maybe_mint_card(trial_id, "killed", "none")
         return {"trial_id": trial_id, "verdict": "killed",
-                "survivor_class": "none", "stages": results, "killed_at": killed_at}
+                "survivor_class": "none", "stages": results, "killed_at": killed_at,
+                "card_id": card_id}

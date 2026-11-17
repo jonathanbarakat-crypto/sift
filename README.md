@@ -142,3 +142,15 @@ during the beta.
 6. Scope is a first-class field on every trial; DSR denominators stratify by
    scope and are never pooled across scopes.
 7. Public cards show survival facts only.
+
+## Feature flags (v4.1)
+
+`sift/flags.py` holds server-side flags. `cards_v4_1` wraps the whole v4.1
+card layer (minting, vault, ghosts, card faces, anchored runs,
+share-for-capacity, badges) and defaults **ON for the beta cohort**.
+
+**Kill-switch:** set env `SIFT_CARDS_V4_1=0` (global) or call
+`flags.disable_for_user("cards_v4_1", handle)` (per user). With the flag off
+the gauntlet is unchanged but no cards mint and no new engagement is
+granted; already-minted cards stay readable (append-only) and are never
+destroyed or randomized.
