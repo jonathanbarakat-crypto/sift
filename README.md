@@ -132,8 +132,14 @@ python3 -m unittest discover -s web/api -p "test_*.py" -v
 
 ## Beta
 
-The first beta cohort is 50–100 quantitative traders, invited in waves, free
-during the beta.
+The first phase is a **limited alpha/beta**: an invited-only group of
+**~10–30 users** (n small on purpose — the beta population is the
+measurement instrument; results are reported as counts/ranges/qualitative
+findings, never point estimates). No public signup — the landing page is an
+email-only waitlist — and **no money changes hands** during the beta. ToS
+"not an investment / no resale value" language is live from day one. Full
+plan: `docs/beta-plan.md` (gate-1 measurement definition, small-n reporting
+rules, §8 open-question statuses).
 
 ## Non-negotiables (scope doc v3 §12)
 
