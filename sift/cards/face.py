@@ -52,6 +52,26 @@ def _guard_no_tickers(text: str) -> None:
             raise FaceError(f"rendered face contains a ticker-like token {tok!r} — refused")
 
 
+def _guard_face_artifact(face: dict) -> None:
+    """Leak guard on the serialized face artifact: every string field is
+    guarded. Base64 image payloads (keys ending in `_b64`) are not text —
+    every string DRAWN into the PNG was already guarded at draw time by the
+    renderer — so they are skipped here (base64 alphabet produces accidental
+    ALL-CAPS runs that are not tickers)."""
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if isinstance(v, str) and k.endswith("_b64"):
+                    continue
+                walk(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                walk(v)
+        elif isinstance(o, str):
+            _guard_no_tickers(o)
+    walk(face)
+
+
 class CardFaceRenderer:
     """Server-side renderer of the anonymized public card artifact."""
 
@@ -60,35 +80,52 @@ class CardFaceRenderer:
         self.cards = cards
 
     def render(self, card_id: str, viewer_handle: str,
-               now: float | None = None) -> dict:
+               now: float | None = None, *, with_image: bool = False,
+               diagram: dict | None = None) -> dict:
         """Render the public card face for `viewer_handle`. The artifact is
         watermarked handle+timestamp. Raises FaceError(flag_off) when
         cards_v4_1 is off for the viewer; CardError on unknown/foreign card
         (cards are non-transferable — the face is readable by the owner; for
         a shareable object the same artifact is emitted with the *sharing*
-        handle's watermark, see render_share)."""
+        handle's watermark, see render_share).
+
+        With `with_image=True` the PIL renderer (sift/cards/render.py,
+        server-side only) additionally attaches an optional `image` field
+        (base64 2x + 1x PNG of the anonymized face) built from this face dict
+        plus the per-family `diagram` inputs (anonymized aggregate series
+        only). The JSON artifact is otherwise unchanged; every string drawn
+        into the image passes the same _guard_no_tickers."""
         if not flags.cards_v4_1_enabled(viewer_handle):
             raise FaceError("flag_off: cards_v4_1 is disabled for this account")
         card = self.cards.get_card(card_id)
         now = time.time() if now is None else now
         face = self._build_face(card, watermark_handle=viewer_handle, now=now)
         # leak guard on the serialized artifact (hard rule: no raw tickers)
-        import json
-        _guard_no_tickers(json.dumps(face, default=str))
+        _guard_face_artifact(face)
+        if with_image:
+            from sift.cards.render import attach_card_image
+            face = attach_card_image(face, diagram=diagram)
+            _guard_face_artifact(face)
         return face
 
     def render_share(self, card_id: str, owner_handle: str,
-                     now: float | None = None) -> dict:
+                     now: float | None = None, *, with_image: bool = False,
+                     diagram: dict | None = None) -> dict:
         """The shareable object: same anonymized face, watermarked with the
         OWNER handle + timestamp (the handle that shared it), so a leaked
-        share is traceable to the sharing account."""
+        share is traceable to the sharing account. `with_image` attaches the
+        code-rendered PNG face (server-side PIL, watermarked) as the optional
+        `image` field — the shareable visual artifact."""
         if not flags.cards_v4_1_enabled(owner_handle):
             raise FaceError("flag_off: cards_v4_1 is disabled for this account")
         card = self.cards.assert_owned(card_id, owner_handle)   # non-transferable
         now = time.time() if now is None else now
         face = self._build_face(card, watermark_handle=owner_handle, now=now)
-        import json
-        _guard_no_tickers(json.dumps(face, default=str))
+        _guard_face_artifact(face)
+        if with_image:
+            from sift.cards.render import attach_card_image
+            face = attach_card_image(face, diagram=diagram)
+            _guard_face_artifact(face)
         return face
 
     def _build_face(self, card: Card, watermark_handle: str, now: float) -> dict:
@@ -96,7 +133,10 @@ class CardFaceRenderer:
         s5 = trial_stages.get("s5", {})
         s3 = trial_stages.get("s3", {})
         s2 = trial_stages.get("s2", {})
-        # per-family specifics + gauntlet stats = SURVIVAL FACTS ONLY
+        s0 = trial_stages.get("s0", {})
+        # per-family specifics + gauntlet stats = SURVIVAL FACTS ONLY.
+        # Read strictly from the ledger STAGE ROWS — never from params_json —
+        # so no server-side symbol can reach the face by construction.
         face = {
             "card_id": card.card_id,
             "kind": card.kind,
@@ -106,6 +146,7 @@ class CardFaceRenderer:
             "tier": card.tier,
             "survivor_class": card.survivor_class,
             "sector_aggregate": self._sector_aggregate(card),
+            "specifics": self._family_specifics(card, s0),
             "gauntlet_stats": {
                 "stages_passed": [s for s, r in trial_stages.items() if r["status"] == "pass"],
                 "s2_p_value": s2.get("p_value"),
@@ -139,5 +180,31 @@ class CardFaceRenderer:
             "scope_id": card.scope_id,
         }
 
+    def _family_specifics(self, card: Card, s0: dict) -> dict:
+        """Per-family anonymized specifics (mechanics 4): lead-lag lag /
+        hedge ratio + half-life — numeric survival facts from the S0 stage
+        row only. No symbols, no directions, no P&L."""
+        fam = card.family.lower()
+        spec: dict = {}
+        if "lead" in fam or "lag" in fam:
+            lag = s0.get("lag_days")
+            if lag is not None:
+                spec["lag_days"] = lag
+            xcorr = s0.get("peak_xcorr")
+            if xcorr is not None:
+                spec["peak_xcorr"] = xcorr
+        else:
+            # pairs / hedge / mean-reversion: hedge ratio + half-life
+            beta = s0.get("statistic")          # S0 hedge-ratio estimate
+            if beta is not None:
+                spec["hedge_ratio"] = round(float(beta), 4)
+            hl = s0.get("half_life_days")
+            if hl is not None:
+                spec["half_life_days"] = round(float(hl), 2)
+            if "hedge" not in fam and "duration" not in fam:
+                spec["entry_z"] = 2.0           # pre-registered entry threshold
+        return spec
 
-__all__ = ["CardFaceRenderer", "FaceError", "SECTOR_BUCKETS"]
+
+__all__ = ["CardFaceRenderer", "FaceError", "SECTOR_BUCKETS",
+           "_guard_no_tickers", "_guard_face_artifact"]
