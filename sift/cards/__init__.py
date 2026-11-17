@@ -90,14 +90,23 @@ def spec_hash_of(spec: dict) -> str:
 def _default_secret() -> bytes:
     """Server-side HMAC secret. Env var first (deployment), else a local
     dev secret file (gitignored pattern: *.card-secret), else an ephemeral
-    in-memory secret (dev only — ids won't survive a restart; tests set
-    SIFT_CARD_HMAC_SECRET explicitly). Never logged, never committed."""
+    in-memory secret (dev/test only — ids won't survive a restart, and a
+    loud warning is emitted so production never silently runs on it; tests
+    set SIFT_CARD_HMAC_SECRET explicitly). Never logged, never committed."""
     env = os.environ.get("SIFT_CARD_HMAC_SECRET")
     if env:
         return env.encode()
     path = Path(os.environ.get("SIFT_CARD_HMAC_SECRET_FILE", ".card-hmac-secret"))
     if path.exists():
         return path.read_bytes().strip()
+    if os.environ.get("SIFT_ENV", "dev") == "production":
+        raise RuntimeError(
+            "no card HMAC secret configured in production: set SIFT_CARD_HMAC_SECRET"
+            " or SIFT_CARD_HMAC_SECRET_FILE — refusing to mint with an ephemeral secret"
+        )
+    import sys
+    print("WARNING: sift cards using ephemeral dev HMAC secret "
+          "(set SIFT_CARD_HMAC_SECRET for real deployments)", file=sys.stderr)
     return b"sift-dev-ephemeral-secret-not-for-production"
 
 

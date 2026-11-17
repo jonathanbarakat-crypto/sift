@@ -262,10 +262,15 @@ class Vault:
         """Aggregate registry pool size (discarded cards; never destroyed)."""
         return self.con.execute("SELECT COUNT(*) c FROM registry_pool").fetchone()["c"]
 
-    def add_permanent_slots(self, handle: str, n: int) -> int:
+    def add_permanent_slots(self, handle: str, n: int, actor: str | None = None) -> int:
         """Mechanics 6 hook: add permanent (non-transferable) vault slots.
         Capped at +5 total per account; returns the new extra_slots total.
-        Revocation subtracts (see revoke_permanent_slots)."""
+        Revocation subtracts (see revoke_permanent_slots).
+
+        Flag-gated at this mutating boundary too: the share service calls it
+        with actor=<handle>, and a direct call without an enabled flag for
+        that actor fails closed (VaultError flag_off)."""
+        self._require_flag(actor if actor is not None else handle)
         if n < 0:
             raise VaultError("n must be >= 0")
         row = self.con.execute(
@@ -280,7 +285,8 @@ class Vault:
         self.con.commit()
         return new
 
-    def revoke_permanent_slots(self, handle: str) -> int:
+    def revoke_permanent_slots(self, handle: str, actor: str | None = None) -> int:
+        self._require_flag(actor if actor is not None else handle)
         row = self.con.execute(
             "SELECT COALESCE(MAX(extra_slots),0) m FROM vault_entry WHERE owner=?", (handle,)
         ).fetchone()
