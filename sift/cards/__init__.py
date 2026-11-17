@@ -270,9 +270,12 @@ class CardRegistry:
         return [self._to_card(r) for r in rows]
 
     def ghosts_for_spec(self, spec_hash: str) -> list[Card]:
-        """Ghost cards for one canonical spec, FIFO order (mechanics 3)."""
+        """ACTIVE ghost cards for one canonical spec, FIFO order (mechanics
+        3). Ghosts discarded from the FIFO carry ghost_no<=0 and are excluded
+        here (they remain in the registry pool, never destroyed)."""
         rows = self.con.execute(
-            "SELECT * FROM card WHERE spec_hash=? AND kind='ghost' ORDER BY ghost_no",
+            "SELECT * FROM card WHERE spec_hash=? AND kind='ghost' AND ghost_no>0"
+            " ORDER BY ghost_no",
             (spec_hash,),
         ).fetchall()
         return [self._to_card(r) for r in rows]
