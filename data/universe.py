@@ -42,9 +42,25 @@ else:
 DEFAULT_WAREHOUSE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "data", "warehouse")
 
+RESEARCH_VENDORS = {"yfinance", "yf", "yahoo"}
+
 
 def log(msg: str) -> None:
     print(f"[universe {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {msg}", flush=True)
+
+
+def vintage_is_research(root: str) -> tuple[bool, dict]:
+    """Read vintage.json and report whether this warehouse is a RESEARCH-grade
+    vintage (e.g. yfinance/Yahoo — vendor 'yfinance', research_grade=true).
+
+    Research vendors have NO delisted-name list, so the universe built from
+    them is ACTIVE-ONLY and survivorship-biased by construction (v3 §4.5/§12.8).
+    Returns (is_research, vintage_record).
+    """
+    rec = wh.read_json(os.path.join(root, wh.VINTAGE_JSON)) or {}
+    vendor = str(rec.get("vendor", "")).lower()
+    is_research = bool(rec.get("research_grade")) or vendor in RESEARCH_VENDORS
+    return is_research, rec
 
 
 def load_all_bars(root: str) -> pd.DataFrame:
@@ -63,26 +79,31 @@ def load_all_bars(root: str) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
-def build_ranked_table(bars: pd.DataFrame, asof: str) -> pd.DataFrame:
+def build_ranked_table(bars: pd.DataFrame, asof: str,
+                       research_grade: bool = False) -> pd.DataFrame:
     """Point-in-time ranking as of ``asof`` (YYYY-MM-DD).
 
     Uses only bars with date <= asof. Average dollar volume = mean(close*volume)
     over the available window up to asof. Symbols whose last bar is before
     asof are kept (no survivorship bias) and flagged.
+
+    ``research_grade=True`` (yfinance/Yahoo vintage): the vendor has NO
+    delisted list, so the ingested universe is ACTIVE-ONLY — every ranked
+    row gets ``delist_idx_available=False`` and the manifest must say the
+    ranking is survivorship-biased (v3 §4.5/§12.8). The ``delisted`` column
+    then means only "series ended before asof", NOT "known delisting".
     """
+    cols = [
+        "symbol", "exchange", "avg_dollar_volume", "bars", "first_date", "last_date",
+        "asof", "ended_before_asof", "delisted", "delist_idx_available", "rank",
+    ]
     if bars.empty:
-        return pd.DataFrame(columns=[
-            "symbol", "exchange", "avg_dollar_volume", "bars", "first_date", "last_date",
-            "asof", "ended_before_asof", "delisted", "rank",
-        ])
+        return pd.DataFrame(columns=cols)
     df = bars.copy()
     df["date"] = pd.to_datetime(df["date"]).dt.date
     df = df[df["date"] <= date.fromisoformat(asof)]
     if df.empty:
-        return pd.DataFrame(columns=[
-            "symbol", "exchange", "avg_dollar_volume", "bars", "first_date", "last_date",
-            "asof", "ended_before_asof", "delisted", "rank",
-        ])
+        return pd.DataFrame(columns=cols)
     grp = df.groupby(["symbol", "exchange"], sort=True)
     out = grp.agg(
         avg_dollar_volume=("dollar_volume", "mean"),
@@ -96,6 +117,11 @@ def build_ranked_table(bars: pd.DataFrame, asof: str) -> pd.DataFrame:
     # "series simply ends" — flag honestly rather than inventing a delist date;
     # delisted names from a paid delisted=1 list would populate delisted_at.
     out["delisted"] = out["ended_before_asof"]
+    # v3 §4.5/§12.8: on a research-grade (yfinance) vintage there is NO delisted
+    # list at all, so a delist index for the S5 delist-mask logic is UNAVAILABLE —
+    # record that explicitly instead of silently treating the data as
+    # survivorship-free. On production vintages with a delisted=1 list this is True.
+    out["delist_idx_available"] = not research_grade
     out = out.sort_values("avg_dollar_volume", ascending=False).reset_index(drop=True)
     out.insert(0, "rank", range(1, len(out) + 1))
     return out
@@ -120,11 +146,17 @@ def main(argv: list | None = None) -> int:
 
     root = os.path.abspath(args.warehouse)
     asof = args.asof or date.today().isoformat()
+    research, vrec = vintage_is_research(root)
+    if research:
+        log(f"RESEARCH-GRADE vintage detected (vendor={vrec.get('vendor')!r}, "
+            f"research_grade={vrec.get('research_grade')}) — the source vendor has NO "
+            f"delisted list: this universe is ACTIVE-ONLY and survivorship-biased "
+            f"(v3 §4.5/§12.8). delist_idx is marked UNAVAILABLE for the S5 delist-mask.")
     log(f"loading bars from {root}/eod …")
     bars = load_all_bars(root)
     log(f"loaded {len(bars)} bars, {bars['symbol'].nunique() if not bars.empty else 0} symbols")
 
-    ranked = build_ranked_table(bars, asof)
+    ranked = build_ranked_table(bars, asof, research_grade=research)
     ranked = ranked[ranked["bars"] >= args.min_bars].copy()
     if "rank" in ranked.columns:
         ranked = ranked.drop(columns=["rank"])
@@ -140,6 +172,20 @@ def main(argv: list | None = None) -> int:
 
     n_ended = int(ranked["ended_before_asof"].sum())
     n_ended_top = int(top["ended_before_asof"].sum())
+    if research:
+        survivorship = (
+            "BIASED — research-grade vintage (vendor has no delisted list): the "
+            "ingested universe is active-only, so names delisted inside the window "
+            "are absent entirely (v3 §4.5/§12.8). delist_idx unavailable for the "
+            "S5 delist-mask: research-vintage trials must NOT claim survivorship-free "
+            "S5 registry depth."
+        )
+        window_note = (f"research-grade vintage vendor={vrec.get('vendor')!r} "
+                       f"scope={vrec.get('scope_id')!r} period={vrec.get('period')!r}")
+    else:
+        survivorship = ("none — names whose series ended before asof stay in the "
+                        "ranking with ended_before_asof/delisted flags and their last_date")
+        window_note = ("free tier: past-1-year EOD only; deep-history ranking needs a paid plan")
     manifest = {
         "asof": asof,
         "n": args.n,
@@ -149,13 +195,17 @@ def main(argv: list | None = None) -> int:
         "symbols_ranked": int(len(ranked)),
         "symbols_ended_before_asof": n_ended,
         "top_n_contains_ended_names": n_ended_top,
-        "survivorship_bias": "none — names whose series ended before asof stay in the "
-                             "ranking with ended_before_asof/delisted flags and their last_date",
-        "window_note": "free tier: past-1-year EOD only; deep-history ranking needs a paid plan",
+        "research_grade": research,
+        "vendor": vrec.get("vendor"),
+        "delist_idx_available": not research,
+        "survivorship_bias": survivorship,
+        "window_note": window_note,
         "built_utc": datetime.now(timezone.utc).isoformat(),
     }
     wh.write_json_atomic(manifest, os.path.join(uroot, "manifest.json"))
-    rec = wh.write_vintage(root, extra={"built_by": "universe", "universe": manifest})
+    rec = wh.write_vintage(root, extra={"built_by": "universe", "universe": manifest,
+                                       **({"vendor": vrec.get("vendor"),
+                                           "research_grade": True} if research else {})})
 
     log(f"ranked {len(ranked)} symbols as of {asof} ({n_ended} ended before asof — kept, flagged); "
         f"top {len(top)} written ({n_ended_top} ended names inside top-N)")

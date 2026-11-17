@@ -60,6 +60,43 @@ SCOPE_ID = "free_1y_top1k"
 FAMILY = "pairs"
 ENGINE_VERSION = "gate1-build5/8-first-run"
 
+# data-source -> (vendor label, research_grade). EODHD is the production
+# vendor; yfinance/Yahoo is RESEARCH-ONLY (docs/vendor-licensing.md pull/26,
+# docs/research-feeds.md): no ToS authorization for production redistribution,
+# no delisted lists (survivorship-biased), no SLA.
+SOURCES = {
+    "eodhd": {"vendor": "eodhd", "research_grade": False, "default_scope": "free_1y_top1k"},
+    "yf": {"vendor": "yfinance", "research_grade": True, "default_scope": None},
+}
+RESEARCH_SCOPE_PREFIX = "research_"
+
+
+def _kfmt(n: int) -> str:
+    return f"{n//1000}k" if n >= 1000 else str(n)
+
+
+def scope_id_for_source(source: str, window: str, top_n: int | None = None) -> str:
+    """Derive the honest scope id from source + window.
+
+    Production EODHD keeps its registered production scope ids
+    (``free_1y_top1k``). A research source (yf/yfinance) MUST get a
+    ``research_``-prefixed id (e.g. ``research_5y_top1k``) so a trial can
+    never be mislabeled as production scope (``free_1y_top1k``/``pro_full``).
+    """
+    spec = SOURCES.get(source)
+    if spec is None:
+        raise ValueError(f"unknown --source {source!r}; expected one of {sorted(SOURCES)}")
+    if not spec["research_grade"]:
+        return spec["default_scope"]
+    tag = window
+    if top_n:
+        tag += f"_top{_kfmt(top_n)}"
+    return f"{RESEARCH_SCOPE_PREFIX}{tag}"
+
+
+def source_is_research(source: str) -> bool:
+    return bool(SOURCES.get(source, {}).get("research_grade"))
+
 
 def log(msg: str) -> None:
     print(f"[first_run {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {msg}", flush=True)
@@ -117,14 +154,15 @@ def pair_series(prices: np.ndarray, i: int, j: int, formation: int) -> dict:
             "spread": spread, "spread_returns": rs, "net": wf["net"]}
 
 
-def register_trial(ledger: Ledger, params: dict, vintage: str, provenance: str = "operator_sweep") -> tuple:
+def register_trial(ledger: Ledger, params: dict, vintage: str, provenance: str = "operator_sweep",
+                   scope_id: str = SCOPE_ID) -> tuple:
     """Register BEFORE any computation (v3 section 5). Returns (trial, cached: bool)."""
     existing = ledger.con.execute(
         "SELECT trial_id FROM trial WHERE family=? AND scope_id=? AND config_hash=? AND data_vintage_hash=?",
-        (FAMILY, SCOPE_ID, __import__("sift.registry", fromlist=["config_hash_of"]).config_hash_of(params), vintage),
+        (FAMILY, scope_id, __import__("sift.registry", fromlist=["config_hash_of"]).config_hash_of(params), vintage),
     ).fetchone()
     t0 = time.perf_counter()
-    trial = ledger.register(FAMILY, SCOPE_ID, params, vintage, provenance=provenance,
+    trial = ledger.register(FAMILY, scope_id, params, vintage, provenance=provenance,
                             engine_version=ENGINE_VERSION, discoverer_handle="operator")
     dt = time.perf_counter() - t0
     return trial, (existing is not None), dt
@@ -132,10 +170,14 @@ def register_trial(ledger: Ledger, params: dict, vintage: str, provenance: str =
 
 def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
               max_pairs: int, formation: int, s2_B: int, measurements_path: str,
-              exchange: str = "US", max_universe: int = 1000) -> dict:
+              exchange: str = "US", max_universe: int = 1000,
+              source: str = "eodhd", window: str = "1y") -> dict:
     t_start = time.perf_counter()
     vintage = wh.read_vintage(warehouse_root) or "no-vintage"
-    log(f"data vintage: {vintage[:16]}…  scope={SCOPE_ID} family={FAMILY}")
+    scope_id = scope_id_for_source(source, window, top_n=max_universe if source != "eodhd" else None)
+    research = source_is_research(source)
+    log(f"data vintage: {vintage[:16]}…  scope={scope_id} family={FAMILY} source={source}"
+        + ("  [RESEARCH-GRADE: yfinance/Yahoo — not production data]" if research else ""))
 
     uni = pd.read_parquet(universe_path)
     symbols = [s for s in uni["symbol"].tolist()][:max_universe]
@@ -175,8 +217,8 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     for k, (i, j) in enumerate(cand):
         si, sj = kept[i], kept[j]
         params = {"pair": [si, sj], "formation": formation, "s2_B": s2_B,
-                  "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": SCOPE_ID}
-        trial, cached, reg_dt = register_trial(ledger, params, vintage)
+                  "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": scope_id}
+        trial, cached, reg_dt = register_trial(ledger, params, vintage, scope_id=scope_id)
         t0 = time.perf_counter()
         if cached:
             # skip-list hit: identical trial already registered+run — no compute
@@ -202,7 +244,7 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
             perm_series=ps["spread_returns"][1:],
             perm_statistic_fn=stats.mean_reversion_stat,
             prices=prices[:, [i, j]],
-            scope_id=SCOPE_ID,
+            scope_id=scope_id,
             s2_B=s2_B,
         )
         dt = time.perf_counter() - t0 + reg_dt
@@ -225,14 +267,15 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     t0 = time.perf_counter()
     for r in rows:
         params = {"pair": r["pair"], "formation": formation, "s2_B": s2_B,
-                  "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": SCOPE_ID}
-        register_trial(ledger, params, vintage)
+                  "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": scope_id}
+        register_trial(ledger, params, vintage, scope_id=scope_id)
     cached_rereg_s = time.perf_counter() - t0
 
     calls_after = json.load(open(calls_state)).get("calls_today", calls_before) if os.path.exists(calls_state) else calls_before
     summary = ledger_summary(ledger)
     meas = {
-        "scope": SCOPE_ID, "family": FAMILY, "data_vintage": vintage,
+        "scope": scope_id, "family": FAMILY, "data_vintage": vintage,
+        "source": source, "research_grade": research,
         "window_bars": int(prices.shape[0]), "universe_size": int(prices.shape[1]),
         "n_pairs": len(cand),
         "wall_clock_total_s": t_total,
@@ -251,8 +294,14 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
         "ledger": summary,
         "rows": rows,
         "ran_utc": datetime.now(timezone.utc).isoformat(),
-        "note": "free tier covers ~last 1y EOD only; scope labeled free_1y_top1k, NOT 5y. "
-                "S5 registry_depth needs full-window data (paid tier) — s5 rows stay pending here.",
+        "note": ("S5 registry_depth needs the production full-window feed — s5 rows stay "
+                 "pending/amber on any non-production vintage (free EODHD 1y OR yfinance "
+                 "research 5y). "
+                 + ("This run is RESEARCH-GRADE (yfinance/Yahoo): active-only universe, "
+                    "survivorship-biased, delist_idx unavailable, scope "
+                    f"{scope_id} — never labeled free_1y_top1k/pro_full."
+                    if research else
+                    "free tier covers ~last 1y EOD only; scope labeled free_1y_top1k, NOT 5y.")),
     }
     os.makedirs(os.path.dirname(measurements_path), exist_ok=True)
     with open(measurements_path, "w") as f:
@@ -288,9 +337,16 @@ def main(argv=None) -> int:
     ap.add_argument("--max-universe", type=int, default=1000)
     ap.add_argument("--formation", type=int, default=60)
     ap.add_argument("--s2-B", type=int, default=cfg.S2_B)
+    ap.add_argument("--source", default="eodhd", choices=sorted(SOURCES),
+                    help="data source: 'eodhd' (production vendor, default) or 'yf' "
+                         "(yfinance/Yahoo RESEARCH-ONLY — scope id gets a research_ prefix)")
+    ap.add_argument("--window", default="1y",
+                    help="window tag used to derive the scope id for research sources "
+                         "(e.g. '5y' -> research_5y_top<N>; default '1y'; ignored for eodhd)")
     args = ap.parse_args(argv)
     run_pairs(args.warehouse, args.universe, args.ledger, args.max_pairs,
-              args.formation, args.s2_B, args.measurements, max_universe=args.max_universe)
+              args.formation, args.s2_B, args.measurements, max_universe=args.max_universe,
+              source=args.source, window=args.window)
     return 0
 
 

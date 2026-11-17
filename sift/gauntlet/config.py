@@ -16,6 +16,11 @@ SCOPE_T = {
     "free_5y_top1k": 1260,     # trailing 5 years, ~1260 daily bars
     "pro_full": 4032,          # full history 2010-01-01..2025-12-31
     "registry_depth": 4032,    # S5 validation scope (same data as pro_full)
+    # RESEARCH-only scope (yfinance/Yahoo 5y feed, task t_bb9ebe51): same ~5y
+    # bar count as free_5y_top1k but a DIFFERENT vendor with no delisted list
+    # — the research_ prefix makes it impossible to confuse with production
+    # scopes; S4's hurdle matches the 5y window.
+    "research_5y_top1k": 1260,
 }
 
 # S5 registry-depth validation (v3 §8.1-§8.4, design doc §2 S5 / §3.2):
@@ -60,10 +65,20 @@ COSTS = {
 
 
 def tau_cal(scope_id: str) -> float:
-    """Scope-matched t hurdle for S4: tau_cal ~ 3.5 for the 5-yr free scope,
-    3.0 at full depth (design doc §3.2 table)."""
-    return S4_T_NET_5Y if scope_id == "free_5y_top1k" else S4_T_NET_FULL
+    """Scope-matched t hurdle for S4: tau_cal ~ 3.5 for a 5-yr scope,
+    3.0 at full depth (design doc §3.2 table). Research-grade 5y scopes
+    (``research_*``) share the 5y hurdle but are never production scopes."""
+    if scope_id == "free_5y_top1k" or scope_id.startswith("research_"):
+        return S4_T_NET_5Y
+    return S4_T_NET_FULL
 
 
 def scope_T(scope_id: str) -> int:
+    if scope_id in SCOPE_T:
+        return SCOPE_T[scope_id]
+    # research_* scopes carry their window in the id (research_5y_top500 -> 5y);
+    # fall back to the 5y bar count so S5/scope_T never crash on a research id,
+    # while the research_ prefix keeps it clearly non-production.
+    if scope_id.startswith("research_"):
+        return SCOPE_T["research_5y_top1k"]
     return SCOPE_T[scope_id]
