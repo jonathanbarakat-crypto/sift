@@ -7,7 +7,7 @@ Fixtures:
 - F-REGIME (edge only in years 0-7) -> on-watch-amber -> mints NOTHING.
 - F-NULL / killed trial -> mints NOTHING.
 - flag OFF -> validated-green mints nothing (kill-switch), no rows written.
-- tier from pre-registered stats only; decay downgrade-only; cards
+- tier from pre-registered stats only; decay() down-only primitive; cards
   non-transferable (assert_owned raises on a foreign handle).
 """
 

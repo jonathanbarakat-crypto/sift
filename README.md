@@ -180,8 +180,19 @@ card layer and defaults **ON for the beta cohort**:
   P&L/win-rate/directional payload
 - `sift/cards/notify.py` — per-card opt-in hit notifications; free tier
   defaults to a rate-capped digest, paid may go live; signals-only
-- `sift/cards/decay.py` — registry re-evaluation job: downgrade-ONLY tier
-  transitions (amber on decay), publicly explained, notification hook
+- `sift/cards/decay.py` — registry re-evaluation job: BIDIRECTIONAL tiers.
+  Downgrades (amber) still happen any time from registry evidence; upgrades
+  fire ONLY through pre-registered live-window rules (card age > 12m so the
+  trailing window is fully out-of-sample, two consecutive annual windows at
+  the mint-time bar — DSR >= 0.99 AND |t_net| >= 4.0 AND p_perm <= 0.01 for
+  silver->gold, DSR >= 0.95 AND |t_net| >= 3.0 for bronze->silver — max one
+  tier change per card per 90 days, seeded PCG64 re-evaluation, append-only
+  `card_upgrade` ledger event with evidence), publicly explained, never by
+  payment or chance; notification hook
+- `sift/engine/first_run.py` — `--holdout-bars N` (default 252) locks the
+  most recent N trading days out of S0–S4 discovery/walk-forward;
+  survivors are evaluated once on that frozen holdout (the mint-time
+  live-baseline stored on the card); the holdout is never used for tuning
 - `sift/cards/metrics.py` — gate-1 metric hooks (instrumentation stubs over
   the server-side stores until the event-store measurement pipeline lands):
   D90 retention split card-holders vs non, ghost ratio, vault turnover,
@@ -207,7 +218,8 @@ and are never sellable — no money changes hands; there is **no P&L, no win
 rates, no directional calls, no market language** anywhere in card content
 (the face renderer and the badge guard fail closed on any such token);
 there is **no randomness for sale** (no lotteries, no paid random draws —
-decay is downgrade-only and never re-randomizes); and there is **no
-marketplace** (cards and slots cannot be bought, sold, or traded).
+tier changes happen only through the pre-registered registry rules and never
+re-randomize); and there is **no marketplace** (cards and slots cannot be
+bought, sold, or traded).
 
 ## Non-negotiables (scope doc v3 §12)

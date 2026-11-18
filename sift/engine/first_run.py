@@ -24,6 +24,12 @@ server, scope is labeled honestly, 'SIFT does not trade'.
 Usage:
     python3 -m sift.engine.first_run --warehouse <path> --universe <topN parquet>
         --ledger trials/ledger.db --max-pairs 2000 --measurements trials/first-run.json
+        [--holdout-bars 252]
+
+`--holdout-bars N` (default 252) locks the most recent N trading days out of
+S0-S4 discovery/walk-forward; survivors are evaluated once on that frozen
+holdout (the mint-time live-baseline stored on the card). The holdout is
+never used for tuning.
 """
 from __future__ import annotations
 
@@ -200,7 +206,8 @@ def register_trial(ledger: Ledger, params: dict, vintage: str, provenance: str =
 def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
               max_pairs: int, formation: int, s2_B: int, measurements_path: str,
               exchange: str = "US", max_universe: int = 1000,
-              source: str = "eodhd", window: str = "1y") -> dict:
+              source: str = "eodhd", window: str = "1y",
+              holdout_bars: int = 0) -> dict:
     t_start = time.perf_counter()
     vintage = wh.read_vintage(warehouse_root) or "no-vintage"
     scope_id = scope_id_for_source(source, window, top_n=max_universe if source != "eodhd" else None)
@@ -217,8 +224,34 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     if prices.shape[1] < 2:
         raise SystemExit("need at least 2 symbols with overlapping bars")
 
-    rets = np.zeros_like(prices)
-    rets[1:] = np.diff(np.log(prices), axis=0)
+    # -- 12m HOLDOUT (locked, never used for tuning) --------------------------
+    # `--holdout-bars N` locks the most recent N trading days out of the
+    # S0-S4 discovery/walk-forward window: discovery + walk-forward run on
+    # prices[:T-N] only. Survivors are then evaluated ONCE on the frozen
+    # holdout prices[T-N:] — that single frozen-holdout evaluation is the
+    # mint-time live-baseline stored on the card. The holdout is NEVER used
+    # for tuning, screening, or threshold selection (owner decision
+    # 2026-11-17); it only measures survivors after they are chosen.
+    holdout_start = None
+    holdout = None
+    if holdout_bars and holdout_bars > 0:
+        if holdout_bars >= prices.shape[0] - formation - 2:
+            raise SystemExit(
+                f"--holdout-bars {holdout_bars} leaves too little discovery window "
+                f"({prices.shape[0]} bars, formation {formation})"
+            )
+        holdout_start = prices.shape[0] - holdout_bars
+        holdout = prices[holdout_start:]
+        discovery_prices = prices[:holdout_start]
+        log(f"holdout locked: last {holdout_bars} bars frozen out of discovery/"
+            f"walk-forward (discovery window {discovery_prices.shape[0]} bars, "
+            f"holdout {holdout.shape[0]} bars) — holdout is evaluation-only, "
+            f"never used for tuning")
+    else:
+        discovery_prices = prices
+
+    rets = np.zeros_like(discovery_prices)
+    rets[1:] = np.diff(np.log(discovery_prices), axis=0)
     corr = corr_matrix(rets[1:])
     n = corr.shape[0]
     corr_bytes = n * n * 8
@@ -243,10 +276,15 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     unique_t, cached_t = [], []
     unique_cost_calls, cached_cost_calls = [], []
     rows = []
+    holdout_rows = []
     for k, (i, j) in enumerate(cand):
         si, sj = kept[i], kept[j]
         params = {"pair": [si, sj], "formation": formation, "s2_B": s2_B,
                   "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": scope_id}
+        if holdout_start is not None:
+            # the skip-list key carries the holdout so a holdout run can never
+            # collide with a full-window run of the same pair
+            params["holdout_bars"] = int(holdout_bars)
         trial, cached, reg_dt = register_trial(ledger, params, vintage, scope_id=scope_id)
         t0 = time.perf_counter()
         if cached:
@@ -257,7 +295,7 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
                          "wall_s": cached_t[-1], "calls": 0.0,
                          "verdict": ledger.get(trial.trial_id).verdict})
             continue
-        ps = pair_series(prices, i, j, formation)
+        ps = pair_series(discovery_prices, i, j, formation)
         # S0 harness calibration on real data: the harness must recover the
         # pair's own OLS hedge computed on LEVELS (the convention S0's
         # ols_hedge_ratio asserts on), so beta_true = beta_levels; the spread
@@ -266,13 +304,13 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
         _, hl_hat = stats.estimate_ar1(ps["spread"])
         res = runner.run_gauntlet(
             trial.trial_id,
-            fixture_x=prices[:, i], fixture_y=prices[:, j],
+            fixture_x=discovery_prices[:, i], fixture_y=discovery_prices[:, j],
             beta_true=ps["beta_levels"], half_life_true=hl_hat if math.isfinite(hl_hat) else 1e9,
             fixture_spread=ps["spread"],
             excess_returns=ps["spread_returns"][1:],
             perm_series=ps["spread_returns"][1:],
             perm_statistic_fn=stats.mean_reversion_stat,
-            prices=prices[:, [i, j]],
+            prices=discovery_prices[:, [i, j]],
             scope_id=scope_id,
             s2_B=s2_B,
         )
@@ -287,6 +325,31 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
                      "verdict": v["verdict"], "survivor_class": v["survivor_class"],
                      "killed_at": v.get("killed_at"),
                      "stages": {s.stage: s.status for s in v["stages"]}})
+        # -- frozen-holdout evaluation of survivors (ONCE, evaluation only) --
+        # The holdout bars never entered S0-S4 discovery/walk-forward above.
+        # A survivor is measured exactly once on the frozen holdout; that
+        # frozen-holdout result is the mint-time live-baseline stored on the
+        # card. The holdout is never used for tuning (no threshold, screen,
+        # or selection reads it).
+        if holdout is not None and v["verdict"] == "survivor":
+            ps_h = pair_series(holdout, i, j, min(formation, holdout.shape[0] // 2))
+            wf_h = stats.walk_forward_returns(holdout[:, [i, j]],
+                                              formation=min(formation, holdout.shape[0] // 2))
+            net_h = wf_h["net"]
+            net_h = net_h[np.isfinite(net_h)]
+            t_net_h = stats.t_stat_sharpe(net_h) if net_h.size >= 2 else None
+            sr_ann_h = stats.sharpe_ratio(net_h) if net_h.size >= 2 else None
+            holdout_rows.append({
+                "pair": [si, sj], "trial_id": trial.trial_id,
+                "holdout_bars": int(holdout_bars),
+                "holdout_start_bar": int(holdout_start),
+                "holdout_net_bars": int(net_h.size),
+                "holdout_t_net": t_net_h,
+                "holdout_sr_ann": sr_ann_h,
+                "survivor_class": v["survivor_class"],
+                "note": "frozen-holdout evaluation of a survivor — mint-time "
+                        "live-baseline; the holdout was never used for tuning",
+            })
         if (k + 1) % 50 == 0:
             log(f"  {k+1}/{len(cand)} pairs done | unique mean {np.mean(unique_t):.3f}s | "
                 f"cached mean {np.mean(cached_t) if cached_t else 0:.5f}s | peak RSS {peak_rss_bytes()/1e9:.2f} GB")
@@ -297,6 +360,8 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     for r in rows:
         params = {"pair": r["pair"], "formation": formation, "s2_B": s2_B,
                   "open_z": 2.0, "close_z": 0.5, "family": FAMILY, "scope": scope_id}
+        if holdout_start is not None:
+            params["holdout_bars"] = int(holdout_bars)
         register_trial(ledger, params, vintage, scope_id=scope_id)
     cached_rereg_s = time.perf_counter() - t0
 
@@ -306,6 +371,10 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
         "scope": scope_id, "family": FAMILY, "data_vintage": vintage,
         "source": source, "research_grade": research,
         "window_bars": int(prices.shape[0]), "universe_size": int(prices.shape[1]),
+        "discovery_bars": int(discovery_prices.shape[0]),
+        "holdout_bars": int(holdout_bars) if holdout_start is not None else 0,
+        "holdout_start_bar": int(holdout_start) if holdout_start is not None else None,
+        "holdout_rows": holdout_rows,
         "n_pairs": len(cand),
         "wall_clock_total_s": t_total,
         "unique_trials": len(unique_t),
@@ -372,10 +441,18 @@ def main(argv=None) -> int:
     ap.add_argument("--window", default="1y",
                     help="window tag used to derive the scope id for research sources "
                          "(e.g. '5y' -> research_5y_top<N>; default '1y'; ignored for eodhd)")
+    ap.add_argument("--holdout-bars", type=int, default=252,
+                    help="lock the most recent N trading days out of S0-S4 "
+                         "discovery/walk-forward; survivors are evaluated ONCE on "
+                         "that frozen holdout (the mint-time live-baseline stored "
+                         "on the card). The holdout is NEVER used for tuning. "
+                         "0 disables the holdout (full window, legacy behavior). "
+                         "Default 252 (12 months of trading days).")
     args = ap.parse_args(argv)
     run_pairs(args.warehouse, args.universe, args.ledger, args.max_pairs,
               args.formation, args.s2_B, args.measurements, max_universe=args.max_universe,
-              source=args.source, window=args.window)
+              source=args.source, window=args.window,
+              holdout_bars=args.holdout_bars)
     return 0
 
 

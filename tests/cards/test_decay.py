@@ -1,4 +1,4 @@
-"""v4.1 mechanics 7/8 — registry decay re-evaluation: downgrade-only amber
+"""v4.1 mechanics 7/8 — registry decay re-evaluation: amber downgrades
 transitions, public explanation, ledger event, per-card notification hook,
 flag-off refusal.
 
@@ -6,9 +6,9 @@ Fixtures:
 - a registry pass re-evaluates every card; a card whose re-evaluated tier
   is LOWER is downgraded on the card row + a `card_decay` event is appended
   to the trial ledger + the owner is notified via the per-card channel.
-- decay can only move a tier DOWN, never up: a re-evaluator proposing a
-  HIGHER tier raises DecayError and changes nothing (never upgraded by
-  payment or chance).
+- a re-evaluator proposing a
+  HIGHER tier without pre-registered live-window evidence raises DecayError
+  and changes nothing (never upgraded by payment or chance).
 - unchanged tier -> no event, no notification, no row change.
 - the amber transition is PUBLIC + EXPLAINED + LOGGED: public_explanation
   text is attached to the ledger event payload; banned-phrase scan fails
@@ -94,7 +94,7 @@ def _re_evaluator_returning(tier):
     return lambda card, ledger: tier
 
 
-# -- downgrade-only transitions ---------------------------------------------------------
+# -- downgrade (amber) transitions ---------------------------------------------------------
 
 def test_pass_downgrades_card_row_ledger_event_and_notifies(ledger, cards, notifier):
     # mint gold (dsr .995 / t 4.5 / p .005), then the registry's fresh
@@ -206,7 +206,9 @@ def test_public_explanation_text_is_public_explained_and_banned_phrase_free():
                               "registry re-evaluation reason")
     assert "card-abc" in text
     assert "gold" in text and "silver" in text and "amber" in text
-    assert "only ever move down" in text
+    # bidirectional copy: down on re-evaluation, up only via pre-registered
+    # live-window rules — never by payment or chance
+    assert "move down" in text and "never by payment or chance" in text
     assert "SIFT does not trade" in text
     low = text.lower()
     for phrase in BANNED_PHRASES:

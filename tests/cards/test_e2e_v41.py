@@ -19,7 +19,7 @@ Covers, in ONE path:
   -> badge award (kill_rate etc. from the ledger, guard-checked payload)
   -> notification (per-card opt-in via set_pref, digest on free tier,
      rate-capped, digest_batch/deliver_due)
-  -> decay downgrade (RegistryDecayJob.evaluate_card, downgrade-only,
+  -> decay downgrade (RegistryDecayJob.evaluate_card, amber down-only path;
      public explanation, ledger card_decay event, notification hook)
 
 Flag OFF path: the same calls raise each module's fail-closed error type
@@ -211,7 +211,7 @@ def test_full_path_mint_vault_face_share_badge_notify_decay(layer, tmp_path):
     # the batched hit row is marked delivered (append-only log keeps the row)
     assert layer.notify.get_notif(ev.notif_id).state == "delivered"
 
-    # -- 7. decay downgrade (registry re-evaluation; downgrade-only) ------------
+    # -- 7. decay downgrade (registry re-evaluation; amber downgrade path) ---
     # force the ledger's recorded stats to weaken so re-derivation downgrades
     layer.ledger.con.execute(
         "UPDATE stage_result SET dsr=0.90 WHERE trial_id=? AND stage='s3'",
@@ -241,7 +241,7 @@ def test_full_path_mint_vault_face_share_badge_notify_decay(layer, tmp_path):
     decay_notifs = [n for n in layer.notify.log_for_owner(HANDLE)
                     if n.event_kind == "lifecycle"]
     assert len(decay_notifs) >= 1
-    # a second pass is a no-op (downgrade-only; stronger re-derivation ignored)
+    # a second pass is a no-op (no proposal; upgrades need live-window rules)
     again = layer.decay.evaluate_card(after, now=NOW + 9000)
     assert again.downgraded is False and again.to_tier == "bronze"
 

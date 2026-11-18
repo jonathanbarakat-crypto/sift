@@ -16,8 +16,15 @@ Design (v4.1 mechanics 1, behind the `cards_v4_1` flag):
 - Tier comes from the pre-registered stats recorded in the ledger stage
   rows (S3 DSR + S5 t_net at full depth): see `tier_from_stats` — the mapping
   is a pure function of recorded, pre-registered quantities only.
-- Decay is downgrade-only: `decay()` may only move a tier DOWN
-  (gold -> silver -> bronze), never up, and never re-randomizes.
+- The low-level `decay()` primitive is downgrade-only: it may only move a
+  tier DOWN (gold -> silver -> bronze), never up, and never re-randomizes.
+  The BIDIRECTIONAL tier policy lives one layer up, in the registry decay
+  job (sift/cards/decay.py): upgrades are possible ONLY through the
+  pre-registered live-window rules there (fully out-of-sample trailing
+  12m window, two consecutive qualifying annual windows at the mint-time
+  bar, 90-day rate limit, seeded re-evaluation, append-only
+  `card_upgrade` ledger event) — never by payment or chance. The registry
+  exposes `set_tier()` for that gated path only; `decay()` stays down-only.
 - Duplicate spec (same canonical spec minted again, e.g. a re-run that
   hits the skip-list and re-survives) -> a GHOST card: kind="ghost",
   numbered FIFO per canonical spec (ghost_no). Ghost handling proper
@@ -61,6 +68,7 @@ CREATE TABLE IF NOT EXISTS card (
     ghost_no           INTEGER,                   -- FIFO slot per spec_hash (ghosts only)
     tier               TEXT NOT NULL,
     tier_updated_at    REAL NOT NULL,
+    minted_bar         INTEGER NOT NULL DEFAULT 0,  -- bar index at mint (live-window anchor)
     owner_handle       TEXT NOT NULL,             -- non-transferable
     minted_at          REAL NOT NULL,
     decayed_from       TEXT,                      -- tier before last downgrade
@@ -123,6 +131,7 @@ class Card:
     tier: str
     owner_handle: str
     minted_at: float
+    minted_bar: int
     decayed_from: str | None
 
 
@@ -168,6 +177,12 @@ class CardRegistry:
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys = ON")
         self.con.executescript(_SCHEMA_SQL)
+        # migration: older card DBs predate the minted_bar anchor column
+        cols = {r[1] for r in self.con.execute("PRAGMA table_info(card)").fetchall()}
+        if "minted_bar" not in cols:
+            self.con.execute(
+                "ALTER TABLE card ADD COLUMN minted_bar INTEGER NOT NULL DEFAULT 0"
+            )
         self.con.commit()
         self._secret = secret if secret is not None else _default_secret()
 
@@ -194,13 +209,16 @@ class CardRegistry:
              config_hash: str, data_vintage_hash: str,
              survivor_class: str, owner_handle: str,
              dsr: float | None, t_net_full: float | None,
-             p_perm: float | None, now: float | None = None) -> Card:
+             p_perm: float | None, now: float | None = None,
+             minted_bar: int = 0) -> Card:
         """Mint a card for a gauntlet survivor. Mechanics 1:
 
         - only survivor_class == 'validated-green' mints (callers pass
           the ledger verdict; killed / on-watch-amber mint nothing — the
           caller enforces, and mint() refuses anything else);
         - duplicate canonical spec -> ghost (kind='ghost', FIFO ghost_no);
+        - `minted_bar` anchors the card's age in live bars for the
+          pre-registered live-window upgrade rules (sift/cards/decay.py);
         - read-back: the returned Card is re-read from the DB (hard rule:
           never claim success without read-back).
         """
@@ -230,11 +248,11 @@ class CardRegistry:
             self.con.execute(
                 "INSERT INTO card (card_id, canonical_spec, spec_hash, trial_id,"
                 " family, scope_id, survivor_class, kind, ghost_no, tier,"
-                " tier_updated_at, owner_handle, minted_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " tier_updated_at, minted_bar, owner_handle, minted_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (card_id + f":g{no}", canonical_spec_json(spec), sh, trial_id,
                  family, scope_id, survivor_class, "ghost", no, tier,
-                 now, owner_handle, now),
+                 now, int(minted_bar), owner_handle, now),
             )
             self.con.commit()
             return self.get_card(card_id + f":g{no}")   # read-back
@@ -242,10 +260,11 @@ class CardRegistry:
         self.con.execute(
             "INSERT INTO card (card_id, canonical_spec, spec_hash, trial_id,"
             " family, scope_id, survivor_class, kind, ghost_no, tier,"
-            " tier_updated_at, owner_handle, minted_at)"
-            " VALUES (?,?,?,?,?,?,?, 'regular', NULL, ?,?,?,?)",
+            " tier_updated_at, minted_bar, owner_handle, minted_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (card_id, canonical_spec_json(spec), sh, trial_id,
-             family, scope_id, survivor_class, tier, now, owner_handle, now),
+             family, scope_id, survivor_class, "regular", None, tier,
+             now, int(minted_bar), owner_handle, now),
         )
         self.con.commit()
         return self.get_card(card_id)                    # read-back
@@ -302,16 +321,22 @@ class CardRegistry:
             scope_id=row["scope_id"], survivor_class=row["survivor_class"],
             kind=row["kind"], ghost_no=row["ghost_no"], tier=row["tier"],
             owner_handle=row["owner_handle"], minted_at=row["minted_at"],
+            minted_bar=row["minted_bar"] if "minted_bar" in row.keys() else 0,
             decayed_from=row["decayed_from"],
         )
 
     # -- decay + non-transferability ------------------------------------------
 
     def decay(self, card_id: str, new_tier: str, now: float | None = None) -> Card:
-        """Downgrade-only decay (mechanics 1). Records decayed_from; the row
-        is updated in place but the card's history is kept in the returned
-        record + the tier change is append-only in spirit (decayed_from).
-        Read-back before returning."""
+        """Downgrade-only decay primitive (mechanics 1). Records
+        decayed_from; the row is updated in place but the card's history is
+        kept in the returned record + the tier change is append-only in
+        spirit (decayed_from). Read-back before returning.
+
+        NOTE: this primitive can only move a tier DOWN. The bidirectional
+        policy (pre-registered live-window upgrades) lives in
+        sift/cards/decay.py::RegistryDecayJob and writes through
+        `set_tier()` — never through here."""
         card = self.get_card(card_id)
         now = time.time() if now is None else now
         downgraded = decay_tier(card.tier, new_tier)
@@ -319,6 +344,28 @@ class CardRegistry:
             "UPDATE card SET tier=?, tier_updated_at=?, decayed_from=? WHERE card_id=?",
             (downgraded, now, card.tier if downgraded != card.tier else card.decayed_from,
              card_id),
+        )
+        self.con.commit()
+        return self.get_card(card_id)
+
+    def set_tier(self, card_id: str, new_tier: str, now: float | None = None) -> Card:
+        """Gated tier write used ONLY by the registry decay job's
+        pre-registered upgrade path (sift/cards/decay.py). Unlike `decay()`
+        this may move a tier UP, but callers must have already satisfied
+        every pre-registered rule (fully-OOS live window, two consecutive
+        qualifying annual windows at the mint-time bar, 90-day rate limit,
+        seeded evidence, append-only ledger event). The low-level
+        `decay_tier` guard stays downgrade-only; this method exists so the
+        registry's downgrade path keeps using `decay()` semantics
+        (decayed_from) while the upgrade path records its own evidence.
+        Read-back before returning."""
+        if new_tier not in CARD_TIERS:
+            raise CardError(f"invalid tier {new_tier!r}")
+        card = self.get_card(card_id)
+        now = time.time() if now is None else now
+        self.con.execute(
+            "UPDATE card SET tier=?, tier_updated_at=? WHERE card_id=?",
+            (new_tier, now, card_id),
         )
         self.con.commit()
         return self.get_card(card_id)
