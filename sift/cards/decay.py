@@ -38,7 +38,7 @@ from typing import Callable
 
 from sift import flags
 from sift.cards import CARD_TIERS, Card, CardError, CardRegistry, decay_tier, tier_from_stats
-from sift.cards.notify import BANNED_PHRASES, Notifier
+from sift.cards.notify import BANNED_PHRASES, Notifier, contains_banned
 from sift.registry import Ledger
 
 # The public event type appended to the trial ledger on a downgrade.
@@ -74,9 +74,9 @@ def public_explanation(card_id: str, from_tier: str, to_tier: str,
         f"survival fact, not a recommendation; SIFT does not trade."
     )
     low = text.lower()
-    for phrase in BANNED_PHRASES:
-        if phrase in low:
-            raise DecayError(f"public explanation contains banned phrase {phrase!r} — refused")
+    banned = contains_banned(text)
+    if banned is not None:
+        raise DecayError(f"public explanation contains banned phrase {banned!r} — refused")
     return text
 
 
