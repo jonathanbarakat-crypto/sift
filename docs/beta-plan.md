@@ -199,6 +199,7 @@ Unchanged from v4.1 spec §6 and v3 §12: **invite-only beta, no public offering
 ## 11. What this plan deliberately does not do
 
 - No paid acquisition, no affiliates, no guru marketing (§9.8) — the channels in §2.3 are all founder-time organic, ending at an email-only waitlist.
+- **No paid-creator spots in beta (v4.2 §5 / §9.8):** no paid acquisition channels at all, and specifically no "how I trade using SIFT" paid spots, sponsored trade-along posts, or creator partnerships that show SIFT output alongside a trading decision. SIFT content may describe evidence and survival facts only; any creator material must carry the same no-direction/no-P&L/no-value-language discipline as the product copy (banned-phrase fail-closed), and nothing in it may present a card or deck as a win, a pick, or a "top deck". This holds for the card layer (v4.1) and the deck layer (v4.2) alike.
 - No public signup / open beta during this phase — invited-only.
 - No money changes hands — no payments enabled for beta users at all.
 - No PII beyond email; no per-user reporting outside the operator; aggregate-only, ranges-and-qualitative-only in any public mention of beta results (§5 rules; §12 and the privacy consent).

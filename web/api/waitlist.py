@@ -58,17 +58,20 @@ _ONBOARDING_FALLBACK = {
 
 def onboarding_payload() -> dict:
     """The onboarding payload shown at signup / first card: the plain
-    statement + the day-one ToS acceptance line, built ONLY by the copy
-    builders in sift/cards/copy.py when cards_v4_1 is on (banned-phrase
-    fail-closed there). Flag off -> CopyError propagates and the caller
+    statement + the day-one ToS acceptance line + the v4.2 §5 candidates &
+    decks line, built ONLY by the copy builders in sift/cards/copy.py and
+    sift/cards/decks.py when cards_v4_1 is on (banned-phrase fail-closed
+    there). Flag off -> CopyError/DeckCopyError propagates and the caller
     falls back to the static strings above."""
     sys.path.insert(0, str(ROOT))  # repo root importable (no-op under pytest)
     from sift.cards import copy as card_copy
+    from sift.cards import decks as deck_copy
     return {
         "statement": card_copy.onboarding_statement(),
         "tos_acceptance": card_copy.tos_acceptance_text(),
         "hit_loop_hint": card_copy.hit_loop_hint(),
-        "source": "sift.cards.copy (cards_v4_1)",
+        "cards_are_candidates": deck_copy.cards_are_candidates_line(),
+        "source": "sift.cards.copy + sift.cards.decks (cards_v4_1)",
     }
 
 
@@ -82,6 +85,10 @@ def onboarding_payload_safe() -> dict:
             "tos_acceptance": _ONBOARDING_FALLBACK["tos"],
             "hit_loop_hint": ("Your saved connection fired — check it in your "
                               "own charting tool; SIFT does not trade."),
+            "cards_are_candidates": ("No single card is an instant win. Cards "
+                                     "are evidence about connections; decks "
+                                     "are the tested portfolios. You make all "
+                                     "trading decisions; SIFT does not trade."),
             "source": "static fallback (cards_v4_1 off)",
         }
 
