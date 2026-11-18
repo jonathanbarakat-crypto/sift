@@ -232,24 +232,31 @@ def test_flag_off_per_user(ledger, cards):
 # -- tier + decay + non-transferability -----------------------------------------
 
 def test_tier_from_preregistered_stats():
-    # v4.2 full evidence vector: S4 bar + S5 pass + DSR 0.99 + |t| 4.0 + p 0.01
-    # -> platinum (the pull/31 gold bar + S5 pass)
+    # v4.2 §3 (#170): tier from RAW, N-independent stats only — DSR is NOT an
+    # input. platinum = S4 bar + S5 pass + full-depth |t| >= 4.0 + p <= 0.01
+    # (the pull/31 gold bar minus DSR, plus S5 pass).
     assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=0.005,
                            s4_pass=True, s5_pass=True) == "platinum"
-    # gold: S4 bar met + DSR >= 0.99 + p <= 0.01 (S5 not passed)
+    # DSR changes with N but the tier does NOT (N-independence)
+    assert tier_from_stats(dsr=0.10, t_net_full=4.5, p_perm=0.005,
+                           s4_pass=True, s5_pass=True) == "platinum"
+    assert tier_from_stats(dsr=None, t_net_full=4.5, p_perm=0.005,
+                           s4_pass=True, s5_pass=True) == "platinum"
+    # gold: S4 bar met + p_perm <= 0.01 + full-depth |t| >= 3.0 (S5 not passed)
     assert tier_from_stats(dsr=0.995, t_net_full=3.2, p_perm=0.005,
                            s4_pass=True, s5_pass=False) == "gold"
     assert tier_from_stats(dsr=0.96, t_net_full=3.2, p_perm=0.04,
                            s4_pass=True, s5_pass=False) == "silver"
     assert tier_from_stats(dsr=0.90, t_net_full=3.2, p_perm=0.04,
-                           s4_pass=False, s5_pass=False) == "bronze"
+                           s4_pass=False, s5_pass=False) == "silver"
     # missing stats never inflate
-    assert tier_from_stats(dsr=None, t_net_full=9.0, p_perm=0.001,
-                           s4_pass=True, s5_pass=True) == "bronze"
     assert tier_from_stats(dsr=0.995, t_net_full=None, p_perm=0.005,
                            s4_pass=True, s5_pass=True) == "bronze"
     # legacy 3-arg call (no s4/s5 flags) never reaches gold/platinum
     assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=0.005) == "silver"
+    # p_perm missing -> bronze (never inflate)
+    assert tier_from_stats(dsr=None, t_net_full=9.0, p_perm=None,
+                           s4_pass=True, s5_pass=True) == "bronze"
 
 
 def test_decay_downgrade_only(ledger, cards):

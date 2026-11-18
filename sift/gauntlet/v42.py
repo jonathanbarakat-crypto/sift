@@ -45,16 +45,28 @@ SURVIVOR_CLASSES_V42 = (
     SURVIVOR_CLASS_S3_EVIDENCE,
 )
 
-# -- v4.2 pre-registered evidence bars (spec v4.2 §2-§3) -------------------------
-# S4's own thresholds are UNCHANGED and now define the gold/platinum bars.
-# The pull/31 (#157) mint-time gold bar was DSR >= 0.99 AND full-depth
-# |t_net| >= 4.0 AND p_perm <= 0.01; v4.2 keeps that bar for PLATINUM (with the
-# S5 full-depth pass) and makes GOLD = S4 bar (net SR > S4_NET_SR_MIN,
-# |t_net| >= tau_cal(scope), MinTRL <= T) AND S3 DSR >= 0.99 AND p_perm <= 0.01.
-# Silver keeps the S3/S5 admission line. Bronze = S0-S2 pass.
-GOLD_DSR, GOLD_P_PERM = 0.99, 0.01          # unchanged from pull/31
-SILVER_DSR, SILVER_T_NET = 0.95, 3.0         # unchanged from pull/31
-PLATINUM_T_NET_FULL = 4.0                    # full-depth |t_net| >= 4.0 + S5 pass
+# -- v4.2 pre-registered evidence bars (spec v4.2 §2-§3, owner decision
+# 2026-11-18: TIER IS N-INDEPENDENT — DSR is the mint-time admission gate
+# only and is NEVER an input to the tier) ---------------------------------
+# S4's own thresholds are UNCHANGED and define the GOLD/PLATINUM evidence
+# bars (net SR > S4_NET_SR_MIN, |t_net| >= tau_cal(scope), MinTRL <= T).
+# The pull/31 (#157) mint-time gold bar (DSR >= 0.99 AND full-depth
+# |t_net| >= 4.0 AND p_perm <= 0.01) mapped 1:1 to raw stats minus DSR, so
+# it becomes the PLATINUM raw bar. Silver keeps the full-depth line.
+# Bronze = S0-S2 pass (the minimum card tier).
+# DSR/PSR stays as the MINT-TIME ADMISSION GATE (DSR >= S3_DSR_MIN = 0.95 at
+# mint-time N to mint above bronze) — recorded as context on the ledger
+# stage row ("admission evidence at mint-time N"), never re-deflated by a
+# later N. See mint_admission_gate().
+MINT_DSR_GATE = 0.95                       # DSR >= 0.95 at mint-time N to mint above bronze
+SILVER_T_NET_FULL = 3.0                    # silver: full-depth |t_net| >= 3.0 + p_perm <= 0.05
+SILVER_P_PERM = 0.05
+GOLD_P_PERM = 0.01                         # gold: S4 bar + p_perm <= 0.01
+PLATINUM_T_NET_FULL = 4.0                  # platinum: gold + S5 pass + full-depth |t_net| >= 4.0
+# Legacy names kept for callers/tests that referenced the v4.2-draft bars;
+# they now denote RAW bars (no DSR anywhere).
+GOLD_DSR, GOLD_P_PERM = 0.99, 0.01         # deprecated alias: platinum's old name
+SILVER_DSR, SILVER_T_NET = 0.95, 3.0       # deprecated alias: the admission gate / silver line
 
 
 def s4_passed(detail: dict, scope_id: str) -> bool:
@@ -88,10 +100,26 @@ def survivor_class_for(*, s4_pass: bool, s3_pass: bool, s5_pass: bool | None) ->
     return "on-watch-amber"
 
 
+def mint_admission_gate(dsr: float | None, *, dsr_min: float = MINT_DSR_GATE) -> bool:
+    """v4.2 §2-§3: DSR/PSR is the MINT-TIME ADMISSION GATE only.
+
+    A candidate must clear DSR >= `dsr_min` (0.95) AT MINT-TIME N to mint
+    above bronze. This is the ONLY place the stratum-deflated DSR decides a
+    card's standing; the tier itself is computed from raw, N-independent
+    stats by `sift.cards.tier_from_stats` (see there). A None DSR fails
+    closed (no admission)."""
+    if dsr is None:
+        return False
+    return dsr >= dsr_min
+
+
 __all__ = [
     "SURVIVOR_CLASS_S4_EVIDENCE",
     "SURVIVOR_CLASS_S3_EVIDENCE",
     "SURVIVOR_CLASSES_V42",
+    "MINT_DSR_GATE",
+    "SILVER_T_NET_FULL",
+    "SILVER_P_PERM",
     "GOLD_DSR",
     "GOLD_P_PERM",
     "SILVER_DSR",
@@ -99,4 +127,5 @@ __all__ = [
     "PLATINUM_T_NET_FULL",
     "s4_passed",
     "survivor_class_for",
+    "mint_admission_gate",
 ]

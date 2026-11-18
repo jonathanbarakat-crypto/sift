@@ -23,8 +23,10 @@ from sift.cards.decay import (
     GOLD_DSR,
     GOLD_T_NET,
     GOLD_P_PERM,
+    PLATINUM_P_PERM,
     PLATINUM_T_NET,
     SILVER_DSR,
+    SILVER_P_PERM,
     SILVER_T_NET,
     WindowStats,
     meets_tier_bar,
@@ -273,32 +275,43 @@ def test_research_scope_stays_amber(ledger, cards):
 # ---------------------------------------------------------------------------
 
 def test_tier_boundaries_v42():
-    # platinum: S4 bar + S5 pass + DSR >= 0.99 + full-depth |t_net| >= 4.0 + p <= 0.01
+    # v4.2 §3 (#170): RAW, N-independent bars — DSR is NOT an input.
+    # platinum: S4 bar + S5 pass + full-depth |t_net| >= 4.0 + p <= 0.01
     assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=0.005,
                            s4_pass=True, s5_pass=True) == "platinum"
-    # gold: S4 bar met + DSR >= 0.99 + p_perm <= 0.01, S5 not passed
+    # same raw stats, DSR anywhere (incl. None) -> same tier (N-independence)
+    for dsr in (None, 0.10, 0.90, 0.99):
+        assert tier_from_stats(dsr=dsr, t_net_full=4.5, p_perm=0.005,
+                               s4_pass=True, s5_pass=True) == "platinum"
+    # gold: S4 bar met + p_perm <= 0.01 + full-depth |t_net| >= 3.0, S5 not passed
     assert tier_from_stats(dsr=0.995, t_net_full=3.2, p_perm=0.005,
                            s4_pass=True, s5_pass=False) == "gold"
-    # S4 bar met but DSR below 0.99 -> silver if the S3/S5 line is met
+    assert tier_from_stats(dsr=None, t_net_full=3.0, p_perm=0.01,
+                           s4_pass=True, s5_pass=False) == "gold"
+    # S4 bar met but |t_net| < 3.0 -> not gold (falls to bronze/silver line)
+    assert tier_from_stats(dsr=0.995, t_net_full=2.99, p_perm=0.005,
+                           s4_pass=True, s5_pass=False) == "bronze"
+    # silver: full-depth |t_net| >= 3.0 + p_perm <= 0.05 (raw line)
     assert tier_from_stats(dsr=0.96, t_net_full=3.2, p_perm=0.04,
                            s4_pass=True, s5_pass=False) == "silver"
-    # silver: S3 admission line (DSR >= 0.95, full-depth |t| >= 3.0)
-    assert tier_from_stats(dsr=0.96, t_net_full=3.0, p_perm=0.04,
+    assert tier_from_stats(dsr=0.96, t_net_full=3.0, p_perm=0.05,
                            s4_pass=False, s5_pass=False) == "silver"
     # bronze: S0-S2 pass only
     assert tier_from_stats(dsr=0.90, t_net_full=2.0, p_perm=0.5,
                            s4_pass=False, s5_pass=False) == "bronze"
     # missing stats never inflate
-    assert tier_from_stats(dsr=None, t_net_full=9.0, p_perm=0.001,
+    assert tier_from_stats(dsr=None, t_net_full=None, p_perm=0.001,
+                           s4_pass=True, s5_pass=True) == "bronze"
+    assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=None,
                            s4_pass=True, s5_pass=True) == "bronze"
     # boundary exactness
     assert tier_from_stats(dsr=0.99, t_net_full=4.0, p_perm=0.01,
                            s4_pass=True, s5_pass=True) == "platinum"
     assert tier_from_stats(dsr=0.989, t_net_full=4.0, p_perm=0.01,
-                           s4_pass=True, s5_pass=False) == "silver"
+                           s4_pass=True, s5_pass=False) == "gold"
     assert tier_from_stats(dsr=0.99, t_net_full=4.0, p_perm=0.011,
                            s4_pass=True, s5_pass=False) == "silver"
-    # S4 bar NOT met caps gold/platinum even with stellar S3/S5 stats
+    # S4 bar NOT met caps gold/platinum even with stellar S5 stats
     assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=0.005,
                            s4_pass=False, s5_pass=True) == "silver"
     # legacy callers (no s4/s5 flags) never see gold/platinum
@@ -332,18 +345,24 @@ def test_survivor_class_for_mapping():
 # ---------------------------------------------------------------------------
 
 def test_meets_tier_bar_platinum():
-    assert meets_tier_bar(WindowStats(0, 252, 0.99, 4.0, 0.01), "platinum")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.99, 3.99, 0.01), "platinum")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.989, 4.0, 0.01), "platinum")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.99, 4.0, 0.011), "platinum")
-    # gold bar unchanged (same numbers as pull/31)
-    assert meets_tier_bar(WindowStats(0, 252, 0.99, 4.0, 0.01), "gold")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.95, 3.0, 0.5), "gold")
-    assert meets_tier_bar(WindowStats(0, 252, 0.95, 3.0, 0.5), "silver")
+    # v4.2 §3 (#170): RAW bars only — the dsr field is ignored on purpose.
+    assert meets_tier_bar(WindowStats(0, 252, None, 4.0, 0.01), "platinum")
+    assert meets_tier_bar(WindowStats(0, 252, 0.0, 4.0, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 3.99, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 4.0, 0.011), "platinum")
+    # gold bar (raw): p_perm <= 0.01 — same numbers as pull/31 minus DSR
+    assert meets_tier_bar(WindowStats(0, 252, None, 9.0, 0.01), "gold")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 9.0, 0.02), "gold")
+    # silver bar (raw): |t| >= 3.0 AND p <= 0.05
+    assert meets_tier_bar(WindowStats(0, 252, None, 3.0, 0.05), "silver")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 2.99, 0.05), "silver")
 
 
 def test_platinum_constants_match_pull31_gold_bar():
-    # the platinum bar is exactly pull/31's gold bar: DSR 0.99, |t| 4.0, p 0.01
-    assert GOLD_DSR == 0.99 and PLATINUM_T_NET == 4.0 and GOLD_P_PERM == 0.01
-    assert SILVER_DSR == 0.95 and SILVER_T_NET == 3.0
-    assert GOLD_T_NET == 4.0
+    # the platinum raw bar is exactly pull/31's gold bar minus DSR:
+    # |t| 4.0, p 0.01 (DSR 0.99 was the N-dependent part, now the mint gate)
+    assert PLATINUM_T_NET == 4.0 and PLATINUM_P_PERM == 0.01
+    assert SILVER_T_NET == 3.0 and SILVER_P_PERM == 0.05
+    assert GOLD_P_PERM == 0.01
+    # legacy aliases still exported for old callers
+    assert GOLD_DSR == 0.99 and GOLD_T_NET == 4.0 and SILVER_DSR == 0.95
