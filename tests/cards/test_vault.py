@@ -53,9 +53,9 @@ def _mint_green(ledger, cards, handle="alice", fixture="F-PAIR-FULL"):
 def test_admit_and_capacity_by_tier(ledger, cards, vault):
     card_id, _ = _mint_green(ledger, cards)
     card = cards.get_card(card_id)
-    # capacity depends on the card's tier
+    # capacity depends on the card's tier (v4.2: platinum is top, capacity 8)
     cap = vault.effective_capacity("alice", card.tier)
-    assert cap == vault.base_capacity(card.tier)   # gold 6 / silver 4 / bronze 2
+    assert cap == vault.base_capacity(card.tier)   # platinum 8 / gold 6 / silver 4 / bronze 2
     entry = vault.admit(card_id, "alice")
     assert entry.state == "vault"
     # read-back: vault listing shows it
@@ -73,9 +73,11 @@ def test_capacity_blocks_over_admit(ledger, cards, vault):
             trial_id=f"t{i}", family="pairs", scope_id="free_5y_top1k",
             config_hash=f"h{i}", data_vintage_hash="v",
             survivor_class="validated-green", owner_handle="alice",
-            dsr=0.96 if card.tier == "silver" else (0.995 if card.tier == "gold" else 0.90),
-            t_net_full=3.2 if card.tier != "gold" else 4.5,
-            p_perm=0.04 if card.tier != "gold" else 0.005,
+            dsr=0.96 if card.tier == "silver" else (0.995 if card.tier in ("gold", "platinum") else 0.90),
+            t_net_full=3.2 if card.tier not in ("gold", "platinum") else 4.5,
+            p_perm=0.04 if card.tier not in ("gold", "platinum") else 0.005,
+            s4_pass=card.tier in ("gold", "platinum"),
+            s5_pass=card.tier == "platinum",
         ).card_id
         vault.admit(cid, "alice")
     assert vault.vault_count("alice") == cap

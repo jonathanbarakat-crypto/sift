@@ -324,6 +324,8 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
                      "wall_s": dt, "calls": 0.0,
                      "verdict": v["verdict"], "survivor_class": v["survivor_class"],
                      "killed_at": v.get("killed_at"),
+                     "card_id": v.get("card_id"),
+                     "s4_score": v.get("s4_score"),
                      "stages": {s.stage: s.status for s in v["stages"]}})
         # -- frozen-holdout evaluation of survivors (ONCE, evaluation only) --
         # The holdout bars never entered S0-S4 discovery/walk-forward above.

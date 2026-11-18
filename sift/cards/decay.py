@@ -89,8 +89,11 @@ MIN_CARD_AGE_BARS = WINDOW_BARS             # card age must EXCEED this (rule 1)
 RATE_LIMIT_S = 90 * 86400.0                # max one tier change per card per 90d (rule 4)
 # Mint-time bars per gold/silver (tier_from_stats): reused VERBATIM so the
 # live-window bar is identical to the mint-time bar (rule 2) — no drift.
+# v4.2 §3: the pull/31 gold bar (DSR >= 0.99 AND |t_net| >= 4.0 AND
+# p_perm <= 0.01) is now the PLATINUM bar; gold adds the S4 score bar.
 GOLD_DSR, GOLD_T_NET, GOLD_P_PERM = 0.99, 4.0, 0.01
 SILVER_DSR, SILVER_T_NET = 0.95, 3.0
+PLATINUM_DSR, PLATINUM_T_NET, PLATINUM_P_PERM = 0.99, 4.0, 0.01
 
 # Default re-evaluator: re-derive the tier from the card's own
 # pre-registered ledger stats (S3 DSR + S5 full-depth t_net + S2 p_perm).
@@ -101,12 +104,14 @@ SILVER_DSR, SILVER_T_NET = 0.95, 3.0
 
 def default_re_evaluator(card: Card, ledger: Ledger) -> str:
     """Re-evaluate a card's tier from its pre-registered ledger stats.
-    Pure read of stage rows; returns one of CARD_TIERS."""
+    Pure read of stage rows; returns one of CARD_TIERS (v4.2 incl. platinum)."""
     s2 = ledger.stage(card.trial_id, "s2")
     s3 = ledger.stage(card.trial_id, "s3")
+    s4 = ledger.stage(card.trial_id, "s4")
     s5 = ledger.stage(card.trial_id, "s5")
     return tier_from_stats(
-        dsr=s3["dsr"], t_net_full=s5["statistic"], p_perm=s2["p_value"]
+        dsr=s3["dsr"], t_net_full=s5["statistic"], p_perm=s2["p_value"],
+        s4_pass=s4["status"] == "pass", s5_pass=s5["status"] == "pass",
     )
 
 
@@ -160,12 +165,21 @@ def _window_stats(returns: np.ndarray, *, start: int, end: int,
 
 def meets_tier_bar(ws: WindowStats, tier: str) -> bool:
     """Rule 2: does one annual window meet the pre-registered bar for
-    `tier`? The bars are IDENTICAL to `tier_from_stats` at mint:
-    gold = DSR >= 0.99 AND |t_net| >= 4.0 AND p_perm <= 0.01;
-    silver = DSR >= 0.95 AND |t_net| >= 3.0. Missing stats never qualify."""
+    `tier`? The bars are IDENTICAL to `tier_from_stats` at mint (v4.2):
+    platinum = DSR >= 0.99 AND |t_net| >= 4.0 AND p_perm <= 0.01;
+    gold = the platinum bar's DSR/p components (the S4 bar is a mint-time
+    scope fact, not re-derivable per live window) — so gold's live-window bar
+    is the platinum stat line; silver = DSR >= 0.95 AND |t_net| >= 3.0.
+    Missing stats never qualify."""
     if ws.dsr is None or ws.t_net_full is None or ws.p_perm is None:
         return False
+    if tier == "platinum":
+        return (ws.dsr >= PLATINUM_DSR and abs(ws.t_net_full) >= PLATINUM_T_NET
+                and ws.p_perm <= PLATINUM_P_PERM)
     if tier == "gold":
+        # gold's live-window bar == the platinum stat line (DSR 0.99 / |t| 4.0 /
+        # p 0.01); the S4 scope bar is mint-time only. Same numbers as
+        # pull/31's gold bar so the live-window bar never drifts.
         return (ws.dsr >= GOLD_DSR and abs(ws.t_net_full) >= GOLD_T_NET
                 and ws.p_perm <= GOLD_P_PERM)
     if tier == "silver":
@@ -241,7 +255,7 @@ def live_window_evaluator(
     idx = CARD_TIERS.index(card.tier)
     if idx >= len(CARD_TIERS) - 1:
         return LiveWindowEvidence(
-            eligible=False, reason="already at the top tier (gold)",
+            eligible=False, reason="already at the top tier (platinum)",
             target_tier=None, trailing=None, preceding=None,
             card_age_bars=age_bars, seed=seed,
         )
@@ -560,6 +574,14 @@ __all__ = [
     "MIN_CARD_AGE_BARS",
     "RATE_LIMIT_S",
     "WINDOW_BARS",
+    "GOLD_DSR",
+    "GOLD_T_NET",
+    "GOLD_P_PERM",
+    "SILVER_DSR",
+    "SILVER_T_NET",
+    "PLATINUM_DSR",
+    "PLATINUM_T_NET",
+    "PLATINUM_P_PERM",
     "DecayError",
     "DecayResult",
     "LiveWindowEvidence",

@@ -127,7 +127,7 @@ def test_validated_green_mints_exactly_one_card(ledger, cards):
     assert card.kind == "regular"
     assert card.trial_id == trial.trial_id
     assert card.owner_handle == "alice"
-    assert card.tier in ("bronze", "silver", "gold")
+    assert card.tier in ("bronze", "silver", "gold", "platinum")
     # exactly one card in the registry
     assert len(cards.cards_for_owner("alice")) == 1
 
@@ -181,11 +181,15 @@ def test_duplicate_spec_mints_ghost_fifo(ledger, cards):
 
 # -- F-REGIME / killed mint nothing --------------------------------------------
 
-def test_f_regime_amber_mints_nothing(ledger, cards):
+def test_f_regime_amber_mints_a_bronze_card(ledger, cards):
+    """v4.2 §2: F-REGIME (S5 fail at full depth) is on-watch-amber but it
+    PASSED S0-S2 — it mints a card at the tier its evidence supports."""
     verdict, _ = _run_amber(ledger, cards)
     assert verdict["survivor_class"] == "on-watch-amber"
-    assert verdict["card_id"] is None
-    assert cards.cards_for_owner("bob") == []
+    assert verdict["card_id"] is not None
+    card = cards.get_card(verdict["card_id"])
+    assert card.owner_handle == "bob"
+    assert card.tier in ("bronze", "silver", "gold")   # not platinum: S5 failed
 
 
 def test_killed_trial_mints_nothing(ledger, cards):
@@ -228,12 +232,24 @@ def test_flag_off_per_user(ledger, cards):
 # -- tier + decay + non-transferability -----------------------------------------
 
 def test_tier_from_preregistered_stats():
-    assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=0.005) == "gold"
-    assert tier_from_stats(dsr=0.96, t_net_full=3.2, p_perm=0.04) == "silver"
-    assert tier_from_stats(dsr=0.90, t_net_full=3.2, p_perm=0.04) == "bronze"
+    # v4.2 full evidence vector: S4 bar + S5 pass + DSR 0.99 + |t| 4.0 + p 0.01
+    # -> platinum (the pull/31 gold bar + S5 pass)
+    assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=0.005,
+                           s4_pass=True, s5_pass=True) == "platinum"
+    # gold: S4 bar met + DSR >= 0.99 + p <= 0.01 (S5 not passed)
+    assert tier_from_stats(dsr=0.995, t_net_full=3.2, p_perm=0.005,
+                           s4_pass=True, s5_pass=False) == "gold"
+    assert tier_from_stats(dsr=0.96, t_net_full=3.2, p_perm=0.04,
+                           s4_pass=True, s5_pass=False) == "silver"
+    assert tier_from_stats(dsr=0.90, t_net_full=3.2, p_perm=0.04,
+                           s4_pass=False, s5_pass=False) == "bronze"
     # missing stats never inflate
-    assert tier_from_stats(dsr=None, t_net_full=9.0, p_perm=0.001) == "bronze"
-    assert tier_from_stats(dsr=0.995, t_net_full=None, p_perm=0.005) == "bronze"
+    assert tier_from_stats(dsr=None, t_net_full=9.0, p_perm=0.001,
+                           s4_pass=True, s5_pass=True) == "bronze"
+    assert tier_from_stats(dsr=0.995, t_net_full=None, p_perm=0.005,
+                           s4_pass=True, s5_pass=True) == "bronze"
+    # legacy 3-arg call (no s4/s5 flags) never reaches gold/platinum
+    assert tier_from_stats(dsr=0.995, t_net_full=4.5, p_perm=0.005) == "silver"
 
 
 def test_decay_downgrade_only(ledger, cards):
@@ -261,8 +277,22 @@ def test_cards_non_transferable(ledger, cards):
         cards.assert_owned(card_id, "eve")   # foreign handle -> refuse
 
 
-def test_mint_refuses_non_green(cards):
+def test_mint_refuses_killed_trial(cards):
     with pytest.raises(CardError):
         cards.mint(trial_id="trial-000001", family="pairs", scope_id="free_5y_top1k",
-                   config_hash="x", data_vintage_hash="v", survivor_class="on-watch-amber",
+                   config_hash="x", data_vintage_hash="v", survivor_class="none",
                    owner_handle="alice", dsr=0.99, t_net_full=3.5, p_perm=0.01)
+
+
+def test_mint_accepts_v42_evidence_classes(cards):
+    """v4.2: the S4/S3-evidence survivor classes mint (bronze+); killed
+    (survivor_class='none') refuses."""
+    for cls in ("on-watch-amber", "on-watch-amber-s4-evidence",
+                "on-watch-amber-s3-evidence", "validated-green"):
+        card = cards.mint(
+            trial_id=f"trial-{cls}", family="pairs", scope_id="free_5y_top1k",
+            config_hash=f"h-{cls}", data_vintage_hash="v",
+            survivor_class=cls, owner_handle="alice",
+            dsr=0.90, t_net_full=2.0, p_perm=0.5,
+        )
+        assert card.tier == "bronze" and card.survivor_class == cls

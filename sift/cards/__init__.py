@@ -53,7 +53,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 CARD_KINDS = ("regular", "ghost")
-CARD_TIERS = ("bronze", "silver", "gold")   # index = strength; decay moves down
+# v4.2 §3: index = strength; decay moves down. platinum is the top tier:
+# the pull/31 gold bar (DSR >= 0.99 AND full-depth |t_net| >= 4.0 AND
+# p_perm <= 0.01) plus the S5 full-depth pass, with the S4 bar met.
+CARD_TIERS = ("bronze", "silver", "gold", "platinum")
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS card (
@@ -136,19 +139,30 @@ class Card:
 
 
 def tier_from_stats(dsr: float | None, t_net_full: float | None,
-                    p_perm: float | None) -> str:
-    """Tier from PRE-REGISTERED, ledger-recorded stats only (mechanics 1:
-    'tier from pre-registered stats'). Pure function, deterministic.
+                    p_perm: float | None, *, s4_pass: bool = False,
+                    s5_pass: bool = False) -> str:
+    """v4.2 §3: tier from the FULL pre-registered evidence vector — S2 p_perm,
+    S4 score (s4_pass: the unchanged S4 bar net SR > S4_NET_SR_MIN,
+    |t_net| >= tau_cal(scope), MinTRL <= T), S3 DSR, S5 full-depth t
+    (t_net_full + s5_pass). Pure function, deterministic; recorded ledger
+    stats only.
 
-    - gold:   DSR >= 0.99 at scope AND full-depth |t_net| >= 4.0 AND p_perm <= 0.01
-    - silver: DSR >= 0.95 (the S3 admission line) AND full-depth |t_net| >= 3.0 (S5 line)
-    - bronze: survivor but below the silver bar (on-watch-green edge cases)
+    - platinum: S4 bar met AND S5 pass AND DSR >= 0.99 AND full-depth
+      |t_net| >= 4.0 AND p_perm <= 0.01  (the pull/31 gold bar + S5 pass)
+    - gold:     S4 bar met AND DSR >= 0.99 AND p_perm <= 0.01
+    - silver:   DSR >= 0.95 (the S3 admission line) AND full-depth |t_net| >= 3.0 (S5 line)
+    - bronze:   S0-S2 pass (the minimum card tier) — anything below silver
 
-    Missing stats never inflate: a None component fails its check.
+    Missing stats never inflate: a None component fails its check; s4_pass /
+    s5_pass default False so callers that only carry the pull/31 vector get
+    at most silver/gold-by-DSR (v4.2 requires the S4/S5 flags for gold+).
     """
     if dsr is None or t_net_full is None or p_perm is None:
         return "bronze"
-    if dsr >= 0.99 and abs(t_net_full) >= 4.0 and p_perm <= 0.01:
+    if (s4_pass and s5_pass and dsr >= 0.99 and abs(t_net_full) >= 4.0
+            and p_perm <= 0.01):
+        return "platinum"
+    if s4_pass and dsr >= 0.99 and p_perm <= 0.01 and not s5_pass:
         return "gold"
     if dsr >= 0.95 and abs(t_net_full) >= 3.0:
         return "silver"
@@ -210,21 +224,28 @@ class CardRegistry:
              survivor_class: str, owner_handle: str,
              dsr: float | None, t_net_full: float | None,
              p_perm: float | None, now: float | None = None,
-             minted_bar: int = 0) -> Card:
-        """Mint a card for a gauntlet survivor. Mechanics 1:
+             minted_bar: int = 0, s4_pass: bool = False,
+             s5_pass: bool = False) -> Card:
+        """Mint a card for a gauntlet survivor. v4.2 §2-§3:
 
-        - only survivor_class == 'validated-green' mints (callers pass
-          the ledger verdict; killed / on-watch-amber mint nothing — the
-          caller enforces, and mint() refuses anything else);
+        - v4.2: ANY S0-S2 passer mints (bronze+). `survivor_class` may be
+          'validated-green', 'on-watch-amber', or the v4.2 evidence classes
+          'on-watch-amber-s4-evidence' / 'on-watch-amber-s3-evidence'; only
+          verdict='killed' (survivor_class='none') refuses;
         - duplicate canonical spec -> ghost (kind='ghost', FIFO ghost_no);
         - `minted_bar` anchors the card's age in live bars for the
           pre-registered live-window upgrade rules (sift/cards/decay.py);
+        - `s4_pass` / `s5_pass` carry the S4 score bar and the S5 full-depth
+          pass into tier_from_stats (the full evidence vector, v4.2 §3);
         - read-back: the returned Card is re-read from the DB (hard rule:
           never claim success without read-back).
         """
-        if survivor_class != "validated-green":
+        # v4.2: killed trials (survivor_class == 'none') mint nothing; every
+        # S0-S2 passer mints at the tier its evidence supports (bronze min).
+        from sift.gauntlet.v42 import SURVIVOR_CLASSES_V42
+        if survivor_class not in SURVIVOR_CLASSES_V42 or survivor_class == "none":
             raise CardError(
-                f"only validated-green survivors mint cards, got {survivor_class!r}"
+                f"only gauntlet survivors (S0-S2 pass) mint cards, got {survivor_class!r}"
             )
         spec = {
             "family": family,
@@ -237,7 +258,8 @@ class CardRegistry:
         sh = spec_hash_of(spec)
         card_id = self.card_id_for(spec)
         now = time.time() if now is None else now
-        tier = tier_from_stats(dsr, t_net_full, p_perm)
+        tier = tier_from_stats(dsr, t_net_full, p_perm,
+                               s4_pass=s4_pass, s5_pass=s5_pass)
 
         existing = self.con.execute(
             "SELECT card_id FROM card WHERE spec_hash=? AND kind='regular'", (sh,)

@@ -483,7 +483,7 @@ def test_banned_phrases_cover_value_language():
 
 def test_downgrade_still_allowed_any_time(ledger, cards, notifier):
     from tests.cards.test_decay import _mint_with_stats
-    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     assert cards.get_card(card_id).tier == "gold"
     job = RegistryDecayJob(cards, ledger, notifier=notifier,
                            re_evaluator=_re_evaluator_returning("bronze"))
