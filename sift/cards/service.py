@@ -34,6 +34,7 @@ from sift import flags
 from sift.cards import CardRegistry
 from sift.cards.anchored import AnchoredRunError  # noqa: F401  (re-export surface)
 from sift.cards.badges import BadgeService
+from sift.cards.copy import CopyError  # noqa: F401  (re-export surface)
 from sift.cards.decay import RegistryDecayJob
 from sift.cards.events import SignalEventService
 from sift.cards.face import CardFaceRenderer

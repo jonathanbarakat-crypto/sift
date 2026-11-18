@@ -8,6 +8,7 @@
   var form = document.getElementById("waitlist-form");
   var msg = document.getElementById("form-msg");
   var input = document.getElementById("email");
+  var tos = document.getElementById("tos-accepted");
   var button = form.querySelector("button[type=submit]");
 
   var EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -16,6 +17,19 @@
     msg.textContent = text;
     msg.className = "form-msg" + (kind ? " " + kind : "");
   }
+
+  // Onboarding copy (first-run): fetched from GET /api/onboarding when the
+  // endpoint is up; the static HTML already carries the same statement, so
+  // the page is correct with JS disabled or on a pure static host.
+  fetch("/api/onboarding", { headers: { "Accept": "application/json" } })
+    .then(function (res) { return res.ok ? res.json() : null; })
+    .then(function (body) {
+      if (body && body.ok && body.onboarding) {
+        var el = document.getElementById("onboarding-statement");
+        if (el && body.onboarding.statement) { el.textContent = body.onboarding.statement; }
+      }
+    })
+    .catch(function () { /* static copy already in the HTML — nothing to do */ });
 
   form.addEventListener("submit", function (ev) {
     ev.preventDefault();
@@ -26,6 +40,12 @@
       input.focus();
       return;
     }
+    // Day-one ToS acceptance is mandatory (fail closed server-side too).
+    if (!tos || !tos.checked) {
+      setMsg("Please accept the terms to join the waitlist.", "err");
+      if (tos) { tos.focus(); }
+      return;
+    }
 
     button.disabled = true;
     setMsg("Sending…", "");
@@ -33,7 +53,7 @@
     fetch(form.action, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
-      body: JSON.stringify({ email: email })
+      body: JSON.stringify({ email: email, tos_accepted: tos ? tos.checked : false })
     })
       .then(function (res) {
         return res.json().then(function (body) {
@@ -53,6 +73,7 @@
         // plain form POST so the email still reaches the server-side store.
         var fd = new FormData();
         fd.append("email", email);
+        if (tos) { fd.append("tos_accepted", tos.checked ? "yes" : ""); }
         fetch(form.action, { method: "POST", body: fd })
           .then(function (res) {
             if (res.ok) {

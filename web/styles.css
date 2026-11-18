@@ -142,6 +142,16 @@ p { margin: 0 0 1em; }
   font-size: 1rem; font-family: inherit;
 }
 .field-row input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.onboarding-statement {
+  color: var(--ink); font-size: 0.95rem; line-height: 1.5;
+  border-left: 3px solid var(--accent); padding: 8px 14px; margin: 16px 0 0;
+  background: rgba(56, 189, 248, 0.06); border-radius: 0 10px 10px 0;
+}
+.tos-row {
+  display: flex; gap: 10px; align-items: flex-start; margin: 14px 0 0;
+  font-weight: 400 !important; font-size: 0.82rem; color: var(--ink-dim); cursor: pointer;
+}
+.tos-row input { margin-top: 2px; accent-color: var(--accent); }
 .form-msg { min-height: 1.4em; margin: 10px 0 0; font-size: 0.95rem; }
 .form-msg.ok { color: var(--lime); }
 .form-msg.err { color: var(--danger); }

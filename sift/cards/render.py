@@ -534,6 +534,32 @@ class CardImageRenderer:
             cv.text(x0, y, ln, _font("mono", 22), _rgb(PALETTE["INK"]))
             y += 32
 
+        # -- newcomer-friendly blocks: explainer + gauge + health ---------
+        # All strings come from the face dict, i.e. from the copy builders in
+        # sift/cards/copy.py (banned-phrase fail-closed there); every string
+        # drawn here passes _guard_no_tickers via cv.text. Jargon (z-score,
+        # half-life, DSR, tier, health) stays behind the glossary tooltips
+        # (face["glossary"]) — not drawn in the main view.
+        expl = face.get("explainer")
+        if expl:
+            ef = _font("sans", 21)
+            for ln in cv.wrap(str(expl), ef, (x1 - x0)):
+                cv.text(x0, y, ln, ef, _rgb(PALETTE["INK"]))
+                y += 28
+            y += 10
+        gauge = face.get("gauge") or {}
+        if gauge.get("band"):
+            gtxt = f"magnitude: {gauge.get('label', gauge['band'])}"
+            if gauge.get("magnitude_z") is not None:
+                gtxt += f"  (|z| = {float(gauge['magnitude_z']):.2f})"
+            cv.text(x0, y, gtxt, _font("mono", 21), _rgb(PALETTE["ACCENT2"]))
+            y += 32
+        health = face.get("health") or {}
+        if health.get("phrase"):
+            htxt = f"health: {health['phrase']}"
+            cv.text(x0, y, htxt, _font("mono", 21), _rgb(PALETTE["GOLD"]))
+            y += 32
+
         # footer: watermark (handle + ts) + disclaimer, anchored at frame bottom
         wm = face.get("watermark") or {}
         ts_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(wm.get("ts", 0))))

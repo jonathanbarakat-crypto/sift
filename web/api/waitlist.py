@@ -39,6 +39,52 @@ MAX_BODY = 16 * 1024  # 16 KiB is far more than an email needs
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 _WRITE_LOCK = threading.Lock()
 
+# -- onboarding copy (built ONLY in the copy builders, fail-closed) -----------
+# The waitlist endpoint is stdlib-only and must stay dependency-free for
+# static hosting, so it imports the copy builders lazily and only when the
+# v4.1 flag is on; with the flag off (kill-switch SIFT_CARDS_V4_1=0) the
+# endpoint serves the plain static strings below (fail-closed on copy,
+# never on availability of the waitlist itself).
+_ONBOARDING_FALLBACK = {
+    "statement": ("SIFT shows which relationships in your research held up "
+                  "under stress. It never tells you what to buy or sell; "
+                  "nothing here is advice. You make the calls — we make the "
+                  "evidence legible."),
+    "tos": ("Cards are not an investment, have no resale value, and confer "
+            "no right to any profit. They are non-transferable. SIFT does "
+            "not trade. By continuing you accept these terms."),
+}
+
+
+def onboarding_payload() -> dict:
+    """The onboarding payload shown at signup / first card: the plain
+    statement + the day-one ToS acceptance line, built ONLY by the copy
+    builders in sift/cards/copy.py when cards_v4_1 is on (banned-phrase
+    fail-closed there). Flag off -> CopyError propagates and the caller
+    falls back to the static strings above."""
+    sys.path.insert(0, str(ROOT))  # repo root importable (no-op under pytest)
+    from sift.cards import copy as card_copy
+    return {
+        "statement": card_copy.onboarding_statement(),
+        "tos_acceptance": card_copy.tos_acceptance_text(),
+        "hit_loop_hint": card_copy.hit_loop_hint(),
+        "source": "sift.cards.copy (cards_v4_1)",
+    }
+
+
+def onboarding_payload_safe() -> dict:
+    """onboarding_payload() with the fail-closed fallback: never raises."""
+    try:
+        return onboarding_payload()
+    except Exception:
+        return {
+            "statement": _ONBOARDING_FALLBACK["statement"],
+            "tos_acceptance": _ONBOARDING_FALLBACK["tos"],
+            "hit_loop_hint": ("Your saved connection fired — check it in your "
+                              "own charting tool; SIFT does not trade."),
+            "source": "static fallback (cards_v4_1 off)",
+        }
+
 MIME = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -51,8 +97,13 @@ MIME = {
 }
 
 
-def save_email(email: str) -> bool:
+def save_email(email: str, tos_accepted: bool = False) -> bool:
     """Append email to waitlist CSV. Returns False if it was a duplicate.
+
+    `tos_accepted` records day-one ToS acceptance (beta plan: "not an
+    investment / no resale value / no right to profit" is part of account
+    creation, live from day one). The waitlist form carries a mandatory
+    checkbox; the endpoint refuses signups without it (fail closed).
 
     Serialized with a lock: the server is threaded, and the
     exists-check/read/append sequence must be atomic to avoid duplicated
@@ -74,8 +125,9 @@ def save_email(email: str) -> bool:
         with WAITLIST_CSV.open("a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if not exists:
-                w.writerow(["email", "ts_utc", "source"])
-            w.writerow([email, datetime.now(timezone.utc).isoformat(timespec="seconds"), "landing"])
+                w.writerow(["email", "ts_utc", "source", "tos_accepted"])
+            w.writerow([email, datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "landing", "yes" if tos_accepted else "no"])
         return True
 
 
@@ -114,6 +166,11 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send_file(WEB_DIR / "index.html")
             return
+        # onboarding copy endpoint (first-run / account creation surface):
+        # the plain statement + day-one ToS, built by the copy builders.
+        if path == "/api/onboarding":
+            self._send_json(200, {"ok": True, "onboarding": onboarding_payload_safe()})
+            return
         # static files, confined to web/
         rel = Path(path.lstrip("/"))
         if rel.is_absolute() or ".." in rel.parts:
@@ -148,6 +205,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
 
         email = None
+        tos_accepted = False
         if ctype == "application/json":
             try:
                 data = json.loads(raw)
@@ -161,15 +219,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "Please provide a valid email address."})
                 return
             email = raw_email.strip()
+            # day-one ToS acceptance (fail closed): a signup without it is
+            # refused — "not an investment / no resale value / no right to
+            # profit" is part of account creation from day one.
+            tos_accepted = data.get("tos_accepted") is True
         else:  # form-encoded fallback
             from urllib.parse import parse_qs
-            email = parse_qs(raw).get("email", [""])[0].strip()
+            qs = parse_qs(raw)
+            email = qs.get("email", [""])[0].strip()
+            tos_accepted = qs.get("tos_accepted", [""])[0].strip().lower() in (
+                "1", "true", "yes", "on")
 
         if not EMAIL_RE.match(email):
             self._send_json(400, {"ok": False, "error": "Please provide a valid email address."})
             return
+        if not tos_accepted:
+            self._send_json(400, {"ok": False, "error":
+                                  "Please accept the terms to join the waitlist."})
+            return
 
-        added = save_email(email)
+        added = save_email(email, tos_accepted=tos_accepted)
         if added:
             self._send_json(200, {"ok": True, "message": "Added to the beta waitlist."})
         else:

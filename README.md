@@ -188,6 +188,20 @@ card layer and defaults **ON for the beta cohort**:
   anonymized `cards_fired_today`), per-card channel prefs (email / RSS
   token feed / API webhook with HMAC signature), quiet hours; fail-closed
   on any sign/symbol/banned phrase
+- `sift/cards/copy.py` — the newcomer-friendly copy + onboarding layer: the
+  ONLY place the new UX/onboarding strings are built (face explainer,
+  glossary tooltips, gauge labels, health phrases, onboarding statement,
+  day-one ToS, hit-loop hint). Every string is scanned against
+  `BANNED_PHRASES` (no buy/sell/long/short, no P&L/returns, no
+  profit-expectation/"value" language, no urgency/countdown) and the builder
+  raises `CopyError` on any hit — a banned phrase refuses the render. The
+  card face carries the explainer + glossary + gauge (stretched/normal/
+  compressed from |z| only, numeric |z| one click away) + health (plain
+  ratio vs mint baseline); `render()`/`render_share()` take optional
+  `current_abs_z` / `health_ratio` live readings (magnitude is always |z|,
+  never a sign). Onboarding copy is also served by `GET /api/onboarding`
+  (web/api/waitlist.py) and the waitlist signup requires ToS acceptance
+  (`tos_accepted`, recorded in the CSV)
 - `sift/cards/decay.py` — registry re-evaluation job: BIDIRECTIONAL tiers.
   Downgrades (amber) still happen any time from registry evidence; upgrades
   fire ONLY through pre-registered live-window rules (card age > 12m so the
@@ -212,7 +226,8 @@ card layer and defaults **ON for the beta cohort**:
 `flags.set_flag("cards_v4_1", False)` / `flags.disable_for_user("cards_v4_1", handle)`
 (per user). With the flag off every cards module fails closed with its own
 error type (`VaultError` / `FaceError` / `ShareError` / `BadgeError` /
-`NotifyError` / `DecayError` / `LayerError`, all carrying `flag_off`), the
+`NotifyError` / `DecayError` / `CopyError` / `LayerError`, all carrying
+`flag_off`), the
 runner mints no cards, and no new engagement is granted. Reads stay
 available — already-minted cards are append-only registry records and are
 never hidden, destroyed, or randomized by the kill-switch. Unknown flags
