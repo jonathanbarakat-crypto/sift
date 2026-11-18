@@ -11,7 +11,9 @@ card layer:
       -> ShareService                (share-for-capacity, cards 5/8, pull/18)
       -> BadgeService                (knowledge-reward badges, cards 6/8)
       -> Notifier                    (per-card opt-in notifications, cards 7/8, pull/19)
-      -> RegistryDecayJob            (downgrade-only re-evaluation, cards 7/8, pull/19)
+      -> RegistryDecayJob            (bidirectional re-evaluation: amber
+                                       downgrades any time + pre-registered
+                                       live-window upgrades, cards 7/8, pull/19)
       -> Metrics                     (gate-1 metric hooks)
 
 Every component independently enforces the flag (each mutating path raises

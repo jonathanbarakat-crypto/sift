@@ -79,10 +79,16 @@ STATE_QUEUED = "queued"
 STATE_DELIVERED = "delivered"
 
 # Banned copy (legal posture §6 + dark-pattern rules): no appreciation
-# language, no urgency/loss-aversion, no countdowns, no "act now".
+# language, no urgency/loss-aversion, no countdowns, no "act now", and —
+# for the bidirectional tier work (owner decision 2026-11-17) — no
+# profit-expectation or "value" language anywhere, including upgrade copy:
+# no "more valuable"/"valuable"/"value", no "appreciated", no "gained
+# value", no "profit", no return numbers ("return"), no "worth"/"price".
 BANNED_PHRASES = (
     "appreciat", "moon", "guaranteed", "risk-free", "act now", "don't miss",
     "last chance", "countdown", "expires in", "going up", "pump", "to the moon",
+    # profit-expectation / value language (v3 §12 + v4.1 §6, upgrade copy too)
+    "value", "valuable", "profit", "gained", "worth", "price", "return",
 )
 
 _SCHEMA_SQL = """
@@ -159,8 +165,20 @@ def copy_for_event(event: str, card, detail: dict | None = None) -> str:
         new = detail.get("to_tier", card.tier)
         text = (
             f"Registry re-evaluation downgraded card {card.card_id} from {old} "
-            f"to {new} (rarity tier, amber). Tiers only ever move down on "
-            f"re-evaluation — never up. Survival facts only; not a recommendation."
+            f"to {new} (rarity tier, amber). Tiers move down on re-evaluation "
+            f"and can rise only when the pre-registered live-window rules are "
+            f"met — never by payment or chance. Survival facts only; not a "
+            f"recommendation."
+        )
+    elif event == "upgrade":
+        old = detail.get("from_tier", "?")
+        new = detail.get("to_tier", card.tier)
+        text = (
+            f"Card {card.card_id} was re-validated on live data — rarity tier "
+            f"raised from {old} to {new} (green). The upgrade fired only "
+            f"because the pre-registered live-window rules were met on two "
+            f"consecutive fully out-of-sample annual windows; never by "
+            f"payment or chance. Survival facts only; not a recommendation."
         )
     elif event == "digest":
         n = detail.get("hit_count", 0)

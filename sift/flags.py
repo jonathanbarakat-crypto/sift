@@ -11,8 +11,9 @@
   6. share-for-capacity
   7. badges
   8. per-card opt-in hit notifications (digest default on free, live on
-     paid, rate-capped) + registry decay re-evaluation (downgrade-only
-     amber transitions, publicly explained)
+     paid, rate-capped) + registry decay re-evaluation (amber downgrades
+     any time + pre-registered live-window upgrades, both append-only
+     ledger events, publicly explained)
 
 Default ON for the beta cohort. The flag is read server-side only; it is
 never exposed to clients as a toggle (v3 §12: no client-side feature
