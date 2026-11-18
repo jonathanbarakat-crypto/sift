@@ -81,13 +81,25 @@ class CardFaceRenderer:
 
     def render(self, card_id: str, viewer_handle: str,
                now: float | None = None, *, with_image: bool = False,
-               diagram: dict | None = None) -> dict:
+               diagram: dict | None = None,
+               current_abs_z: float | None = None,
+               health_ratio: float | None = None) -> dict:
         """Render the public card face for `viewer_handle`. The artifact is
         watermarked handle+timestamp. Raises FaceError(flag_off) when
         cards_v4_1 is off for the viewer; CardError on unknown/foreign card
         (cards are non-transferable — the face is readable by the owner; for
         a shareable object the same artifact is emitted with the *sharing*
         handle's watermark, see render_share).
+
+        The face now carries the newcomer-friendly blocks (all built ONLY in
+        sift/cards/copy.py, all banned-phrase fail-closed):
+        `explainer` (one-paragraph plain-language face explainer),
+        `glossary` (jargon behind tooltips, not in the main view),
+        `gauge` (stretched/normal/compressed band from |z| + the numeric
+        |z| one click away) and `health` (plain ratio language vs the mint
+        baseline). `current_abs_z` / `health_ratio` are OPTIONAL live
+        readings supplied by the server (magnitude is always |z| — never a
+        sign; health is always a ratio — never a level).
 
         With `with_image=True` the PIL renderer (sift/cards/render.py,
         server-side only) additionally attaches an optional `image` field
@@ -99,7 +111,9 @@ class CardFaceRenderer:
             raise FaceError("flag_off: cards_v4_1 is disabled for this account")
         card = self.cards.get_card(card_id)
         now = time.time() if now is None else now
-        face = self._build_face(card, watermark_handle=viewer_handle, now=now)
+        face = self._build_face(card, watermark_handle=viewer_handle, now=now,
+                                current_abs_z=current_abs_z,
+                                health_ratio=health_ratio)
         # leak guard on the serialized artifact (hard rule: no raw tickers)
         _guard_face_artifact(face)
         if with_image:
@@ -110,17 +124,22 @@ class CardFaceRenderer:
 
     def render_share(self, card_id: str, owner_handle: str,
                      now: float | None = None, *, with_image: bool = False,
-                     diagram: dict | None = None) -> dict:
+                     diagram: dict | None = None,
+                     current_abs_z: float | None = None,
+                     health_ratio: float | None = None) -> dict:
         """The shareable object: same anonymized face, watermarked with the
         OWNER handle + timestamp (the handle that shared it), so a leaked
         share is traceable to the sharing account. `with_image` attaches the
         code-rendered PNG face (server-side PIL, watermarked) as the optional
-        `image` field — the shareable visual artifact."""
+        `image` field — the shareable visual artifact. `current_abs_z` /
+        `health_ratio` are the same optional live readings as in render()."""
         if not flags.cards_v4_1_enabled(owner_handle):
             raise FaceError("flag_off: cards_v4_1 is disabled for this account")
         card = self.cards.assert_owned(card_id, owner_handle)   # non-transferable
         now = time.time() if now is None else now
-        face = self._build_face(card, watermark_handle=owner_handle, now=now)
+        face = self._build_face(card, watermark_handle=owner_handle, now=now,
+                                current_abs_z=current_abs_z,
+                                health_ratio=health_ratio)
         _guard_face_artifact(face)
         if with_image:
             from sift.cards.render import attach_card_image
@@ -128,7 +147,10 @@ class CardFaceRenderer:
             _guard_face_artifact(face)
         return face
 
-    def _build_face(self, card: Card, watermark_handle: str, now: float) -> dict:
+    def _build_face(self, card: Card, watermark_handle: str, now: float,
+                    current_abs_z: float | None = None,
+                    health_ratio: float | None = None) -> dict:
+        from sift.cards import copy as card_copy
         trial_stages = {r["stage"]: dict(r) for r in self.ledger.stages(card.trial_id)}
         s5 = trial_stages.get("s5", {})
         s3 = trial_stages.get("s3", {})
@@ -153,6 +175,30 @@ class CardFaceRenderer:
                 "s3_dsr": s3.get("dsr"),
                 "s5_full_depth_t": s5.get("statistic"),
                 "s5_status": s5.get("status"),
+            },
+            # -- newcomer-friendly layer (all strings built ONLY in
+            # sift/cards/copy.py and banned-phrase fail-closed there) ----
+            "explainer": card_copy.face_explainer(
+                stages=len([s for s, r in trial_stages.items() if r["status"] == "pass"])
+                or 5, handle=watermark_handle),
+            "glossary": card_copy.glossary(handle=watermark_handle),
+            "gauge": {
+                # gauge-style magnitude: band from |z| ONLY (never the
+                # sign); the numeric |z| rides along one click away.
+                "band": card_copy.gauge_band(current_abs_z if current_abs_z is not None else 0.0),
+                "label": card_copy.gauge_label(
+                    card_copy.gauge_band(current_abs_z if current_abs_z is not None else 0.0)),
+                "magnitude_z": (round(abs(float(current_abs_z)), 4)
+                                if current_abs_z is not None else None),
+                "note": "magnitude is |z| only — no sign, no direction",
+            },
+            "health": {
+                # plain ratio language vs the mint baseline
+                "ratio_vs_mint_baseline": (round(float(health_ratio), 4)
+                                           if health_ratio is not None else None),
+                "phrase": card_copy.health_phrase(health_ratio),
+                "note": "a ratio vs the mint baseline — an observation about "
+                        "the signal, not a recommendation",
             },
             "watermark": {
                 "handle": watermark_handle,
