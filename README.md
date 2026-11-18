@@ -179,7 +179,15 @@ card layer and defaults **ON for the beta cohort**:
   scope honesty), opt-in display, fail-closed guard against any
   P&L/win-rate/directional payload
 - `sift/cards/notify.py` — per-card opt-in hit notifications; free tier
-  defaults to a rate-capped digest, paid may go live; signals-only
+  defaults to a rate-capped digest, paid may go live; signals-only. All
+  user-facing copy is built only in `copy_for_event` and grepped fail-closed
+  (banned phrases + whole-word directional bans + P&L/value language)
+- `sift/cards/events.py` — rich v1 signal-event package for hit
+  notifications: versioned payload (magnitude-only statistic + threshold,
+  persistence/health facts from ledger stage rows only — never params_json,
+  anonymized `cards_fired_today`), per-card channel prefs (email / RSS
+  token feed / API webhook with HMAC signature), quiet hours; fail-closed
+  on any sign/symbol/banned phrase
 - `sift/cards/decay.py` — registry re-evaluation job: BIDIRECTIONAL tiers.
   Downgrades (amber) still happen any time from registry evidence; upgrades
   fire ONLY through pre-registered live-window rules (card age > 12m so the

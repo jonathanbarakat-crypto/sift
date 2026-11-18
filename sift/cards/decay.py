@@ -73,7 +73,7 @@ import numpy as np
 
 from sift import flags
 from sift.cards import CARD_TIERS, Card, CardError, CardRegistry, decay_tier, tier_from_stats
-from sift.cards.notify import BANNED_PHRASES, Notifier
+from sift.cards.notify import BANNED_PHRASES, Notifier, contains_banned
 from sift.gauntlet import config as gcfg
 from sift.gauntlet import stats as gstats
 from sift.registry import Ledger
@@ -295,12 +295,15 @@ def live_window_evaluator(
 # ---------------------------------------------------------------------------
 
 def _assert_no_banned(text: str) -> None:
-    low = text.lower()
-    for phrase in BANNED_PHRASES:
-        if phrase in low:
-            raise DecayError(
-                f"public explanation contains banned phrase {phrase!r} — refused"
-            )
+    """Fail-closed guard shared with notify.copy_for_event: raises
+    DecayError on the first banned phrase/word (substring scan over
+    BANNED_PHRASES + whole-word scan over directional words) so every
+    public explanation string is covered by the same grep discipline."""
+    banned = contains_banned(text)
+    if banned is not None:
+        raise DecayError(
+            f"public explanation contains banned phrase {banned!r} — refused"
+        )
 
 
 def public_explanation(card_id: str, from_tier: str, to_tier: str,
