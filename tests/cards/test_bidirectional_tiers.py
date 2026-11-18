@@ -223,17 +223,25 @@ def test_upgrade_refused_when_not_sustained_two_windows(ledger, cards):
 
 def test_meets_tier_bar_matches_mint_time_thresholds():
     from sift.cards.decay import WindowStats
-    # gold bar identical to tier_from_stats gold
-    assert meets_tier_bar(WindowStats(0, 252, 0.99, 4.0, 0.01), "gold")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.989, 4.0, 0.01), "gold")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.99, 3.99, 0.01), "gold")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.99, 4.0, 0.011), "gold")
-    # silver bar
-    assert meets_tier_bar(WindowStats(0, 252, 0.95, 3.0, 0.5), "silver")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.949, 3.0, 0.5), "silver")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.95, 2.99, 0.5), "silver")
+    # v4.2 §3 (#170): RAW bars only, identical to tier_from_stats at mint —
+    # DSR is NOT part of the bar (the dsr field is ignored on purpose).
+    # gold bar = p_perm <= 0.01 (raw); platinum = |t| >= 4.0 AND p <= 0.01;
+    # silver = |t| >= 3.0 AND p <= 0.05.
+    assert meets_tier_bar(WindowStats(0, 252, None, 9.0, 0.01), "gold")
+    assert meets_tier_bar(WindowStats(0, 252, 0.0, 9.0, 0.01), "gold")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 9.0, 0.011), "gold")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.0, 9.0, 0.011), "gold")
+    # platinum bar (raw): |t| >= 4.0 AND p <= 0.01 — dsr irrelevant
+    assert meets_tier_bar(WindowStats(0, 252, 0.0, 4.0, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 3.99, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 4.0, 0.011), "platinum")
+    # silver bar (raw): |t| >= 3.0 AND p <= 0.05
+    assert meets_tier_bar(WindowStats(0, 252, 0.0, 3.0, 0.05), "silver")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 2.99, 0.05), "silver")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 3.0, 0.051), "silver")
     # missing stats never qualify
-    assert not meets_tier_bar(WindowStats(0, 252, None, 9.0, 0.001), "gold")
+    assert not meets_tier_bar(WindowStats(0, 252, None, None, 0.001), "gold")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 9.0, None), "gold")
 
 
 # -- all rules pass -> upgrade applied + ledger event + read-back -------------

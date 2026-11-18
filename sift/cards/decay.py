@@ -1,4 +1,4 @@
-"""v4.1 registry decay re-evaluation (mechanics 7/8 — BIDIRECTIONAL, pre-registered).
+"""v4.2 registry decay re-evaluation (mechanics 7/8 — BIDIRECTIONAL, pre-registered).
 
 Owner decision 2026-11-17: card-tier decay changes from downgrade-only to
 **bidirectional with strict pre-registered upgrade rules** (v4.1 spec §2/§4 +
@@ -13,12 +13,16 @@ v3 §6.1):
      12 months (WINDOW_BARS = 252 trading days), so the entire trailing
      window is bars the mint-time gauntlet never saw. Before 12m the
      window overlaps mint-time data (in-sample echo) — upgrades refused.
-  2. PRE-REGISTERED THRESHOLDS, IDENTICAL TO THE MINT-TIME BAR: an upgrade
-     silver->gold requires the trailing-12m live re-evaluation to meet the
-     SAME stats `tier_from_stats` uses for gold at mint (DSR >= 0.99 at
-     scope AND full-depth |t_net| >= 4.0 AND p_perm <= 0.01 on the live
-     window). bronze->silver analogously against the silver bar
-     (DSR >= 0.95 AND full-depth |t_net| >= 3.0). No operator discretion.
+  2. PRE-REGISTERED THRESHOLDS ON RAW STATS, IDENTICAL TO THE MINT-TIME
+     BAR: an upgrade silver->gold requires the trailing-12m live
+     re-evaluation to meet the SAME RAW stats `tier_from_stats` uses for
+     gold at mint (full-depth |t_net| >= 4.0 for platinum / the S4 bar +
+     p_perm <= 0.01 for gold, and |t_net| >= 3.0 + p_perm <= 0.05 for
+     silver). Per owner decision 2026-11-18 (hermes-tasks #170) the bars
+     are RAW and N-INDEPENDENT: DSR is NOT part of the live-window bar —
+     decay/re-evaluation NEVER re-deflates by a current stratum N. The
+     mint-time DSR gate lives only at mint (CardRegistry.mint). No
+     operator discretion.
   3. SUSTAINED, NOT SPIKY: the qualifying stats must hold on the trailing
      12m AND the preceding 12m (two consecutive annual windows).
   4. RATE LIMIT: at most one tier change (up OR down) per card per 90 days.
@@ -32,16 +36,23 @@ v3 §6.1):
   8. Downgrade behavior is UNCHANGED: down-only still allowed any time from
      registry evidence (amber), still via `card_decay` events.
 
+- HEALTH is the one N-SENSITIVE quantity, deliberately (owner decision
+  2026-11-18, #170): health = the card's trailing-12m live-window Sharpe
+  vs the expected max Sharpe of N_current random strategies over the SAME
+  window (a current-window DSR-style deflation, `health_ratio` below),
+  display-only, never a tier, downgrade-only until fully out-of-sample.
+  See `health_ratio` / `health_facts`.
+
 - The registry pass (`RegistryDecayJob.run_pass`) re-evaluates every card
   against fresh registry evidence (a `re_evaluator` callable supplied by
   the engine; default `default_re_evaluator` re-derives the tier from the
-  card's own pre-registered ledger stats). A LOWER proposal downgrades
-  (written to the card row, decayed_from recorded, `card_decay` event
-  appended, owner notified through the per-card channel). A HIGHER proposal
-  is NOT applied blindly: it is checked against the pre-registered live
-  window rules by `live_window_evaluator` (age > 12m, two consecutive
-  qualifying annual windows, rate limit, seeded re-evaluation) and only
-  then applied as a `card_upgrade` event.
+  card's own pre-registered RAW ledger stats — S2 p, S4 bar, S5 t). A LOWER
+  proposal downgrades (written to the card row, decayed_from recorded,
+  `card_decay` event appended, owner notified through the per-card
+  channel). A HIGHER proposal is NOT applied blindly: it is checked against
+  the pre-registered live window rules by `live_window_evaluator` (age > 12m,
+  two consecutive qualifying annual windows, rate limit, seeded
+  re-evaluation) and only then applied as a `card_upgrade` event.
 - The amber transition is PUBLIC and EXPLAINED: `public_explanation`
   returns the public text shown on the card face / registry page. A card
   that can visibly die is the core honesty artifact (v3 §6.1). The green
@@ -87,30 +98,38 @@ UPGRADE_EVENT = "card_upgrade"    # pre-registered live-window upgrade (green)
 WINDOW_BARS = gcfg.BARS_PER_YEAR            # 252: one annual window in bars
 MIN_CARD_AGE_BARS = WINDOW_BARS             # card age must EXCEED this (rule 1)
 RATE_LIMIT_S = 90 * 86400.0                # max one tier change per card per 90d (rule 4)
-# Mint-time bars per gold/silver (tier_from_stats): reused VERBATIM so the
-# live-window bar is identical to the mint-time bar (rule 2) — no drift.
-# v4.2 §3: the pull/31 gold bar (DSR >= 0.99 AND |t_net| >= 4.0 AND
-# p_perm <= 0.01) is now the PLATINUM bar; gold adds the S4 score bar.
-GOLD_DSR, GOLD_T_NET, GOLD_P_PERM = 0.99, 4.0, 0.01
-SILVER_DSR, SILVER_T_NET = 0.95, 3.0
-PLATINUM_DSR, PLATINUM_T_NET, PLATINUM_P_PERM = 0.99, 4.0, 0.01
+# RAW, N-INDEPENDENT live-window bars per tier (owner decision 2026-11-18,
+# hermes-tasks #170): identical to `tier_from_stats` at mint, with DSR REMOVED
+# (decay/re-evaluation never re-deflates by a current N). The numeric bars
+# that map 1:1 to raw stats are kept verbatim from pull/31.
+SILVER_T_NET, SILVER_P_PERM = 3.0, 0.05    # silver: |t_net_full| >= 3.0 AND p_perm <= 0.05
+GOLD_P_PERM = 0.01                          # gold: p_perm <= 0.01 (S4 bar is a mint-time scope fact)
+PLATINUM_T_NET, PLATINUM_P_PERM = 4.0, 0.01 # platinum: |t_net_full| >= 4.0 AND p_perm <= 0.01
+# Deprecated aliases kept for callers/tests that referenced the pre-#170
+# DSR-carrying bars; they now hold the RAW values (no DSR anywhere).
+GOLD_DSR, GOLD_T_NET = 0.99, 4.0            # legacy: platinum bar's old names
+SILVER_DSR = 0.95                           # legacy: the mint-time admission gate value
+PLATINUM_DSR, PLATINUM_T_NET_ALIAS, PLATINUM_P_PERM = 0.99, 4.0, 0.01
 
 # Default re-evaluator: re-derive the tier from the card's own
-# pre-registered ledger stats (S3 DSR + S5 full-depth t_net + S2 p_perm).
-# The registry pass may move a tier DOWN on this evidence at any time;
-# a HIGHER proposal is never applied directly — it must pass the
-# pre-registered live-window rules (live_window_evaluator).
+# pre-registered RAW ledger stats (S2 p_perm, S4 bar, S5 full-depth t_net).
+# v4.2 §3 (#170): the S3 DSR row is read ONLY to record mint-time admission
+# context — it is NOT passed to tier_from_stats, so the re-evaluated tier
+# never drifts with the stratum N. The registry pass may move a tier DOWN on
+# this evidence at any time; a HIGHER proposal is never applied directly —
+# it must pass the pre-registered live-window rules (live_window_evaluator).
 
 
 def default_re_evaluator(card: Card, ledger: Ledger) -> str:
-    """Re-evaluate a card's tier from its pre-registered ledger stats.
-    Pure read of stage rows; returns one of CARD_TIERS (v4.2 incl. platinum)."""
+    """Re-evaluate a card's tier from its pre-registered RAW ledger stats.
+    Pure read of stage rows; returns one of CARD_TIERS (v4.2 incl. platinum).
+    DSR is deliberately NOT an input (N-independence, #170)."""
     s2 = ledger.stage(card.trial_id, "s2")
-    s3 = ledger.stage(card.trial_id, "s3")
     s4 = ledger.stage(card.trial_id, "s4")
     s5 = ledger.stage(card.trial_id, "s5")
     return tier_from_stats(
-        dsr=s3["dsr"], t_net_full=s5["statistic"], p_perm=s2["p_value"],
+        dsr=None,                       # NOT a tier input (#170) — raw stats only
+        t_net_full=s5["statistic"], p_perm=s2["p_value"],
         s4_pass=s4["status"] == "pass", s5_pass=s5["status"] == "pass",
     )
 
@@ -121,10 +140,12 @@ def default_re_evaluator(card: Card, ledger: Ledger) -> str:
 
 @dataclass(frozen=True)
 class WindowStats:
-    """The three pre-registered stats on one annual live window."""
+    """The pre-registered RAW stats on one annual live window (v4.2 §3,
+    #170: N-independent — `dsr` is kept ONLY as current-stratum context for
+    the HEALTH ratio, never as a tier input)."""
     window_start_bar: int
     window_end_bar: int
-    dsr: float | None
+    dsr: float | None          # current-stratum deflation — HEALTH context only
     t_net_full: float | None
     p_perm: float | None
 
@@ -132,13 +153,15 @@ class WindowStats:
 def _window_stats(returns: np.ndarray, *, start: int, end: int,
                   n_stratum: int, v_stratum: float, seed: int,
                   s2_B: int) -> WindowStats:
-    """Compute the three pre-registered stats on bars [start, end) of the
+    """Compute the pre-registered stats on bars [start, end) of the
     live window, exactly as the mint-time gauntlet computes them:
 
     - S2 block-permutation p on the window's spread returns (PCG64-seeded,
       same as S2: `block_permutation_null`);
     - S4 walk-forward net returns at full depth -> |t_net| (t_stat_sharpe);
-    - S3 DSR with the scope-stratified stratum denominator.
+    - S3-style DSR with the CURRENT stratum denominator — recorded as
+      current-stratum context for the HEALTH ratio only; per #170 it is
+      NEVER used by meets_tier_bar (the tier bar is raw, N-independent).
 
     Deterministic for a given (returns, window, seed, s2_B, stratum).
     """
@@ -164,27 +187,64 @@ def _window_stats(returns: np.ndarray, *, start: int, end: int,
 
 
 def meets_tier_bar(ws: WindowStats, tier: str) -> bool:
-    """Rule 2: does one annual window meet the pre-registered bar for
-    `tier`? The bars are IDENTICAL to `tier_from_stats` at mint (v4.2):
-    platinum = DSR >= 0.99 AND |t_net| >= 4.0 AND p_perm <= 0.01;
-    gold = the platinum bar's DSR/p components (the S4 bar is a mint-time
-    scope fact, not re-derivable per live window) — so gold's live-window bar
-    is the platinum stat line; silver = DSR >= 0.95 AND |t_net| >= 3.0.
-    Missing stats never qualify."""
-    if ws.dsr is None or ws.t_net_full is None or ws.p_perm is None:
+    """Rule 2: does one annual window meet the pre-registered RAW bar for
+    `tier`? The bars are IDENTICAL to `tier_from_stats` at mint (v4.2 §3,
+    #170) and contain NO DSR — decay/re-evaluation never re-deflates by a
+    current N:
+    platinum = |t_net_full| >= 4.0 AND p_perm <= 0.01;
+    gold     = p_perm <= 0.01 (the S4 bar is a mint-time scope fact, not
+               re-derivable per live window);
+    silver   = |t_net_full| >= 3.0 AND p_perm <= 0.05.
+    Missing stats never qualify. `ws.dsr` is ignored here on purpose."""
+    if ws.t_net_full is None or ws.p_perm is None:
         return False
     if tier == "platinum":
-        return (ws.dsr >= PLATINUM_DSR and abs(ws.t_net_full) >= PLATINUM_T_NET
+        return (abs(ws.t_net_full) >= PLATINUM_T_NET
                 and ws.p_perm <= PLATINUM_P_PERM)
     if tier == "gold":
-        # gold's live-window bar == the platinum stat line (DSR 0.99 / |t| 4.0 /
-        # p 0.01); the S4 scope bar is mint-time only. Same numbers as
-        # pull/31's gold bar so the live-window bar never drifts.
-        return (ws.dsr >= GOLD_DSR and abs(ws.t_net_full) >= GOLD_T_NET
-                and ws.p_perm <= GOLD_P_PERM)
+        # gold's live-window bar is the raw p_perm <= 0.01 line; the S4
+        # scope bar is mint-time only. (Same numeric spirit as pull/31's
+        # gold bar minus DSR so the live-window bar never drifts with N.)
+        return ws.p_perm <= GOLD_P_PERM
     if tier == "silver":
-        return ws.dsr >= SILVER_DSR and abs(ws.t_net_full) >= SILVER_T_NET
+        return abs(ws.t_net_full) >= SILVER_T_NET and ws.p_perm <= SILVER_P_PERM
     return False
+
+
+# ---------------------------------------------------------------------------
+# Health — the deliberately N-SENSITIVE quantity (owner decision 2026-11-18,
+# hermes-tasks #170). Display-only, never a tier, downgrade-only until the
+# trailing window is fully out-of-sample.
+# ---------------------------------------------------------------------------
+
+def health_ratio(live_returns: np.ndarray, *, start: int, end: int,
+                 n_stratum_current: int, v_stratum_current: float) -> float | None:
+    """N-sensitive health ratio on one live window (v4.2 §3, #170):
+
+    health = (card's live-window annualized Sharpe)
+             / (expected max Sharpe of N_current random strategies over the
+                SAME window)  — i.e. sr_hat / SR*(N_current, V̄_current).
+
+    The denominator is a CURRENT-stratum DSR-style deflation, so when many
+    new candidates are minted in the same regime the luck ceiling SR* rises
+    with N_current and the health ratio DROPS for unchanged card
+    performance; with unchanged N the ratio is stable. Returns None when
+    the window has too few bars or the denominator is degenerate (never
+    fabricated). Display-only: never a tier, never an upgrade input.
+    """
+    r = np.asarray(live_returns, float)[start:end]
+    r = r[np.isfinite(r)]
+    T = int(r.size)
+    if T < 2:
+        return None
+    sr_ann = gstats.sharpe_ratio(r)
+    sr_bar = sr_ann / math.sqrt(gcfg.BARS_PER_YEAR)
+    n = max(int(n_stratum_current), 1)
+    v = max(float(v_stratum_current), 1.0 / max(T, 2))
+    sr_star = gstats.expected_max_sharpe(n, v)
+    if not (sr_star > 0) or not math.isfinite(sr_star):
+        return None
+    return float(sr_bar / sr_star)
 
 
 @dataclass(frozen=True)
@@ -280,7 +340,7 @@ def live_window_evaluator(
         return LiveWindowEvidence(
             eligible=False,
             reason=(f"trailing {w}m live window below the pre-registered "
-                    f"{target} bar (DSR {trailing.dsr}, |t_net| "
+                    f"{target} bar (|t_net| "
                     f"{trailing.t_net_full}, p_perm {trailing.p_perm})"),
             target_tier=target, trailing=trailing, preceding=preceding,
             card_age_bars=age_bars, seed=seed,
@@ -297,8 +357,8 @@ def live_window_evaluator(
     return LiveWindowEvidence(
         eligible=True,
         reason=(f"re-validated on live data: trailing and preceding {w}m "
-                f"windows both meet the pre-registered {target} bar "
-                f"(fully out-of-sample, card age {age_bars} bars)"),
+                f"windows both meet the pre-registered {target} bar on RAW "
+                f"stats (fully out-of-sample, card age {age_bars} bars)"),
         target_tier=target, trailing=trailing, preceding=preceding,
         card_age_bars=age_bars, seed=seed,
     )
@@ -445,9 +505,10 @@ class RegistryDecayJob:
             downgraded = True
             event_type = DECAY_EVENT
             reason = (
-                "registry re-evaluation against pre-registered gauntlet stats "
-                f"(S3 DSR, S5 full-depth t_net, S2 permutation p) no longer "
-                f"supports the {card.tier} rarity tier"
+                "registry re-evaluation against pre-registered RAW gauntlet "
+                "stats (S5 full-depth t_net, S4 bar, S2 permutation p — "
+                "N-independent, no DSR re-deflation) no longer supports the "
+                f"{card.tier} rarity tier"
             )
             public_text = public_explanation(card.card_id, card.tier, target, reason)
             payload_extra = {"reason": reason}
@@ -574,20 +635,22 @@ __all__ = [
     "MIN_CARD_AGE_BARS",
     "RATE_LIMIT_S",
     "WINDOW_BARS",
+    "SILVER_T_NET",
+    "SILVER_P_PERM",
+    "GOLD_P_PERM",
     "GOLD_DSR",
     "GOLD_T_NET",
-    "GOLD_P_PERM",
     "SILVER_DSR",
-    "SILVER_T_NET",
-    "PLATINUM_DSR",
     "PLATINUM_T_NET",
     "PLATINUM_P_PERM",
+    "PLATINUM_DSR",
     "DecayError",
     "DecayResult",
     "LiveWindowEvidence",
     "RegistryDecayJob",
     "WindowStats",
     "default_re_evaluator",
+    "health_ratio",
     "live_window_evaluator",
     "meets_tier_bar",
     "public_explanation",

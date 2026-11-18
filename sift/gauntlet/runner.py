@@ -102,7 +102,12 @@ class GauntletRunner:
     def run_s3(self, trial_id: str, sr_hat_per_bar: float, T: int,
                p_value: float, scope_id: str) -> StageResult:
         """S3 scope-stratified DSR >= 0.95 with N, V from the ledger stratum;
-        BH-FDR q=0.10 recorded at family level."""
+        BH-FDR q=0.10 recorded at family level.
+
+        v4.2 §2-§3 (#170): S3's DSR is the MINT-TIME ADMISSION GATE only. The
+        stage row records dsr, sr_star, n_stratum, v_stratum, q_bh as
+        "admission evidence at mint-time N" context — the card tier never
+        re-deflates by a later N."""
         n_stratum, v_stratum = self.ledger.stratum_stats(scope_id)
         # the candidate's own S4 statistic enters the stratum variance
         returns = getattr(self, "_last_s4_returns", None)
@@ -125,7 +130,11 @@ class GauntletRunner:
                            p_value=p_value, n_stratum=n_stratum,
                            v_stratum=d["v_stratum"], dsr=d["dsr"], q_bh=q_bh,
                            detail={"sr_star": d["sr_star"], "sr_hat": d["sr_hat"],
-                                   "skew": skew, "kurt": kurt})
+                                   "skew": skew, "kurt": kurt,
+                                   "admission_label": (
+                                       "admission evidence at mint-time N "
+                                       "(DSR gate only — never a tier input, "
+                                       "never re-deflated by a later N)")})
 
     def run_s4(self, trial_id: str, net_returns: np.ndarray, scope_id: str,
                p_perm: float | None = None) -> StageResult:

@@ -169,27 +169,35 @@ def test_unchanged_tier_is_a_no_op(ledger, cards, notifier):
 
 
 def test_default_re_evaluator_uses_preregistered_ledger_stats(ledger, cards, notifier):
-    """The default re-evaluator re-derives the tier from the card's own S2/S3/S4/S5
-    stage rows — a static function of gauntlet strength, not of payment.
-    v4.2: s4 fail on the recorded row caps the re-evaluation at silver."""
+    """The default re-evaluator re-derives the tier from the card's own S2/S4/S5
+    stage rows — a static function of RAW gauntlet strength, not of payment.
+    v4.2 §3 (#170): the S3 DSR row is NOT an input (N-independence) — s4 fail
+    caps the re-evaluation below gold/platinum."""
     card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False, s4_pass=False)
     card = cards.get_card(card_id)
+    # raw stats: s4 fail + s5 fail + |t| 4.5 + p 0.005 -> silver (|t|>=3, p<=0.05)
     assert card.tier == "silver"                    # s4 fail caps mint at silver
     assert default_re_evaluator(card, ledger) == "silver"
-    # restore the S4 row to pass -> the full vector reaches gold
+    # restore the S4 row to pass -> raw vector reaches gold (p 0.005, |t| 4.5)
     ledger.con.execute(
         "UPDATE stage_result SET status='pass' WHERE trial_id=? AND stage='s4'",
         (trial_id,),
     )
     ledger.con.commit()
     assert default_re_evaluator(cards.get_card(card_id), ledger) == "gold"
-    # weaken the recorded S5 stat AND fail S5 -> the full vector drops to silver
+    # weaken the recorded S5 stat AND fail S5, and drop p_perm above 0.05 ->
+    # the raw vector drops to bronze (|t| 3.1 >= 3.0 but p 0.06 > 0.05);
+    # the S3 DSR row is deliberately also lowered and must NOT matter (#170)
     ledger.con.execute(
         "UPDATE stage_result SET statistic=3.1, status='fail' WHERE trial_id=? AND stage='s5'",
         (trial_id,),
     )
     ledger.con.execute(
-        "UPDATE stage_result SET dsr=0.90 WHERE trial_id=? AND stage='s3'",
+        "UPDATE stage_result SET p_value=0.06 WHERE trial_id=? AND stage='s2'",
+        (trial_id,),
+    )
+    ledger.con.execute(
+        "UPDATE stage_result SET dsr=0.10 WHERE trial_id=? AND stage='s3'",
         (trial_id,),
     )
     ledger.con.commit()

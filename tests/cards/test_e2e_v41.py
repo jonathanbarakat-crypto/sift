@@ -606,7 +606,13 @@ def test_decay_never_upgrades_and_is_public(layer):
     r = layer.decay.evaluate_card(card, now=NOW + 10)
     assert r.downgraded is False
     assert layer.cards.get_card(card_id).tier == card.tier   # unchanged
-    # weaken -> downgrade to bronze, public + explained, ledger event appended
+    # weaken the RAW S2 permutation evidence (p 0.005 -> 0.06) -> raw
+    # vector drops to bronze; the S3 DSR row is also lowered and must NOT
+    # matter (#170: tier is N-independent, DSR is the mint-time gate only)
+    layer.ledger.con.execute(
+        "UPDATE stage_result SET p_value=0.06 WHERE trial_id=? AND stage='s2'",
+        (trial.trial_id,),
+    )
     layer.ledger.con.execute(
         "UPDATE stage_result SET dsr=0.80 WHERE trial_id=? AND stage='s3'",
         (trial.trial_id,),
