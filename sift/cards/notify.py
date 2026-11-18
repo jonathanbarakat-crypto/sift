@@ -38,6 +38,7 @@ the DB before the result is returned.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -78,18 +79,44 @@ EVENT_KINDS = (EVENT_HIT, EVENT_DIGEST, EVENT_LIFECYCLE)
 STATE_QUEUED = "queued"
 STATE_DELIVERED = "delivered"
 
-# Banned copy (legal posture §6 + dark-pattern rules): no appreciation
-# language, no urgency/loss-aversion, no countdowns, no "act now", and —
-# for the bidirectional tier work (owner decision 2026-11-17) — no
-# profit-expectation or "value" language anywhere, including upgrade copy:
-# no "more valuable"/"valuable"/"value", no "appreciated", no "gained
-# value", no "profit", no return numbers ("return"), no "worth"/"price".
+# Banned copy (legal posture §6 + dark-pattern rules + v3 §12 red lines):
+# no appreciation language, no urgency/loss-aversion, no countdowns, no
+# "act now", no P&L or returns, no profit-expectation/"value" language —
+# these are SUBSTRING bans and cover EVERY string built in `copy_for_event`
+# (including upgrade copy), the rich hit gloss (magnitude only), and the
+# decay public explanations.
 BANNED_PHRASES = (
     "appreciat", "moon", "guaranteed", "risk-free", "act now", "don't miss",
     "last chance", "countdown", "expires in", "going up", "pump", "to the moon",
     # profit-expectation / value language (v3 §12 + v4.1 §6, upgrade copy too)
-    "value", "valuable", "profit", "gained", "worth", "price", "return",
+    "pnl", "p&l", "value", "valuable", "profit", "gained", "worth", "price",
+    "return", "yield", "invest",
 )
+
+# Directional / trade words are banned as WHOLE WORDS only (word-boundary
+# match) so legitimate prose like "no longer supports" is not caught —
+# "long" as a substring would false-positive on "longer".
+BANNED_WORDS = ("buy", "sell", "long", "short")
+_BANNED_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(BANNED_WORDS) + r")\b", re.IGNORECASE
+)
+
+
+def contains_banned(text: str) -> str | None:
+    """Return the first banned phrase/word found in `text` (lowercased
+    substring scan over BANNED_PHRASES, word-boundary scan over
+    BANNED_WORDS), or None when the text is clean. This is the single
+    fail-closed check used by `copy_for_event` AND by the decay public
+    explanations (sift/cards/decay.py) — the banned-phrase grep test covers
+    every user-facing string through this helper."""
+    low = text.lower()
+    for phrase in BANNED_PHRASES:
+        if phrase in low:
+            return phrase
+    m = _BANNED_WORD_RE.search(low)
+    if m:
+        return m.group(0)
+    return None
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS notify_pref (
@@ -148,11 +175,19 @@ def copy_for_event(event: str, card, detail: dict | None = None) -> str:
     Raises NotifyError if a banned phrase would slip in (fail closed)."""
     detail = detail or {}
     if event == "hit":
+        stat = detail.get("statistic")
+        thr = detail.get("threshold")
+        mag = ""
+        if stat is not None and thr is not None:
+            mag = (f" The monitored spread is at magnitude {stat} against its "
+                   f"pre-registered entry band of {thr} (magnitude only — the "
+                   f"event carries no sign and no leg).")
         text = (
             f"Signal event on your saved connection (card {card.card_id}, "
-            f"{card.family} in {card.scope_id}, tier {card.tier}): a monitored "
-            f"hit fired. Signal delivery only — SIFT does not trade and this "
-            f"is not a recommendation."
+            f"{card.family} in {card.scope_id}, tier {card.tier}): the "
+            f"monitored relationship is currently stretched beyond its usual "
+            f"range.{mag} This is an observation about the signal, not a "
+            f"recommendation — signal delivery only; SIFT does not trade."
         )
     elif event == "minted":
         text = (
@@ -190,9 +225,9 @@ def copy_for_event(event: str, card, detail: dict | None = None) -> str:
     else:
         raise NotifyError(f"unknown notification event {event!r}")
     low = text.lower()
-    for phrase in BANNED_PHRASES:
-        if phrase in low:
-            raise NotifyError(f"copy contains banned phrase {phrase!r} — refused")
+    banned = contains_banned(text)
+    if banned is not None:
+        raise NotifyError(f"copy contains banned phrase {banned!r} — refused")
     return text
 
 
@@ -507,6 +542,7 @@ class Notifier:
 
 __all__ = [
     "BANNED_PHRASES",
+    "BANNED_WORDS",
     "DAY",
     "DELIVERY_MODES",
     "DIGEST_CAP_PER_CARD_PER_DAY",
@@ -523,5 +559,6 @@ __all__ = [
     "NotifyError",
     "NotifyPref",
     "Notifier",
+    "contains_banned",
     "copy_for_event",
 ]
