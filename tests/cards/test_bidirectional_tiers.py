@@ -6,9 +6,11 @@ Fixtures:
   mint-time data);
 - upgrade REFUSED when the two consecutive annual windows do not both meet
   the pre-registered bar (sustained, not spiky);
-- upgrade REFUSED below the gold bar (DSR >= 0.99 AND |t_net| >= 4.0 AND
-  p_perm <= 0.01 — identical to tier_from_stats at mint; silver bar
-  DSR >= 0.95 AND |t_net| >= 3.0 for bronze->silver);
+- upgrade REFUSED below the gold bar (DSR >= 0.99 AND |t_win| >= 1.0 AND
+  p_perm <= 0.01 on the 252-bar window — identical to tier_from_stats at mint
+  in window-length-INVARIANT terms: the mint bar is full-depth |t| >= 4.0 at
+  4032 bars, and 4.0*sqrt(252/4032) = 1.0; silver bar DSR >= 0.95 AND
+  |t_win| >= 0.75);
 - upgrade ALLOWED when all rules pass (age > 12m, trailing AND preceding
   12m windows at the bar, no tier change in the last 90d, seeded) ->
   card row raised + `card_upgrade` ledger event appended with evidence
@@ -222,16 +224,34 @@ def test_upgrade_refused_when_not_sustained_two_windows(ledger, cards):
 
 
 def test_meets_tier_bar_matches_mint_time_thresholds():
-    from sift.cards.decay import WindowStats
-    # gold bar identical to tier_from_stats gold
-    assert meets_tier_bar(WindowStats(0, 252, 0.99, 4.0, 0.01), "gold")
+    from sift.cards.decay import MINT_T_FULL, WindowStats, window_t_hurdle
+    # gold bar identical to tier_from_stats gold, in window-length-INVARIANT
+    # terms (soundness #5): the mint-time bar is a FULL-DEPTH (MINT_T_FULL-bar)
+    # |t| >= 4.0; on a 252-bar window the identical bar is
+    # |t_win| >= 4.0*sqrt(252/MINT_T_FULL) = 1.0 (annSR >= 1.0).
+    gold_hurdle_252 = window_t_hurdle(4.0, 252)
+    assert abs(gold_hurdle_252 - 1.0) < 1e-12
+    # full-depth window: raw 4.0 bar applies verbatim
+    assert meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.99, 4.0, 0.01), "gold")
+    assert not meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.99, 3.99, 0.01), "gold")
+    # 252-bar window: invariant hurdle 1.0, NOT the raw 4.0
+    assert meets_tier_bar(WindowStats(0, 252, 0.99, gold_hurdle_252, 0.01), "gold")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.99, gold_hurdle_252 - 1e-9, 0.01), "gold")
+    # a raw 3.99 on a 252-bar window CLEARS the invariant bar (3.99 > 1.0) —
+    # that is the fix, not a weakening: 3.99 on 252 bars == t_full 63.7 at
+    # full depth, far above the mint gold bar.
+    assert meets_tier_bar(WindowStats(0, 252, 0.99, 3.99, 0.01), "gold")
+    # DSR / p_perm rules unchanged
     assert not meets_tier_bar(WindowStats(0, 252, 0.989, 4.0, 0.01), "gold")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.99, 3.99, 0.01), "gold")
     assert not meets_tier_bar(WindowStats(0, 252, 0.99, 4.0, 0.011), "gold")
-    # silver bar
-    assert meets_tier_bar(WindowStats(0, 252, 0.95, 3.0, 0.5), "silver")
+    # silver bar: full-depth raw 3.0; on 252 bars the invariant hurdle is 0.75
+    silver_hurdle_252 = window_t_hurdle(3.0, 252)
+    assert abs(silver_hurdle_252 - 0.75) < 1e-12
+    assert meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.95, 3.0, 0.5), "silver")
+    assert not meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.95, 2.99, 0.5), "silver")
+    assert meets_tier_bar(WindowStats(0, 252, 0.95, silver_hurdle_252, 0.5), "silver")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.95, silver_hurdle_252 - 1e-9, 0.5), "silver")
     assert not meets_tier_bar(WindowStats(0, 252, 0.949, 3.0, 0.5), "silver")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.95, 2.99, 0.5), "silver")
     # missing stats never qualify
     assert not meets_tier_bar(WindowStats(0, 252, None, 9.0, 0.001), "gold")
 

@@ -206,8 +206,12 @@ card layer and defaults **ON for the beta cohort**:
   Downgrades (amber) still happen any time from registry evidence; upgrades
   fire ONLY through pre-registered live-window rules (card age > 12m so the
   trailing window is fully out-of-sample, two consecutive annual windows at
-  the mint-time bar — DSR >= 0.99 AND |t_net| >= 4.0 AND p_perm <= 0.01 for
-  silver->gold, DSR >= 0.95 AND |t_net| >= 3.0 for bronze->silver — max one
+  the mint-time bar — stated in window-length-INVARIANT terms, since the
+  mint bar is a full-depth (4032-bar) t and t scales with sqrt(T): on the
+  252-bar live window the identical bar is |t_win| >= 4.0*sqrt(252/4032) =
+  1.0, i.e. annualized |SR| >= 1.0, for silver->gold (with DSR >= 0.99 AND
+  p_perm <= 0.01 on the live window, unchanged), and |t_win| >= 0.75 i.e.
+  annualized |SR| >= 0.75 for bronze->silver (with DSR >= 0.95) — max one
   tier change per card per 90 days, seeded PCG64 re-evaluation, append-only
   `card_upgrade` ledger event with evidence), publicly explained, never by
   payment or chance; notification hook

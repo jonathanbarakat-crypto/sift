@@ -13,12 +13,17 @@ v3 §6.1):
      12 months (WINDOW_BARS = 252 trading days), so the entire trailing
      window is bars the mint-time gauntlet never saw. Before 12m the
      window overlaps mint-time data (in-sample echo) — upgrades refused.
-  2. PRE-REGISTERED THRESHOLDS, IDENTICAL TO THE MINT-TIME BAR: an upgrade
-     silver->gold requires the trailing-12m live re-evaluation to meet the
-     SAME stats `tier_from_stats` uses for gold at mint (DSR >= 0.99 at
-     scope AND full-depth |t_net| >= 4.0 AND p_perm <= 0.01 on the live
-     window). bronze->silver analogously against the silver bar
-     (DSR >= 0.95 AND full-depth |t_net| >= 3.0). No operator discretion.
+  2. PRE-REGISTERED THRESHOLDS, IDENTICAL TO THE MINT-TIME BAR (in
+     window-length-INVARIANT terms — soundness #5 fix, hermes-tasks #181):
+     an upgrade silver->gold requires the trailing-12m live re-evaluation
+     to meet the SAME bar `tier_from_stats` uses for gold at mint, where
+     the mint bar is a FULL-DEPTH (4032-bar) |t_net| >= 4.0 and t scales
+     with sqrt(T), so on the 252-bar live window the identical bar is
+     |t_win| >= 4.0*sqrt(252/4032) = 1.0, i.e. annualized |SR| >= 1.0
+     (DSR >= 0.99 at scope AND p_perm <= 0.01 on the live window, both
+     UNCHANGED). bronze->silver analogously against the silver bar
+     (DSR >= 0.95 AND |t_win| >= 3.0*sqrt(252/4032) = 0.75, i.e.
+     annualized |SR| >= 0.75). No operator discretion.
   3. SUSTAINED, NOT SPIKY: the qualifying stats must hold on the trailing
      12m AND the preceding 12m (two consecutive annual windows).
   4. RATE LIMIT: at most one tier change (up OR down) per card per 90 days.
@@ -87,10 +92,36 @@ UPGRADE_EVENT = "card_upgrade"    # pre-registered live-window upgrade (green)
 WINDOW_BARS = gcfg.BARS_PER_YEAR            # 252: one annual window in bars
 MIN_CARD_AGE_BARS = WINDOW_BARS             # card age must EXCEED this (rule 1)
 RATE_LIMIT_S = 90 * 86400.0                # max one tier change per card per 90d (rule 4)
-# Mint-time bars per gold/silver (tier_from_stats): reused VERBATIM so the
-# live-window bar is identical to the mint-time bar (rule 2) — no drift.
+# Mint-time FULL-DEPTH bars per gold/silver (tier_from_stats applies them to
+# the full-depth t_net at the registry_depth scope): reused VERBATIM as the
+# anchors of the invariant bar (rule 2) — no drift.
 GOLD_DSR, GOLD_T_NET, GOLD_P_PERM = 0.99, 4.0, 0.01
 SILVER_DSR, SILVER_T_NET = 0.95, 3.0
+# Mint-time full-depth window length in bars (registry_depth / pro_full scope).
+# The live-window t hurdle is derived from the full-depth anchors by sqrt(T)
+# scaling — see window_t_hurdle / meets_tier_bar — so the live-window bar is
+# IDENTICAL to the mint-time bar in invariant (annualized-Sharpe) terms, not
+# in raw-t terms (soundness #5, hermes-tasks #181).
+MINT_T_FULL = gcfg.SCOPE_T[gcfg.S5_SCOPE]   # 4032
+
+
+def window_t_hurdle(t_net_full_bar: float, window_bars: int) -> float:
+    """Window-length-INVARIANT form of a full-depth t bar.
+
+    t_T = sr_ann * sqrt(T / BARS_PER_YEAR), so a full-depth bar
+    |t_full| >= B at T = MINT_T_FULL is equivalent, on ANY window of length
+    T_win, to
+
+        |t_win| >= B * sqrt(T_win / MINT_T_FULL)
+              <=> |sr_ann| >= B * sqrt(BARS_PER_YEAR / MINT_T_FULL)
+
+    (the annSR form is the fully window-length-invariant statement: gold
+    annSR >= 4.0*sqrt(252/4032) = 1.0, silver >= 3.0*sqrt(252/4032) = 0.75).
+    Comparing a 252-bar window's raw t against the raw full-depth bar 4.0
+    would demand annSR ~4.0 — ~4x stricter than mint — which is soundness
+    finding #5 (hermes-tasks #181): genuine edges essentially never upgrade.
+    """
+    return t_net_full_bar * math.sqrt(max(int(window_bars), 1) / MINT_T_FULL)
 
 # Default re-evaluator: re-derive the tier from the card's own
 # pre-registered ledger stats (S3 DSR + S5 full-depth t_net + S2 p_perm).
@@ -136,6 +167,13 @@ def _window_stats(returns: np.ndarray, *, start: int, end: int,
     - S3 DSR with the scope-stratified stratum denominator.
 
     Deterministic for a given (returns, window, seed, s2_B, stratum).
+
+    NOTE on the t component (soundness #5): `t_net` here is the RAW t of the
+    WINDOW (t_stat_sharpe on [start, end)), which scales with sqrt(T_window)
+    and therefore must NOT be compared against the raw full-depth mint bar
+    (GOLD_T_NET = 4.0 at 4032 bars). meets_tier_bar rescales the bar by
+    sqrt(T_window / MINT_T_FULL), making the comparison window-length
+    invariant (equivalently: annualized Sharpe).
     """
     r = np.asarray(returns, float)[start:end]
     r = r[np.isfinite(r)]
@@ -160,16 +198,29 @@ def _window_stats(returns: np.ndarray, *, start: int, end: int,
 
 def meets_tier_bar(ws: WindowStats, tier: str) -> bool:
     """Rule 2: does one annual window meet the pre-registered bar for
-    `tier`? The bars are IDENTICAL to `tier_from_stats` at mint:
-    gold = DSR >= 0.99 AND |t_net| >= 4.0 AND p_perm <= 0.01;
-    silver = DSR >= 0.95 AND |t_net| >= 3.0. Missing stats never qualify."""
+    `tier`? The bar is IDENTICAL to `tier_from_stats` at mint, expressed in
+    WINDOW-LENGTH-INVARIANT terms: the mint-time bar is a full-depth
+    (MINT_T_FULL-bar) t of 4.0 (gold) / 3.0 (silver), and t scales with
+    sqrt(T), so on a window of `ws.window_end_bar - ws.window_start_bar`
+    bars the equivalent hurdle is
+
+        gold:   |t_win| >= 4.0 * sqrt(T_win / MINT_T_FULL)  (1.0 at 252 bars)
+              <=> |sr_ann| >= 1.0   (window-length invariant)
+        silver: |t_win| >= 3.0 * sqrt(T_win / MINT_T_FULL)  (0.75 at 252 bars)
+              <=> |sr_ann| >= 0.75
+
+    DSR >= 0.99 (gold) / 0.95 (silver) and p_perm <= 0.01 (gold) are
+    UNCHANGED. Missing stats never qualify."""
     if ws.dsr is None or ws.t_net_full is None or ws.p_perm is None:
         return False
+    t_win = ws.window_end_bar - ws.window_start_bar
     if tier == "gold":
-        return (ws.dsr >= GOLD_DSR and abs(ws.t_net_full) >= GOLD_T_NET
+        return (ws.dsr >= GOLD_DSR
+                and abs(ws.t_net_full) >= window_t_hurdle(GOLD_T_NET, t_win)
                 and ws.p_perm <= GOLD_P_PERM)
     if tier == "silver":
-        return ws.dsr >= SILVER_DSR and abs(ws.t_net_full) >= SILVER_T_NET
+        return (ws.dsr >= SILVER_DSR
+                and abs(ws.t_net_full) >= window_t_hurdle(SILVER_T_NET, t_win))
     return False
 
 
@@ -203,7 +254,9 @@ def live_window_evaluator(
       1. age: now_bar - card.minted_bar > WINDOW_BARS (fully OOS window);
       2. the trailing 12m window meets the mint-time bar for the next tier
          up (silver->gold bar / bronze->silver bar) — same thresholds as
-         `tier_from_stats`;
+         `tier_from_stats`, rescaled to the window length by sqrt(T) so the
+         comparison is window-length invariant (annualized-Sharpe terms,
+         NOT raw t: gold |t_win| >= 4.0*sqrt(252/4032) = 1.0, silver 0.75);
       3. the SAME stats also hold on the preceding 12m (two consecutive
          annual windows — sustained, not spiky);
       4. rate limit: no tier change in the last 90 days;
@@ -568,6 +621,7 @@ __all__ = [
     "default_re_evaluator",
     "live_window_evaluator",
     "meets_tier_bar",
+    "window_t_hurdle",
     "public_explanation",
     "public_upgrade_explanation",
 ]
