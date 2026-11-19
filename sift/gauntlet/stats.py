@@ -611,37 +611,55 @@ def cscv_pbo(
     returns_matrix: np.ndarray,
     S: int = 16,
     seed: int = 0,
-) -> float:
+) -> float | None:
     """Probability of Backtest Overfitting via CSCV (Bailey et al. 2016/17).
 
     `returns_matrix` is (T, N) strategy return series (one column per
     configuration). Split the T bars into S=2*K contiguous blocks; for each
     of the C(S, K) combinations, pick the IS winner on the K training blocks
     and rank it OOS on the complementary K blocks; lambda = logit of the
-    OOS rank; PBO = P(lambda <= 0) estimated by the fraction of combinations
-    where the IS winner's OOS rank is in the bottom half.
+    OOS rank (rank 0 = best); PBO = P(lambda >= 0) estimated by the
+    fraction of combinations where the IS winner's OOS rank is in the
+    BOTTOM half (lambda >= 0 means the IS winner underperforms the OOS
+    median — the overfitting signature).
+
+    Sign convention (soundness #2): the comparison is ``lambda >= 0``.
+    The previous ``lambda <= 0`` returned 1 - PBO (a dominant config,
+    true PBO = 0, returned 1.0). Boundary convention: lambda == 0 (IS
+    winner at exactly the OOS median, rank == N/2) counts as OVERFIT
+    (PBO side), matching Bailey et al.'s P(lambda <= 0) on the negated
+    logit with the +0.5 smoothing.
+
+    Returns None when the CSCV design is undefined (N < 2 configurations
+    or T < S blocks): CSCV on a single configuration is meaningless, and
+    silently returning 0.0 would advertise protection that was never
+    computed. Callers must treat None as "not computed" (fail closed).
     """
     R = np.asarray(returns_matrix, float)
+    if R.ndim != 2:
+        return None
     T, N = R.shape
     if T < S or N < 2:
-        return 0.0
+        return None
     b = T // S
     blocks = R[: b * S].reshape(S, b, N).sum(axis=1)  # (S, N) block returns
     K = S // 2
-    rng = np.random.Generator(np.random.PCG64(seed))
-    combos = []
     idx = np.arange(S)
     # enumerate combinations deterministically
     from itertools import combinations
+    combos = []
     for train in combinations(range(S), K):
         train = np.array(train)
         test = np.array([i for i in idx if i not in train])
         is_ret = blocks[train].sum(axis=0)
         winner = int(np.argmax(is_ret))
-        oos_ret = blocks[test, winner]
-        rank = int(np.sum(blocks[test].sum(axis=0) > oos_ret.sum()))  # 0 = best
+        oos = blocks[test].sum(axis=0)
+        # rank of the IS winner among ALL configs OOS (0 = best). Compared
+        # with a strict > on float sums, so a genuine tie is NOT counted as
+        # "beaten" — the +0.5 smoothing in lambda then places the boundary.
+        rank = int(np.sum(oos > oos[winner]))
         lam = math.log((rank + 0.5) / (N - rank + 0.5)) if 0 <= rank < N else 0.0
         combos.append(lam)
     if not combos:
-        return 0.0
-    return float(np.mean(np.array(combos) <= 0.0))
+        return None
+    return float(np.mean(np.array(combos) >= 0.0))

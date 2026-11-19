@@ -47,7 +47,11 @@ S5 (v3 §8.1-§8.4) runs **automatically on every S0-S4 survivor — never
 opt-in**: the candidate is re-evaluated at `registry_depth` scope (full
 window, full universe incl. later-delisted names) at full-strength thresholds
 (t ≥ 3.0 full-depth vs 3.5 free-scope tau_cal, p_perm ≤ 0.05, DSR ≥ 0.95 with
-the registry_depth stratum, PBO ≤ 0.5). Pass → `validated-green`; fail →
+the registry_depth stratum, PBO ≤ 0.5). PBO is **computed**, never hardcoded:
+CSCV (S=16) over a pre-registered 9-point variant grid around the registered
+config (`config.S5_VARIANT_GRID`, digest recorded in the s5 stage row); a
+window too short for the CSCV design yields PBO=None and the pbo check fails
+closed. Pass → `validated-green`; fail →
 `on-watch-amber` (never validated-green). Post-delist prices are masked out
 everywhere (F-DELIST). Acceptance fixtures: `F-REGIME` (edge only in years 0-7
 of 16 — the 5y in-edge window shows t>2, the full window attenuates so S5
