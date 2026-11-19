@@ -159,6 +159,16 @@ def gauge_label(band: str) -> str:
 
 # -- health: ratio vs mint baseline, plain ratio language -----------------------
 
+def mint_baseline_note() -> str:
+    """The note attached to the persisted mint-time holdout baseline on the
+    card face (soundness #10). Built here ONLY, scanned fail-closed by
+    assert_copy_clean — a banned phrase refuses the render."""
+    return assert_copy_clean(
+        "frozen-holdout baseline recorded once at mint; the holdout was "
+        "never used for tuning"
+    )
+
+
 def health_phrase(ratio: float | None) -> str:
     """Health as a plain ratio vs the card's mint baseline:
     ratio < 1 -> "weakening ~{r}x of mint baseline";
@@ -344,6 +354,7 @@ __all__ = [
     "health_phrase",
     "hit_loop_hint",
     "hit_notification_copy",
+    "mint_baseline_note",
     "onboarding_statement",
     "tos_acceptance_text",
 ]

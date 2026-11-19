@@ -39,11 +39,19 @@ class CardMinter:
         self.cards = cards
 
     def maybe_mint(self, trial_id: str, owner_handle: str,
-                   verdict: str, survivor_class: str) -> str | None:
+                   verdict: str, survivor_class: str,
+                   holdout_baseline: dict | None = None) -> str | None:
         """Mint on ANY survivor (v4.2: every S0-S2 passer mints at bronze+)
         if the flag is on. Returns the public card id (read-back verified)
         or None. Killed trials (verdict='killed' / survivor_class='none')
-        mint nothing."""
+        mint nothing.
+
+        soundness #10: `holdout_baseline` (the frozen-holdout live-baseline:
+        t_net / sr_ann / holdout_bars, plus holdout_start_bar) is persisted
+        on the card row and recorded as an append-only `card_mint_baseline`
+        ledger event. None when the run had no holdout (holdout_bars=0) —
+        the card then carries NULL baseline fields, never a fabricated one.
+        """
         if not flags.cards_v4_1_enabled(owner_handle):
             return None
         if verdict != "survivor" or survivor_class == "none":
@@ -96,10 +104,41 @@ class CardMinter:
             s5_pass=s5_pass,
             sr_star=sr_star,
             n_stratum=n_stratum,
+            baseline_t_net=(holdout_baseline or {}).get("t_net"),
+            baseline_sr_ann=(holdout_baseline or {}).get("sr_ann"),
+            baseline_holdout_bars=(holdout_baseline or {}).get("holdout_bars"),
         )
         # read-back: confirm the card is retrievable before claiming success
         rb = self.cards.get_card(card.card_id)
+        # soundness #10: persist the mint-time holdout baseline as an
+        # append-only ledger event (events.py health_facts reads it). Only
+        # when a baseline genuinely exists — never fabricate one.
+        if holdout_baseline:
+            self._record_baseline_event(
+                rb.card_id, trial_id, holdout_baseline,
+                now=rb.minted_at,
+            )
         return rb.card_id
+
+    def _record_baseline_event(self, card_id: str, trial_id: str,
+                               baseline: dict, now: float | None = None) -> int:
+        """Append the `card_mint_baseline` event (append-only; the baseline is
+        recorded once at mint, never updated). Returns the event id."""
+        return self.ledger.record_event(
+            "card_mint_baseline",
+            {
+                "card_id": card_id,
+                "trial_id": trial_id,
+                "baseline_t_net": baseline.get("t_net"),
+                "baseline_sr_ann": baseline.get("sr_ann"),
+                "holdout_bars": baseline.get("holdout_bars"),
+                "holdout_start_bar": baseline.get("holdout_start_bar"),
+                "note": "mint-time frozen-holdout live-baseline; the holdout was "
+                        "never used for tuning",
+            },
+            trial_id=trial_id,
+            now=now,
+        )
 
 
 __all__ = ["CardMinter"]

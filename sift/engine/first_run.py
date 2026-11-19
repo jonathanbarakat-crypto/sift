@@ -28,8 +28,8 @@ Usage:
 
 `--holdout-bars N` (default 252) locks the most recent N trading days out of
 S0-S4 discovery/walk-forward; survivors are evaluated once on that frozen
-holdout (the mint-time live-baseline stored on the card). The holdout is
-never used for tuning.
+holdout (the mint-time live-baseline, persisted on the minted card via
+`--cards` — soundness #10). The holdout is never used for tuning.
 """
 from __future__ import annotations
 
@@ -54,6 +54,8 @@ if __package__ in (None, ""):
     from sift.gauntlet import stats
     from sift.gauntlet.runner import GauntletRunner
     from sift.registry import Ledger
+    from sift.cards import CardRegistry
+    from sift.cards.minting import CardMinter
 else:
     import importlib
     wh = importlib.import_module("data.warehouse")
@@ -61,6 +63,8 @@ else:
     from ..gauntlet import stats  # type: ignore
     from ..gauntlet.runner import GauntletRunner  # type: ignore
     from ..registry import Ledger  # type: ignore
+    from ..cards import CardRegistry  # type: ignore
+    from ..cards.minting import CardMinter  # type: ignore
 
 SCOPE_ID = "free_1y_top1k"
 FAMILY = "pairs"
@@ -193,6 +197,35 @@ def pair_series(prices: np.ndarray, i: int, j: int, formation: int) -> dict:
             "spread": spread, "spread_returns": rs, "net": wf["net"]}
 
 
+def _holdout_baseline(holdout_prices: np.ndarray, i: int, j: int, formation: int,
+                      *, holdout_bars: int, holdout_start_bar: int) -> dict | None:
+    """Measure the frozen-holdout live-baseline for pair (i, j) ONCE
+    (soundness #10): walk-forward net returns on the locked holdout bars
+    -> t_net and annualized Sharpe. Returns None when the holdout has too
+    few usable bars (never fabricates a baseline). Evaluation-only: the
+    holdout never entered discovery/walk-forward."""
+    if holdout_prices is None or holdout_prices.shape[0] < 4:
+        return None
+    # formation capped at a quarter of the holdout so at least one full
+    # walk-forward block (formation + step) is traded inside the holdout —
+    # a formation of half the holdout leaves only the formation window and
+    # zero traded blocks (baseline would be a fabricated all-zero).
+    form = min(formation, max(2, holdout_prices.shape[0] // 4))
+    wf_h = stats.walk_forward_returns(holdout_prices[:, [i, j]], formation=form,
+                                      half_spreads="roll")
+    net_h = wf_h["net"]
+    net_h = net_h[np.isfinite(net_h)]
+    if net_h.size < 2:
+        return None
+    return {
+        "t_net": float(stats.t_stat_sharpe(net_h)),
+        "sr_ann": float(stats.sharpe_ratio(net_h)),
+        "holdout_bars": int(holdout_bars),
+        "holdout_start_bar": int(holdout_start_bar),
+        "holdout_net_bars": int(net_h.size),
+    }
+
+
 def register_trial(ledger: Ledger, params: dict, vintage: str, provenance: str = "operator_sweep",
                    scope_id: str = SCOPE_ID) -> tuple:
     """Register BEFORE any computation (v3 section 5). Returns (trial, cached: bool)."""
@@ -211,7 +244,8 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
               max_pairs: int, formation: int, s2_B: int, measurements_path: str,
               exchange: str = "US", max_universe: int = 1000,
               source: str = "eodhd", window: str = "1y",
-              holdout_bars: int = 0) -> dict:
+              holdout_bars: int = 0,
+              cards_path: str | None = None) -> dict:
     t_start = time.perf_counter()
     vintage = wh.read_vintage(warehouse_root) or "no-vintage"
     scope_id = scope_id_for_source(source, window, top_n=max_universe if source != "eodhd" else None)
@@ -233,7 +267,8 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     # S0-S4 discovery/walk-forward window: discovery + walk-forward run on
     # prices[:T-N] only. Survivors are then evaluated ONCE on the frozen
     # holdout prices[T-N:] — that single frozen-holdout evaluation is the
-    # mint-time live-baseline stored on the card. The holdout is NEVER used
+    # mint-time live-baseline, persisted on the minted card (soundness #10;
+    # needs `--cards` so a CardMinter is wired). The holdout is NEVER used
     # for tuning, screening, or threshold selection (owner decision
     # 2026-11-17); it only measures survivors after they are chosen.
     holdout_start = None
@@ -271,7 +306,12 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     log(f"candidate pairs: {len(cand)} (top by |corr|)")
 
     ledger = Ledger(ledger_path)
-    runner = GauntletRunner(ledger, seed=20261115)
+    # soundness #10: wire the card layer so survivors actually mint (the
+    # engine previously wired no CardMinter at all) and the frozen-holdout
+    # live-baseline computed below is persisted on the minted card.
+    cards_reg = CardRegistry(cards_path) if cards_path else None
+    card_minter = CardMinter(ledger, cards_reg) if cards_reg is not None else None
+    runner = GauntletRunner(ledger, seed=20261115, card_minter=card_minter)
     calls_before = 0
     calls_state = os.path.join(warehouse_root, "state", "calls.json")
     if os.path.exists(calls_state):
@@ -300,6 +340,16 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
                          "verdict": ledger.get(trial.trial_id).verdict})
             continue
         ps = pair_series(discovery_prices, i, j, formation)
+        # soundness #10: compute the frozen-holdout live-baseline BEFORE the
+        # gauntlet runs so it can be persisted on the minted card (the holdout
+        # is evaluation-only: it is measured once here, never read by S0-S4).
+        holdout_baseline = None
+        if holdout is not None:
+            hb = _holdout_baseline(holdout, i, j, formation,
+                                   holdout_bars=int(holdout_bars),
+                                   holdout_start_bar=int(holdout_start))
+            if hb is not None:
+                holdout_baseline = hb
         # S0 harness calibration on real data (finding #14, doc-only): the
         # harness must recover the pair's own OLS hedge computed on LEVELS
         # (the convention S0's ols_hedge_ratio asserts on), so beta_true =
@@ -322,6 +372,7 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
             prices=discovery_prices[:, [i, j]],
             scope_id=scope_id,
             s2_B=s2_B,
+            holdout_baseline=holdout_baseline,
         )
         dt = time.perf_counter() - t0 + reg_dt
         unique_t.append(dt)
@@ -339,29 +390,36 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
         # -- frozen-holdout evaluation of survivors (ONCE, evaluation only) --
         # The holdout bars never entered S0-S4 discovery/walk-forward above.
         # A survivor is measured exactly once on the frozen holdout; that
-        # frozen-holdout result is the mint-time live-baseline stored on the
-        # card. The holdout is never used for tuning (no threshold, screen,
-        # or selection reads it).
+        # frozen-holdout result is the mint-time live-baseline, NOW persisted
+        # on the minted card (soundness #10: previously it went to the
+        # measurements JSON only). The holdout is never used for tuning.
         if holdout is not None and v["verdict"] == "survivor":
-            ps_h = pair_series(holdout, i, j, min(formation, holdout.shape[0] // 2))
-            wf_h = stats.walk_forward_returns(holdout[:, [i, j]],
-                                              formation=min(formation, holdout.shape[0] // 2),
-                                              half_spreads="roll")
-            net_h = wf_h["net"]
-            net_h = net_h[np.isfinite(net_h)]
-            t_net_h = stats.t_stat_sharpe(net_h) if net_h.size >= 2 else None
-            sr_ann_h = stats.sharpe_ratio(net_h) if net_h.size >= 2 else None
-            holdout_rows.append({
-                "pair": [si, sj], "trial_id": trial.trial_id,
-                "holdout_bars": int(holdout_bars),
-                "holdout_start_bar": int(holdout_start),
-                "holdout_net_bars": int(net_h.size),
-                "holdout_t_net": t_net_h,
-                "holdout_sr_ann": sr_ann_h,
-                "survivor_class": v["survivor_class"],
-                "note": "frozen-holdout evaluation of a survivor — mint-time "
-                        "live-baseline; the holdout was never used for tuning",
-            })
+            hb = holdout_baseline or _holdout_baseline(
+                holdout, i, j, formation,
+                holdout_bars=int(holdout_bars), holdout_start_bar=int(holdout_start))
+            if hb is not None:
+                form_h = min(formation, max(2, holdout.shape[0] // 4))
+                wf_h = stats.walk_forward_returns(holdout[:, [i, j]],
+                                                  formation=form_h,
+                                                  half_spreads="roll")
+                net_h = wf_h["net"]
+                net_h = net_h[np.isfinite(net_h)]
+                t_net_h = stats.t_stat_sharpe(net_h) if net_h.size >= 2 else None
+                sr_ann_h = stats.sharpe_ratio(net_h) if net_h.size >= 2 else None
+                holdout_rows.append({
+                    "pair": [si, sj], "trial_id": trial.trial_id,
+                    "holdout_bars": int(holdout_bars),
+                    "holdout_start_bar": int(holdout_start),
+                    "holdout_net_bars": int(net_h.size),
+                    "holdout_t_net": t_net_h,
+                    "holdout_sr_ann": sr_ann_h,
+                    "card_id": v.get("card_id"),
+                    "baseline_persisted_on_card": bool(v.get("card_id")) and hb is not None,
+                    "survivor_class": v["survivor_class"],
+                    "note": "frozen-holdout evaluation of a survivor — mint-time "
+                            "live-baseline, persisted on the card (soundness #10); "
+                            "the holdout was never used for tuning",
+                })
         if (k + 1) % 50 == 0:
             log(f"  {k+1}/{len(cand)} pairs done | unique mean {np.mean(unique_t):.3f}s | "
                 f"cached mean {np.mean(cached_t) if cached_t else 0:.5f}s | peak RSS {peak_rss_bytes()/1e9:.2f} GB")
@@ -416,6 +474,8 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     os.makedirs(os.path.dirname(measurements_path), exist_ok=True)
     with open(measurements_path, "w") as f:
         json.dump(meas, f, indent=2, default=str)
+    if cards_reg is not None:
+        cards_reg.close()
     ledger.close()
     log(f"done in {t_total:.1f}s | unique mean {meas['unique_wall_s_mean']:.3f}s | "
         f"cached re-register mean {meas['cached_wall_s_mean_rereg']*1e3:.2f}ms | "
@@ -456,15 +516,21 @@ def main(argv=None) -> int:
     ap.add_argument("--holdout-bars", type=int, default=252,
                     help="lock the most recent N trading days out of S0-S4 "
                          "discovery/walk-forward; survivors are evaluated ONCE on "
-                         "that frozen holdout (the mint-time live-baseline stored "
-                         "on the card). The holdout is NEVER used for tuning. "
+                         "that frozen holdout (the mint-time live-baseline, "
+                         "persisted on the card — soundness #10). The holdout is "
+                         "NEVER used for tuning. "
                          "0 disables the holdout (full window, legacy behavior). "
                          "Default 252 (12 months of trading days).")
+    ap.add_argument("--cards", default=None,
+                    help="optional card-registry DB path (e.g. trials/cards.db): "
+                         "when set, the engine wires a CardMinter so survivors "
+                         "mint cards (cards_v4_1 flag) and the frozen-holdout "
+                         "live-baseline is persisted on each minted card")
     args = ap.parse_args(argv)
     run_pairs(args.warehouse, args.universe, args.ledger, args.max_pairs,
               args.formation, args.s2_B, args.measurements, max_universe=args.max_universe,
               source=args.source, window=args.window,
-              holdout_bars=args.holdout_bars)
+              holdout_bars=args.holdout_bars, cards_path=args.cards)
     return 0
 
 

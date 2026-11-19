@@ -38,7 +38,12 @@ from sift import flags
 from sift.cards import CardRegistry
 from sift.cards.anchored import AnchoredRunError  # noqa: F401  (re-export surface)
 from sift.cards.copy import CopyError  # noqa: F401  (re-export surface)
-from sift.cards.decay import RegistryDecayJob
+from sift.cards.decay import (
+    RegistryDecayJob,
+    default_live_evaluator,
+    default_re_evaluator,
+    live_re_evaluator,
+)
 from sift.cards.events import SignalEventService
 from sift.cards.face import CardFaceRenderer
 from sift.cards.metrics import Metrics
@@ -59,7 +64,8 @@ class CardLayer:
     """Composition root for the v4.1 card layer. Server-side only."""
 
     def __init__(self, ledger: Ledger, db_dir: str | Path,
-                 card_secret: bytes | None = None):
+                 card_secret: bytes | None = None,
+                 live_returns_fn=None):
         db_dir = Path(db_dir)
         db_dir.mkdir(parents=True, exist_ok=True)
         self.ledger = ledger
@@ -71,12 +77,46 @@ class CardLayer:
         self.notify = Notifier(self.cards, db_dir / "notify.db")
         self.events = SignalEventService(self.notify, ledger,
                                          db_dir / "signal.db")
-        self.decay = RegistryDecayJob(self.cards, ledger, notifier=self.notify)
+        # soundness #10: wire LIVE decay evaluators, not the inert static
+        # default. `live_returns_fn(card) -> np.ndarray | None` is the
+        # server-supplied post-mint live net-return series per card. With it
+        # wired, the registry pass re-evaluates against FRESH live evidence
+        # (downgrades fire when live stats no longer support the tier);
+        # upgrades still require the pre-registered live-window rules via
+        # the live_evaluator. With NO live series (live_returns_fn=None) the
+        # re_evaluator falls back to the static ledger stats (documented
+        # no-op fallback) and the live_evaluator stays None -> upgrades stay
+        # refused (fail closed) — the "card that can visibly die" is inert
+        # only until the engine injects a live series.
+        self._live_returns_fn = live_returns_fn
+        self.decay = RegistryDecayJob(
+            self.cards, ledger, notifier=self.notify,
+            re_evaluator=(live_re_evaluator(live_returns_fn)
+                          if live_returns_fn is not None
+                          else default_re_evaluator),
+            live_evaluator=(default_live_evaluator(live_returns_fn)
+                            if live_returns_fn is not None else None),
+        )
         self.metrics = Metrics(ledger, self.cards, self.vault, self.shares)
         # v4.2 deck layer (hermes-tasks #166): its own registry + service,
         # gated by decks_v4_2 (which also requires cards_v4_1).
         self.decks = DeckRegistry(db_dir / "decks.db", secret=card_secret)
         self.deck_service = DeckService(self.cards, self.decks)
+
+    def set_live_returns(self, live_returns_fn) -> None:
+        """Inject (or replace) the server-side live post-mint return-series
+        source (soundness #10). `live_returns_fn(card) -> np.ndarray | None`.
+        Rebuilds the decay job's evaluators: with a live series wired the
+        registry pass re-evaluates against fresh live evidence and upgrades
+        become possible through the pre-registered live-window rules; with
+        None the layer is fail-closed (static no-op re-evaluator, upgrades
+        refused)."""
+        self._live_returns_fn = live_returns_fn
+        self.decay.re_evaluator = (live_re_evaluator(live_returns_fn)
+                                   if live_returns_fn is not None
+                                   else default_re_evaluator)
+        self.decay.live_evaluator = (default_live_evaluator(live_returns_fn)
+                                     if live_returns_fn is not None else None)
 
     def __enter__(self) -> "CardLayer":
         return self
