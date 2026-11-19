@@ -81,7 +81,16 @@ COSTS = {
     "max_participation": 0.10,
     "risk_capital_per_trade": 0.01,
     "max_open_positions": 20,
+    # documented participation proxy denominator (no ADV feed server-side):
+    # one unit of position = risk_capital_per_trade of capital against a
+    # unit-ADV reference (soundness #9)
+    "adv_proxy": 1.0,
 }
+
+# S4 per-name data-driven half-spread floor (Roll estimator, soundness #9):
+# costs are never assumed below this; the 100 bps COSTS placeholder stays as
+# the conservative FALLBACK when a name has no usable data evidence.
+S4_HALF_SPREAD_BPS_FLOOR = 1.0
 
 # ---------------------------------------------------------------------------
 # S6 deck (portfolio) gauntlet — spec v4.2 §4 (hermes-tasks #166)

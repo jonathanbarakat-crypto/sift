@@ -143,10 +143,16 @@ def test_min_trl_positive_and_grows_with_confidence():
 def test_costs_reduce_returns():
     gross = np.array([0.0, 0.001, 0.001, -0.001])
     pos = np.array([0.0, 1.0, 1.0, 0.0])
-    net = stats.apply_costs(gross, pos, stats.CostModel(half_spread_bps=100))
-    assert net[1] < gross[1]
-    assert net[3] < gross[3]
-    assert net[2] == gross[2]
+    cm = stats.CostModel(half_spread_bps=100,
+                         slippage_participation_threshold=1e9)  # spread only
+    net = stats.apply_costs(gross, pos, cm)   # single-leg (no hedge): legacy path
+    # soundness #9: cost is charged at the FILL bar t+1, not the decision bar
+    assert net[1] == gross[1]                 # decision bar: no cost now
+    assert net[2] < gross[2]                  # fill bar of the t=1 entry
+    assert net[3] < gross[3]                  # fill bar of the t=2 exit
+    # single-leg rate: |dpos| * 100/1e4 charged one bar later
+    assert net[2] == pytest.approx(gross[2] - 1.0 * 100 / 1e4, abs=1e-12)
+    assert net[3] == pytest.approx(gross[3] - 1.0 * 100 / 1e4, abs=1e-12)
 
 
 def test_pairs_strategy_no_lookahead_and_costs():

@@ -34,6 +34,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from sift.gauntlet import config as cfg
+
 EULER_GAMMA = 0.5772156649015328606065120900824024310421  # Euler–Mascheroni
 
 
@@ -519,24 +521,181 @@ def effective_sample_size(returns: np.ndarray, lag: int | None = None) -> float:
 
 @dataclass(frozen=True)
 class CostModel:
-    half_spread_bps: float = 100.0            # placeholder, FL open item #6
+    """S4 cost model (soundness #9 — two legs, live slippage, fill-bar timing).
+
+    A pairs trade trades BOTH legs: y (the position leg) and beta*x (the hedge
+    leg). Per-leg half-spreads: ``half_spread_bps_y`` / ``half_spread_bps_x``;
+    when None they fall back to the single ``half_spread_bps`` (the flagged
+    100 bps placeholder, kept as the conservative FALLBACK when a name has no
+    usable data-driven estimate — see ``estimate_half_spread_bps_roll``).
+
+    Slippage fields are LIVE (they were dead on main 8c1a1b0 — probe: setting
+    them changed net by exactly 0): the participation proxy is
+    ``p_t = |dpos_t| * risk_capital_per_trade * (1 + |hedge_t|) / adv_proxy``
+    — server-side there is NO ADV feed, so ``adv_proxy`` is a pre-registered
+    documented proxy (default 1.0: one unit of position = risk_capital_per_trade
+    of capital against a unit-ADV reference), NOT measured volume. Above
+    ``slippage_participation_threshold`` the fill pays
+    ``slippage_bps_per_pct`` bps per pct of participation, with participation
+    capped at ``max_participation``. The per-leg half-spread is a FLOOR:
+    total per-unit rate = (hs_y + |h|*hs_x) + slippage, never the sum of
+    spread and impact being skipped.
+    """
+    half_spread_bps: float = 100.0            # conservative fallback placeholder (FL open item #6)
+    half_spread_bps_x: float | None = None    # per-leg (hedge leg) half-spread, bps
+    half_spread_bps_y: float | None = None    # per-leg (position leg) half-spread, bps
     slippage_participation_threshold: float = 0.05
     slippage_bps_per_pct: float = 5.0
     max_participation: float = 0.10
     risk_capital_per_trade: float = 0.01
     max_open_positions: int = 20
+    adv_proxy: float = 1.0                    # documented proxy, see docstring
+
+    @classmethod
+    def from_config(cls) -> "CostModel":
+        c = cfg.COSTS
+        return cls(
+            half_spread_bps=float(c["half_spread_bps"]),
+            slippage_participation_threshold=float(c["slippage_participation_threshold"]),
+            slippage_bps_per_pct=float(c["slippage_bps_per_pct"]),
+            max_participation=float(c["max_participation"]),
+            risk_capital_per_trade=float(c["risk_capital_per_trade"]),
+            max_open_positions=int(c["max_open_positions"]),
+            adv_proxy=float(c.get("adv_proxy", 1.0)),
+        )
+
+
+def _as_rate_array(v, T: int, fallback: float) -> np.ndarray:
+    """Broadcast a scalar-or-array per-leg half-spread (bps) to a per-bar array,
+    falling back elementwise where entries are None/NaN."""
+    if v is None:
+        return np.full(T, float(fallback))
+    a = np.asarray(v, float)
+    if a.ndim == 0:
+        return np.full(T, float(a))
+    a = a.copy()
+    bad = ~np.isfinite(a)
+    if bad.any():
+        a[bad] = float(fallback)
+    return a
 
 
 def apply_costs(strat_returns: np.ndarray, positions: np.ndarray,
-                cost_model: CostModel) -> np.ndarray:
-    """Net-of-cost strategy returns. Cost is charged on position changes at
-    the bar where the change occurs: |Δpos| * half_spread_bps / 1e4.
-    Entry is next-bar (positions are already lagged by the caller)."""
+                cost_model: CostModel, hedge: np.ndarray | None = None,
+                half_spread_bps_x: float | np.ndarray | None = None,
+                half_spread_bps_y: float | np.ndarray | None = None) -> np.ndarray:
+    """Net-of-cost strategy returns (soundness #9).
+
+    FILL-BAR TIMING: a position change decided at close t first earns on bar
+    t+1 (``strat[1:] = pos[:-1] * rs[1:]`` — next-bar entry, no same-bar fill),
+    so its cost is charged at the FILL bar t+1, not at the decision bar t.
+    A change at the last bar (fill beyond the sample) is charged on the last
+    bar so costs are never dropped.
+
+    TWO LEGS (hedge given): the pairs trade trades y AND hedge*x, so per unit
+    of position change the cost rate is
+    ``(hs_y[t] + |hedge[t]| * hs_x[t]) / 1e4`` with the LAGGED hedge in force
+    at the decision bar (no look-ahead) and per-leg half-spreads (scalar or
+    per-bar array; default the model's, falling back to the ``half_spread_bps``
+    placeholder). Without ``hedge`` the legacy single-leg rate
+    ``half_spread_bps / 1e4`` applies (kept for non-pairs callers).
+
+    SLIPPAGE (live): participation proxy
+    ``p = |dpos| * risk_capital_per_trade * (1 + |h|) / adv_proxy`` (documented
+    proxy — no ADV feed server-side); when p exceeds
+    ``slippage_participation_threshold`` an extra ``slippage_bps_per_pct`` bps
+    per pct of (capped) participation is added to the rate. Costs only ever
+    increase vs the old one-leg decision-bar model.
+    """
     strat = np.asarray(strat_returns, float).copy()
     pos = np.asarray(positions, float)
+    T = strat.size
     dpos = np.abs(np.diff(np.concatenate([[0.0], pos])))
-    strat -= dpos * cost_model.half_spread_bps / 1e4
+    if hedge is None:
+        h = np.zeros(T)
+        two_leg = False
+    else:
+        h = np.nan_to_num(np.asarray(hedge, float))
+        two_leg = True
+    hs_x = _as_rate_array(half_spread_bps_x, T,
+                          cost_model.half_spread_bps_x
+                          if cost_model.half_spread_bps_x is not None
+                          else cost_model.half_spread_bps)
+    hs_y = _as_rate_array(half_spread_bps_y, T,
+                          cost_model.half_spread_bps_y
+                          if cost_model.half_spread_bps_y is not None
+                          else cost_model.half_spread_bps)
+    cost = np.zeros(T)
+    for t in range(T):
+        if dpos[t] <= 0:
+            continue
+        fill = min(t + 1, T - 1)               # fill bar (next-bar entry)
+        if two_leg:
+            rate = hs_y[t] + abs(h[t]) * hs_x[t]
+        else:
+            rate = cost_model.half_spread_bps
+        # participation-based slippage (live fields)
+        p = dpos[t] * cost_model.risk_capital_per_trade * (1.0 + abs(h[t])) \
+            / max(cost_model.adv_proxy, 1e-12)
+        if p > cost_model.slippage_participation_threshold:
+            p_capped = min(p, cost_model.max_participation)
+            rate += cost_model.slippage_bps_per_pct * 100.0 * p_capped
+        cost[fill] += dpos[t] * rate / 1e4
+    strat -= cost
     return strat
+
+
+def estimate_half_spread_bps_roll(prices: np.ndarray,
+                                  floor_bps: float = None,
+                                  conservative_bps: float = None) -> dict:
+    """Data-driven per-name half-spread in bps — Roll (2000):
+    ``2 * sqrt(-cov(dp_t, dp_{t-1}))`` on log-price changes, expressed in bps.
+
+    Self-contained estimator for the S4 path when the warehouse supplies
+    prices (soundness #9 fix spec item 4); deliberately independent of the
+    S6/deck estimator. Floored at ``floor_bps`` (default
+    ``cfg.S4_HALF_SPREAD_BPS_FLOOR``) so costs are never assumed away; a name
+    with no usable evidence (too few points / zero dispersion / non-finite)
+    falls back to the ``conservative_bps`` placeholder (default the 100 bps
+    ``cfg.COSTS`` placeholder) — the flagged conservative fallback, never zero.
+    Returns {"half_spread_bps", "source": "data_estimate"|"floor"|"conservative_bound"}.
+    """
+    p = np.asarray(prices, float)
+    bps, source = roll_half_spread_bps_window(p, 0, p.size,
+                                              floor_bps=floor_bps,
+                                              conservative_bps=conservative_bps)
+    return {"half_spread_bps": bps, "source": source}
+
+
+def roll_half_spread_bps_window(prices_1d: np.ndarray, lo: int, hi: int,
+                                floor_bps: float = None,
+                                conservative_bps: float = None) -> tuple[float, str]:
+    """Roll half-spread (bps) over ``prices_1d[lo:hi]`` only — used per
+    formation window so estimates never read bars > decision bar (no
+    look-ahead). Returns (bps, source): "conservative_bound" when there is no
+    usable dispersion evidence (too few points / zero variance / non-finite),
+    "floor" when the window is usable but shows no measurable spread
+    (cov >= 0 -> estimate 0, floored), else "data_estimate" with the floored
+    Roll value."""
+    if floor_bps is None:
+        floor_bps = cfg.S4_HALF_SPREAD_BPS_FLOOR
+    if conservative_bps is None:
+        conservative_bps = cfg.COSTS["half_spread_bps"]
+    p = np.asarray(prices_1d, float)[lo:hi]
+    p = p[np.isfinite(p)]
+    if p.size < 3:
+        return float(conservative_bps), "conservative_bound"
+    dp = np.diff(np.log(p))
+    dp = dp[np.isfinite(dp)]
+    if dp.size < 2 or float(np.std(dp, ddof=1)) == 0.0:
+        return float(conservative_bps), "conservative_bound"
+    c = float(np.cov(dp[1:], dp[:-1])[0, 1])
+    if not np.isfinite(c):
+        return float(conservative_bps), "conservative_bound"
+    if c >= 0:
+        return float(floor_bps), "floor"
+    est = 2.0 * math.sqrt(-c) * 1e4
+    return float(max(est, floor_bps)), "data_estimate"
 
 
 def pairs_strategy_returns(
@@ -545,6 +704,7 @@ def pairs_strategy_returns(
     open_z: float = 2.0,
     close_z: float = 0.5,
     cost_model: CostModel | None = None,
+    half_spreads: str | tuple = "placeholder",
 ) -> dict:
     """Pairs strategy on a two-column price matrix [x, y] (log-return hedge,
     z-scored spread, entry at next bar — no same-day fill, no look-ahead).
@@ -552,6 +712,12 @@ def pairs_strategy_returns(
     Returns per-bar strategy returns (gross), positions, hedge ratios, and
     the z-score series. Mean-reversion convention: short the spread when z is
     high (pos = -1), long when z is low (pos = +1).
+
+    `half_spreads` (soundness #9): "placeholder" (default) charges the
+    cost model's per-leg placeholder half-spreads (the flagged 100 bps);
+    "roll" estimates per-name half-spreads from the data (Roll 2000) on each
+    formation window — used when real warehouse prices are supplied;
+    a (hs_x, hs_y) pair of scalars/arrays overrides explicitly.
     """
     if cost_model is None:
         cost_model = CostModel()
@@ -586,8 +752,30 @@ def pairs_strategy_returns(
             pos[t] = 0.0 if abs(z[t]) < close_z else pos[t - 1]
     strat = np.zeros(T)
     strat[1:] = pos[:-1] * rs[1:]         # bar t earns pos[t-1] * rs[t]
-    net = apply_costs(strat, pos, cost_model)
-    return {"gross": strat, "net": net, "positions": pos, "hedge": h, "z": z}
+    # soundness #9: two-leg cost with the lagged hedge, fill-bar timing and
+    # live slippage inside apply_costs. Per-leg half-spreads: "roll" estimates
+    # them per formation window from the data (bars <= t only, no look-ahead);
+    # "placeholder" (default) uses the model's flagged placeholder.
+    if isinstance(half_spreads, str) and half_spreads == "roll":
+        hs_x = np.full(T, cost_model.half_spread_bps)
+        hs_y = np.full(T, cost_model.half_spread_bps)
+        for t in range(formation, T):
+            w = slice(max(0, t - formation), t)
+            ex, _ = roll_half_spread_bps_window(x, w.start, w.stop)
+            ey, _ = roll_half_spread_bps_window(y, w.start, w.stop)
+            hs_x[t] = ex
+            hs_y[t] = ey
+    elif isinstance(half_spreads, str):     # "placeholder"
+        hs_x = None
+        hs_y = None
+    else:
+        hs_x, hs_y = half_spreads
+    net = apply_costs(strat, pos, cost_model, hedge=h,
+                      half_spread_bps_x=hs_x, half_spread_bps_y=hs_y)
+    hs_x_arr = _as_rate_array(hs_x, T, cost_model.half_spread_bps)
+    hs_y_arr = _as_rate_array(hs_y, T, cost_model.half_spread_bps)
+    return {"gross": strat, "net": net, "positions": pos, "hedge": h, "z": z,
+            "half_spread_x_bps": hs_x_arr, "half_spread_y_bps": hs_y_arr}
 
 
 def walk_forward_returns(
@@ -597,11 +785,18 @@ def walk_forward_returns(
     open_z: float = 2.0,
     close_z: float = 0.5,
     cost_model: CostModel | None = None,
+    half_spreads: str | tuple = "placeholder",
 ) -> dict:
     """S4 walk-forward: re-estimate the hedge on each rolling formation window
     and trade the following step block with parameters estimated at its start
     (no look-ahead). Concatenates per-bar net returns of the OOS blocks; bars
     before the first full formation window stay zero.
+
+    `half_spreads` (soundness #9): "placeholder" (default) charges the cost
+    model's per-leg placeholder half-spreads (flagged 100 bps); "roll"
+    estimates per-name half-spreads from the data (Roll 2000) on each
+    formation window (bars <= block start — no look-ahead); a (hs_x, hs_y)
+    tuple overrides explicitly.
 
     Soundness #4 (hermes-tasks #181 cross-check): the block spread is ANCHORED
     to the formation window's terminal level — spread = train_spread[-1] +
@@ -651,7 +846,21 @@ def walk_forward_returns(
                 pos[k] = 0.0 if abs(z) < close_z else pos[k - 1]
         gross = np.zeros(len(block))
         gross[1:] = pos[:-1] * rs[1:]
-        net_block = apply_costs(gross, pos, cost_model)
+        # soundness #9: two-leg cost with the block's own hedge, fill-bar
+        # timing and live slippage inside apply_costs. Per-leg half-spreads:
+        # "roll" estimates them on the formation window (bars <= block start,
+        # no look-ahead; conservative placeholder fallback); "placeholder"
+        # (default) uses the model's flagged placeholder.
+        if isinstance(half_spreads, str) and half_spreads == "roll":
+            hs_x, _ = roll_half_spread_bps_window(prices[:, 0], w.start, w.stop)
+            hs_y, _ = roll_half_spread_bps_window(prices[:, 1], w.start, w.stop)
+        elif isinstance(half_spreads, str):
+            hs_x = hs_y = None
+        else:
+            hs_x, hs_y = half_spreads
+        hedge_block = np.full(len(block), h)
+        net_block = apply_costs(gross, pos, cost_model, hedge=hedge_block,
+                                half_spread_bps_x=hs_x, half_spread_bps_y=hs_y)
         net[t:end] = net_block
         t = end
     return {"net": net, "T": T}
