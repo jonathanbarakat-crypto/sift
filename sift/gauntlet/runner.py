@@ -56,7 +56,16 @@ class GauntletRunner:
 
         `spread` (optional) is the PLANTED spread series; when given, the
         half-life assertion runs on it directly (log-space fixtures plant the
-        spread there), otherwise on y - beta_true*x as before."""
+        spread there), otherwise on y - beta_true*x as before.
+
+        REAL-DATA ROLE (finding #14, doc-only — no behavior change): on real
+        data (first_run) beta_true is the pair's own levels-OLS hedge and
+        half_life_true the measured half-life, so the beta assertion is
+        tautological (beta_hat - beta_true = 0.0 exactly) and S0's genuine
+        real-data gate is the finite-half-life (mean-reversion) check — an
+        explosive spread (phi_hat > 1, half-life = inf) fails half_life_ok
+        and therefore S0. The planted AR(1) fixture (F-PAIR) remains the
+        real calibration of both assertions."""
         r = stats.calibrate_ar1_fixture(
             x, y, beta_true, half_life_true,
             beta_tol=cfg.S0_BETA_TOL, hl_rel_tol=cfg.S0_HL_REL_TOL,

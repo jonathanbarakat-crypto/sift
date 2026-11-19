@@ -296,11 +296,16 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
                          "verdict": ledger.get(trial.trial_id).verdict})
             continue
         ps = pair_series(discovery_prices, i, j, formation)
-        # S0 harness calibration on real data: the harness must recover the
-        # pair's own OLS hedge computed on LEVELS (the convention S0's
-        # ols_hedge_ratio asserts on), so beta_true = beta_levels; the spread
-        # half-life is measured and recorded (not a planted constant on real
-        # data — S0's meaningful assertion here is beta recovery).
+        # S0 harness calibration on real data (finding #14, doc-only): the
+        # harness must recover the pair's own OLS hedge computed on LEVELS
+        # (the convention S0's ols_hedge_ratio asserts on), so beta_true =
+        # beta_levels — on real data this beta assertion is therefore
+        # TAUTOLOGICAL (beta_hat - beta_true = 0.0 exactly). The genuine
+        # real-data gate is the finite-half-life (mean-reversion) check: an
+        # explosive spread (phi_hat > 1 -> half-life = inf) FAILS S0. The
+        # planted AR(1) fixture (F-PAIR) remains the real calibration of
+        # both assertions. The half-life is measured and recorded, not a
+        # planted constant on real data.
         _, hl_hat = stats.estimate_ar1(ps["spread"])
         res = runner.run_gauntlet(
             trial.trial_id,

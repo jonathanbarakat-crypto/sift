@@ -55,6 +55,33 @@ kills it) and `F-DELIST` (20% of a universe delists mid-window; the pipeline
 must not crash and must not use post-delist prices). See
 `tests/gauntlet/test_s5.py`.
 
+### Statistical hygiene (soundness #12/#13/#14)
+
+- **Serial correlation (#12).** `t_stat_sharpe`, the `sqrt(T-1)` in PSR and
+  the `sqrt(252)` annualization assume iid returns. Under *positive*
+  autocorrelation the iid t is anticonservative (std of t ≈
+  √((1+φ)/(1−φ)) > 1); under mean reversion it is conservative. The pairs
+  gauntlet path keeps the iid variants (the pairs family is
+  mean-reversion — the conservative direction; switching it to HAC would
+  *loosen* a currently conservative gate, so it is deliberately NOT
+  switched). Positive-autocorrelation exposures (deck baskets, pull/37)
+  must use `stats.t_stat_sharpe_hac` (Newey–West, Bartlett kernel, Andrews
+  lag `floor(4·(T/100)^(2/9))`) or pass `stats.effective_sample_size` into
+  `psr`/`dsr` via their `t_eff` argument — every switch is explicit and
+  pre-registered, never silent.
+- **Bias-corrected moments (#13).** `stats.skew_kurt` now returns the
+  bias-corrected adjusted Fisher–Pearson G1 and the RAW (non-excess)
+  kurtosis G2 (the old mean(z³)/mean(z⁴) was downward-biased: MC mean kurt
+  2.80 at n=60 vs true 3.0). PSR/DSR/MinTRL consume the raw kurtosis
+  unchanged (PSR expects RAW in its `(kurt−1)·sr²/4` term). n<4 / zero-
+  variance guards unchanged.
+- **S0 on real data (#14, doc-only).** On real data S0's beta assertion is
+  tautological (beta_true = the pair's own levels OLS, so
+  `beta_hat − beta_true = 0.0` exactly); the genuine real-data gate is the
+  finite-half-life (mean-reversion) check — an explosive spread
+  (φ̂ > 1 → half-life = inf) FAILS S0. The planted AR(1) fixture (F-PAIR)
+  remains the real calibration of both assertions.
+
 ## Data pipeline (gate 1)
 
 `data/` is the server-side ingest layer (v3 scope doc §3.2: versioned
