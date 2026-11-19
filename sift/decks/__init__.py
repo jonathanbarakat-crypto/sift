@@ -18,7 +18,11 @@ Two kinds of decks, both behind the `decks_v4_2` flag (which also requires
 Dedupe on (scope, bucket config, vintage) like cards: re-registering the
 identical key returns the existing deck (skip-list semantics) and the deck
 ledger counts it exactly once — the cross-user pool strengthens the sample
-instead of inflating the trial count.
+instead of inflating the trial count. CUSTOM decks are the one exception:
+their config carries a canonical membership_hash, so distinct hand-picked
+memberships get distinct deck_ids — every custom attempt counts toward the
+S6 stratum multiplicity (stratum_n) and keeps its own provenance, while
+staying unranked/unshareable.
 
 Ledger: append-only deck trials + deck events in their own SQLite file
 (like the card registry), with read-back on every write (hard rule: never
@@ -136,6 +140,16 @@ def enumerate_buckets() -> list[dict]:
 
 def config_hash_of(config: dict) -> str:
     return hashlib.sha256(canonical_json(config).encode()).hexdigest()
+
+
+def membership_hash(member_card_ids) -> str:
+    """Canonical membership hash: sha256 over the sorted, deduped card ids.
+    Order- and duplicate-insensitive, so the same membership always hashes
+    to the same value — this is what goes into the custom-deck config and
+    therefore into the dedupe key (fix for the custom-deck identity
+    collapse: distinct memberships must get distinct deck_ids)."""
+    members = sorted({str(c) for c in member_card_ids})
+    return hashlib.sha256(canonical_json(members).encode()).hexdigest()
 
 
 def deck_dedupe_key(scope_id: str, config: dict, data_vintage_hash: str) -> str:
@@ -283,14 +297,26 @@ class DeckRegistry:
         unranked — rank stays NULL, unshareable). Membership is arbitrary
         (any size), which is exactly why it can never be ranked: arbitrary
         C(N,k) selections enable try-until-it-passes. Read-back before
-        returning."""
+        returning.
+
+        Identity: the canonical MEMBERSHIP HASH (sorted, deduped
+        member_card_ids) is part of the custom config, so it is part of the
+        dedupe key (scope, config, vintage). Distinct memberships get
+        distinct deck_ids — every attempt is visible to the S6 stratum
+        multiplicity correction (stratum_n) and every deck row stores the
+        exact membership its trials ran on (provenance). Identical
+        membership (any order) still dedupes to one deck. Custom decks stay
+        out of rankings: kind='custom' keeps rank NULL forever and is
+        never ranked/shared regardless of S6 outcome."""
         self._require_flag(owner_handle)
         if not member_card_ids:
             raise DeckError("custom deck needs at least one card")
-        config = {"size": len(member_card_ids), "sector": gcfg.DECK_SECTOR_ALL,
-                  "family_mix": ["custom"], "custom": True}
+        members = sorted(set(member_card_ids))
+        config = {"size": len(members), "sector": gcfg.DECK_SECTOR_ALL,
+                  "family_mix": ["custom"], "custom": True,
+                  "membership_hash": membership_hash(members)}
         return self._register(kind="custom", scope_id=scope_id, config=config,
-                              member_card_ids=member_card_ids,
+                              member_card_ids=members,
                               owner_handle=owner_handle,
                               data_vintage_hash=data_vintage_hash, now=now)
 
@@ -464,4 +490,5 @@ __all__ = [
     "deck_dedupe_key",
     "deck_rank_from_stats",
     "enumerate_buckets",
+    "membership_hash",
 ]
