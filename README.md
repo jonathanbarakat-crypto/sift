@@ -233,11 +233,15 @@ card layer and defaults **ON for the beta cohort**:
   Downgrades (amber) still happen any time from registry evidence; upgrades
   fire ONLY through pre-registered live-window rules (card age > 12m so the
   trailing window is fully out-of-sample, two consecutive annual windows at
-  the mint-time bar — DSR >= 0.99 AND |t_net| >= 4.0 AND p_perm <= 0.01 for
-  silver->gold, DSR >= 0.95 AND |t_net| >= 3.0 for bronze->silver — max one
-  tier change per card per 90 days, seeded PCG64 re-evaluation, append-only
-  `card_upgrade` ledger event with evidence), publicly explained, never by
-  payment or chance; notification hook
+  the mint-time bar in WINDOW-LENGTH-INVARIANT terms — annualized Sharpe,
+  never raw t: |t_win| >= 4.0*sqrt(252/4032) = 1.0 AND p_perm <= 0.01 for
+  silver->platinum, |t_win| >= 3.0*sqrt(252/4032) = 0.75 AND p_perm <= 0.05
+  for bronze->silver, i.e. annSR >= 1.0 / 0.75 — the identical mint-time
+  full-depth bar, not ~4x stricter (soundness #5); DSR stays out of the
+  live-window bar per #170 — max one tier change per card per 90 days,
+  seeded PCG64 re-evaluation, append-only `card_upgrade` ledger event with
+  evidence), publicly explained, never by payment or chance; notification
+  hook
 - `sift/engine/first_run.py` — `--holdout-bars N` (default 252) locks the
   most recent N trading days out of S0–S4 discovery/walk-forward;
   survivors are evaluated once on that frozen holdout (the mint-time

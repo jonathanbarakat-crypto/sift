@@ -171,18 +171,37 @@ def test_mint_none_dsr_fails_gate_closed(cards):
 # ---------------------------------------------------------------------------
 
 def test_meets_tier_bar_raw_only():
-    # platinum: |t| >= 4.0 AND p <= 0.01 — dsr value irrelevant
-    assert meets_tier_bar(WindowStats(0, 252, 0.0, 4.0, 0.01), "platinum")
+    # v4.2 §3 (#170) + soundness #5 (hermes-tasks #181): RAW, N-independent
+    # bars — DSR is NOT part of the bar (the dsr field is ignored on
+    # purpose). The t component is compared in WINDOW-LENGTH-INVARIANT
+    # terms: the mint bar is a full-depth (MINT_T_FULL-bar) t of 4.0
+    # (platinum) / 3.0 (silver); on a 252-bar window the IDENTICAL bar is
+    # |t_win| >= 4.0*sqrt(252/4032) = 1.0 / 0.75 (annualized Sharpe). These
+    # fixtures previously fed RAW full-depth numbers (4.0/3.0) into 252-bar
+    # windows — exactly why the defect was never exposed; they now pin BOTH
+    # the invariant 252-bar hurdles AND the raw full-depth bars verbatim.
+    from sift.cards.decay import MINT_T_FULL, window_t_hurdle
+    assert window_t_hurdle(4.0, 252) == pytest.approx(1.0)
+    assert window_t_hurdle(3.0, 252) == pytest.approx(0.75)
+    # platinum, 252-bar window: invariant hurdle 1.0 — dsr irrelevant
+    assert meets_tier_bar(WindowStats(0, 252, 0.0, 1.0, 0.01), "platinum")
     assert meets_tier_bar(WindowStats(0, 252, 0.999, 4.0, 0.01), "platinum")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 3.99, 0.01), "platinum")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 4.0, 0.011), "platinum")
-    # gold: p_perm <= 0.01 (raw); dsr irrelevant
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 0.99, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 1.0, 0.011), "platinum")
+    # platinum at FULL depth: raw bar 4.0 verbatim — no weakening
+    assert meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.0, 4.0, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.999, 3.99, 0.01), "platinum")
+    # gold: p_perm <= 0.01 (raw, unchanged); dsr irrelevant
     assert meets_tier_bar(WindowStats(0, 252, 0.0, 9.0, 0.01), "gold")
     assert not meets_tier_bar(WindowStats(0, 252, 0.999, 9.0, 0.02), "gold")
-    # silver: |t| >= 3.0 AND p <= 0.05
+    # silver, 252-bar window: invariant hurdle 0.75
+    assert meets_tier_bar(WindowStats(0, 252, 0.0, 0.75, 0.05), "silver")
     assert meets_tier_bar(WindowStats(0, 252, 0.0, 3.0, 0.05), "silver")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 2.99, 0.05), "silver")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 3.0, 0.051), "silver")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 0.749, 0.05), "silver")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 0.75, 0.051), "silver")
+    # silver at FULL depth: raw bar 3.0 verbatim
+    assert meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.0, 3.0, 0.05), "silver")
+    assert not meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.999, 2.99, 0.05), "silver")
     # missing stats never qualify
     assert not meets_tier_bar(WindowStats(0, 252, 0.999, None, 0.001), "platinum")
     assert not meets_tier_bar(WindowStats(0, 252, 0.999, 9.0, None), "gold")
