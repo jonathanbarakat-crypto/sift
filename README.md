@@ -40,7 +40,11 @@ python -m pytest tests/
 
 S0 calibration → S1 discovery screen (|t|≥2.0) → S2 block-permutation null
 (PCG64, block ⌈T^1/3⌉, p=(1+#extreme)/(B+1)) → S3 scope-stratified DSR≥0.95 +
-BH-FDR → S4 cost-aware walk-forward (|t_net| ≥ tau_cal: 3.5 at the 5-yr free
+BH-FDR (both gate: the candidate must be in the BH rejection set at
+q=0.10 over the stratum's S2 p-values; BH assumes PRDS — stratum p-values
+are correlated via the shared universe/overlapping windows, Benjamini-
+Yekutieli is the conservative fallback under arbitrary dependence) → S4
+cost-aware walk-forward (|t_net| ≥ tau_cal: 3.5 at the 5-yr free
 scope, 3.0 at full depth) → **S5 registry-depth validation**.
 
 S5 (v3 §8.1-§8.4) runs **automatically on every S0-S4 survivor — never
