@@ -9,7 +9,6 @@
   4. server-rendered anonymized card faces
   5. anchored run mode
   6. share-for-capacity
-  7. badges
   8. per-card opt-in hit notifications (digest default on free, live on
      paid, rate-capped) + registry decay re-evaluation (amber downgrades
      any time + pre-registered live-window upgrades, both append-only
@@ -24,8 +23,7 @@ variable `SIFT_CARDS_V4_1=0` (or call `set_flag("cards_v4_1", False)` /
 `disable_for_user("cards_v4_1", handle)`) and every cards_v4_1 code path
 is inert: the runner mints no cards, the vault API refuses with
 `flag_off`, and already-minted cards remain readable (they are append-only
-registry records) but no new engagement (share-for-capacity, badges) is
-granted. Disabling the flag never destroys data (v4.1 mechanics item 2:
+registry records) but no new engagement (share-for-capacity) is granted. Disabling the flag never destroys data (v4.1 mechanics item 2:
 never destroyed, never randomized).
 
 `decks_v4_2` wraps the v4.2 deck layer (sift/decks/*: bucket registry,

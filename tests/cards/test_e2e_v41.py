@@ -16,14 +16,13 @@ Covers, in ONE path:
   -> face render (anonymized, watermarked, ticker-guarded)
   -> share grant via request_share (+1 permanent vault slot, verified post,
      append-only audit log, vault read-back)
-  -> badge award (kill_rate etc. from the ledger, guard-checked payload)
   -> notification (per-card opt-in via set_pref, digest on free tier,
      rate-capped, digest_batch/deliver_due)
   -> decay downgrade (RegistryDecayJob.evaluate_card, amber down-only path;
      public explanation, ledger card_decay event, notification hook)
 
 Flag OFF path: the same calls raise each module's fail-closed error type
-(ShareError/BadgeError/NotifyError/DecayError/LayerError with flag_off) and
+(ShareError/NotifyError/DecayError/LayerError with flag_off) and
 touch NO tables (row counts unchanged in every card-layer DB). The mint
 path with the flag off writes no card (CardMinter returns None).
 
@@ -43,7 +42,6 @@ import pytest
 
 from sift import flags
 from sift.cards import CardRegistry
-from sift.cards.badges import BadgeError, BadgeService
 from sift.cards.decay import DecayError, RegistryDecayJob
 from sift.cards.face import CardFaceRenderer, FaceError
 from sift.cards.metrics import MetricError, Metrics
@@ -98,8 +96,7 @@ def _row_counts(db_path) -> dict:
 
 def _layer_db_counts(layer, tmp_db_dir) -> dict:
     out = {}
-    for name in ("cards.db", "vault.db", "shares.db", "badges.db",
-                 "notify.db"):
+    for name in ("cards.db", "vault.db", "shares.db", "notify.db"):
         p = tmp_db_dir / name
         if p.exists():
             out[name] = _row_counts(p)
@@ -152,7 +149,7 @@ def _mint_card(layer, handle, tag, trial=None, stats=(0.995, 4.5, 0.005)):
 # FLAG ON — the full happy path, end to end
 # ============================================================================
 
-def test_full_path_mint_vault_face_share_badge_notify_decay(layer, tmp_path):
+def test_full_path_mint_vault_face_share_notify_decay(layer, tmp_path):
     # -- 1. mint (gauntlet -> validated-green -> card) -------------------------
     verdict, trial = _run_and_mint(layer)
     card_id = verdict["card_id"]
@@ -188,14 +185,7 @@ def test_full_path_mint_vault_face_share_badge_notify_decay(layer, tmp_path):
     log = layer.shares.grants_for(HANDLE)
     assert any(r.outcome == "granted" and r.verified == 1 for r in log)
 
-    # -- 5. badge award (kill_rate from the ledger, guard-checked) --------------
-    badge = layer.badges.award(HANDLE, "kill_rate", opt_in=True, now=NOW)
-    assert badge.payload["badge"] == "kill_rate"
-    assert badge.payload["trials"] >= 1
-    # opt-in respected on read
-    assert [b.badge for b in layer.badges.badges_for(HANDLE)] == ["kill_rate"]
-
-    # -- 6. notification (per-card opt-in; free tier -> digest) -----------------
+    # -- 5. notification (per-card opt-in; free tier -> digest) -----------------
     pref = layer.notify.set_pref(card_id, HANDLE, enabled=True, mode="live",
                                  entitlement="free", now=NOW)
     assert pref.mode == "digest"          # free can never go live
@@ -211,7 +201,7 @@ def test_full_path_mint_vault_face_share_badge_notify_decay(layer, tmp_path):
     # the batched hit row is marked delivered (append-only log keeps the row)
     assert layer.notify.get_notif(ev.notif_id).state == "delivered"
 
-    # -- 7. decay downgrade (registry re-evaluation; amber downgrade path) ---
+    # -- 6. decay downgrade (registry re-evaluation; amber downgrade path) ---
     # force the ledger's recorded stats to weaken so re-derivation downgrades
     layer.ledger.con.execute(
         "UPDATE stage_result SET dsr=0.90 WHERE trial_id=? AND stage='s3'",
@@ -287,9 +277,6 @@ def test_flag_off_fails_closed_and_touches_no_tables(layer, tmp_path):
             layer.shares.request_share(HANDLE, card_id,
                                        post_url="https://x.example/p",
                                        device_id="dev-1", now=NOW)
-        # badge award
-        with pytest.raises(BadgeError):
-            layer.badges.award(HANDLE, "kill_rate", now=NOW)
         # notification
         with pytest.raises(NotifyError):
             layer.notify.set_pref(card_id, HANDLE, enabled=True, mode="live",
@@ -528,34 +515,8 @@ def test_share_device_rate_limit_and_cluster_flag(layer):
 
 
 # ============================================================================
-# Badges + notify + decay mechanics (quoted from the 6/8 and 7/8 cards)
+# Notify + decay mechanics (quoted from the 7/8 and 8/8 cards)
 # ============================================================================
-
-def test_badge_payload_guard_rejects_pnl_language(layer):
-    verdict, _ = _run_and_mint(layer)
-    from sift.cards.badges import _guard_payload
-    # forbidden FIELD names are refused (fail closed)
-    with pytest.raises(BadgeError):
-        _guard_payload({"badge": "kill_rate", "win_rate": 0.9})
-    with pytest.raises(BadgeError):
-        _guard_payload({"badge": "kill_rate", "nested": {"pnl": 12.3}})
-    # a bare forbidden term as a leaf VALUE is refused
-    with pytest.raises(BadgeError):
-        _guard_payload({"badge": "kill_rate", "note": "win_rate"})
-    # ...but legal disclaimer prose mentioning the words is fine
-    _guard_payload({"badge": "kill_rate",
-                    "note": "validation survival only — never P&L (v3 §12.4)"})
-    # ALL four badge kinds can be awarded (guard must not reject its own notes)
-    for b in ("kill_rate", "pre_registration_streak", "peer_retest", "scope_honesty"):
-        badge = layer.badges.award(HANDLE, b, opt_in=True, now=NOW)
-        assert badge.payload["badge"] == b
-    # opt-out respected: award without opt-in -> not visible
-    layer.badges.set_opt_in(HANDLE, "kill_rate", False, now=NOW)
-    assert "kill_rate" not in [b.badge for b in layer.badges.badges_for(HANDLE)]
-    assert "kill_rate" in [b.badge for b in layer.badges.all_badges(HANDLE)]
-    with pytest.raises(BadgeError):
-        layer.badges.award(HANDLE, "no_such_badge", now=NOW)
-
 
 def test_notify_rate_caps_and_digest_batching(layer):
     verdict, _ = _run_and_mint(layer)

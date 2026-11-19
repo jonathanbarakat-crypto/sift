@@ -32,7 +32,7 @@ from .world import SIM_SCOPE_ID, SIM_VINTAGE, SimWorld
 
 
 def _mint(world: SimWorld, handle: str, tag: str,
-          stats=(0.995, 4.5, 0.005)) -> str:
+          stats=(0.995, 4.5, 0.005, True, False)) -> str:
     trial = world.ledger.register(
         "pairs", SIM_SCOPE_ID, {"sim": True, "tag": tag},
         SIM_VINTAGE, provenance="user_initiated", discoverer_handle=handle,
@@ -43,6 +43,7 @@ def _mint(world: SimWorld, handle: str, tag: str,
         config_hash=f"sim-h-{tag}", data_vintage_hash=trial.data_vintage_hash,
         survivor_class="validated-green", owner_handle=handle,
         dsr=stats[0], t_net_full=stats[1], p_perm=stats[2],
+        s4_pass=stats[3], s5_pass=stats[4],
         now=world.clock.now(),
     )
     return card.card_id
