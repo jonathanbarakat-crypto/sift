@@ -353,16 +353,17 @@ def deck_gauntlet(
     basket's evidence is worth n_eff independent bets, not K. We deflate
     the stratum variance by the diversification ratio K/n_eff when
     computing the within-deck benchmark,
-        v_eff = v_stratum * (K / n_eff)   (>= v_stratum, harder when correlated),
-    and the effective-N bar is dsr_eff = psr(sr_bar, sr_star, T_eff, ...)
+        v_eff = max(v_stratum * (K / n_eff), (1 + sr_bar^2/2)/T)
+                  (>= the stratum floor, harder when correlated),
+    and the effective-N bar is dsr_eff = psr(sr_bar, sr_star_eff, T_eff, ...)
     with the track record shrunk to the effective sample size
         T_eff = T * n_eff / K             (<= T, harder when correlated),
-    both with the SAME selection-luck ceiling sr_star = expected_max_sharpe(
-    n_stratum, v_stratum) as the stratum DSR. A deck with correlated
-    components (low n_eff) therefore faces a HARDER bar on both axes —
-    '50 mixed cards' cannot launder one lucky pair. The previous code fed
-    n_eff into expected_max_sharpe (lower luck ceiling for fewer bets ->
-    EASIER bar), which was backwards.
+    where the selection-luck ceiling sr_star_eff = expected_max_sharpe(
+    n_stratum, v_eff) keeps N = the RAW stratum trial count. A deck with
+    correlated components (low n_eff) therefore faces a HARDER bar on both
+    axes — '50 mixed cards' cannot launder one lucky pair. The previous
+    code fed n_eff into expected_max_sharpe (lower luck ceiling for fewer
+    bets -> EASIER bar), which was backwards.
     """
     r = np.asarray(net_returns, float)
     r = r[np.isfinite(r)]
