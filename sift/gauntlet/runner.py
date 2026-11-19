@@ -240,6 +240,14 @@ class GauntletRunner:
         <= T_F, PBO <= 0.5. Post-delist prices are excluded via the delist
         mask (F-DELIST): no statistic reads a post-delist cell.
 
+        PBO is COMPUTED, never hardcoded (soundness #2): CSCV (S=16) over
+        the pre-registered variant grid (config.S5_VARIANT_GRID) of
+        walk-forward configs around the registered one, run on the same
+        delist-safe leading window; the grid digest is recorded in the
+        stage detail. If the window cannot support the CSCV design,
+        cscv_pbo returns None and the pbo check FAILS CLOSED (soundness
+        #15) — an uncomputed PBO can never pass as 0.0.
+
         Pass -> validated-green; fail -> on-watch-amber (v3 §8.4). Both are
         recorded as the trial's s5 stage row with scope registry_depth.
         """
@@ -258,13 +266,39 @@ class GauntletRunner:
         # window (leading_valid_window) — never on a window that contains a
         # post-delist row in any leg.
         T_use = min(prices.shape[0], max(s5stats.leading_valid_window(mask), 2))
-        wf = stats.walk_forward_returns(prices[:T_use])
+        window = prices[:T_use]
+        wf = stats.walk_forward_returns(window)
         net = wf["net"]
         net = net[np.isfinite(net)]
-        # PBO via CSCV on the net-return blocks (S=16) — config variants are
-        # the per-block means perturbed deterministically; a single-config
-        # strategy yields PBO 0 by construction, recorded honestly.
-        pbo = 0.0
+        # PBO via CSCV (S=16) over the PRE-REGISTERED variant grid around
+        # the registered config (config.S5_VARIANT_GRID) — a genuine
+        # multi-configuration returns matrix. CSCV on a single config is
+        # meaningless, so the old hardcoded pbo=0.0 shortcut is gone
+        # (soundness #2). Each variant runs the same delist-safe leading
+        # window walk-forward with its own formation/open_z/close_z/step;
+        # the grid digest is recorded in the stage detail so the PBO input
+        # is auditable / pre-registered. If the window is too short for
+        # S blocks, cscv_pbo returns None and the verdict FAILS CLOSED on
+        # the pbo check (soundness #15) — never a fabricated 0.0.
+        grid = cfg.s5_variant_grid()
+        cols = []
+        for v in grid:
+            wv = stats.walk_forward_returns(
+                window,
+                formation=int(v["formation"]), step=int(v["step"]),
+                open_z=float(v["open_z"]), close_z=float(v["close_z"]),
+            )
+            nv = wv["net"]
+            cols.append(nv[np.isfinite(nv)] if nv.size == T_use else
+                        np.full(T_use, np.nan))
+        # align columns on the window length (pad/truncate to T_use)
+        R = np.full((T_use, len(cols)), np.nan)
+        for j, c in enumerate(cols):
+            k = min(T_use, c.size)
+            R[:k, j] = c[:k]
+        pbo = stats.cscv_pbo(R, S=cfg.S5_CSCV_S, seed=seed)
+        pbo_n_configs = len(grid)
+        pbo_grid_digest = cfg.s5_variant_grid_digest()
         # S3 at registry_depth with the stratum denominator from the ledger
         # (UNITS #1: sr_bar is per-bar; the ledger V is per-bar SR^2 —
         # stats.dsr guards the units at mint time)
@@ -296,6 +330,9 @@ class GauntletRunner:
             v_stratum=d["v_stratum"], dsr=d["dsr"], seed=seed,
             detail={"t_net": t_net, "sr_ann": sr_ann, "T": T,
                     "min_trl": verdict["min_trl"], "pbo": pbo,
+                    "pbo_n_configs": pbo_n_configs,
+                    "pbo_grid_digest": pbo_grid_digest,
+                    "pbo_S": cfg.S5_CSCV_S,
                     "p_perm": p_perm, "block_len": s2["block_len"],
                     "T_window_used": T_use,
                     "n_s2_returns": int(sr.size),

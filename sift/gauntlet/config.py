@@ -29,7 +29,27 @@ SCOPE_T = {
 # survivors that fail full-depth become on-watch-amber, not validated-green.
 S5_SCOPE = "registry_depth"
 S5_T_FULL = 3.0             # = S4_T_NET_FULL, full-depth hurdle — S5's own bar, never weakened (design doc §3.2 rule 2)
-S5_PBO_MAX = 0.5            # = S4_PBO_MAX, PBO <= 0.5 at registry depth (CSCV, S=16)
+S5_PBO_MAX = 0.5            # = S4_PBO_MAX, PBO <= 0.5 at registry depth (CSCV, S=16, over S5_VARIANT_GRID — computed, never hardcoded; None fails closed)
+
+# S5 CSCV variant grid (soundness #2): CSCV over a SINGLE configuration is
+# meaningless, so S5 computes PBO over a pre-registered grid of walk-forward
+# variants around the registered config (formation / open_z / close_z /
+# step). The registered config (60 / 2.0 / 0.5 / 120) is the grid center.
+# The grid is fixed here (pre-registered) and hashed by
+# `s5_variant_grid_digest()` into the s5 stage detail, so the PBO input is
+# auditable and cannot be tuned after seeing the outcome.
+S5_CSCV_S = 16              # CSCV blocks (ceil(4032^(1/3)) = 16, matches S2 block convention)
+S5_VARIANT_GRID = (
+    {"formation": 60,  "open_z": 2.0, "close_z": 0.5, "step": 120},   # registered (center)
+    {"formation": 40,  "open_z": 2.0, "close_z": 0.5, "step": 120},
+    {"formation": 80,  "open_z": 2.0, "close_z": 0.5, "step": 120},
+    {"formation": 60,  "open_z": 1.5, "close_z": 0.5, "step": 120},
+    {"formation": 60,  "open_z": 2.5, "close_z": 0.5, "step": 120},
+    {"formation": 60,  "open_z": 2.0, "close_z": 0.3, "step": 120},
+    {"formation": 60,  "open_z": 2.0, "close_z": 0.8, "step": 120},
+    {"formation": 60,  "open_z": 2.0, "close_z": 0.5, "step": 60},
+    {"formation": 60,  "open_z": 2.0, "close_z": 0.5, "step": 252},
+)
 
 # S1 discovery screen
 S1_THRESHOLD = 2.0            # |t| >= 2.0 to proceed
@@ -47,7 +67,7 @@ S3_BH_Q = 0.10                # BH-FDR q at family level
 S4_T_NET_5Y = 3.5             # scope-matched tau_cal for the 5-yr free scope
 S4_T_NET_FULL = 3.0           # full-depth hurdle (Harvey-Liu-Zhu), used at pro_full
 S4_NET_SR_MIN = 0.0           # net SR > 0 after costs
-S4_PBO_MAX = 0.5              # PBO <= 0.5 at registry depth (S5, CSCV S=16)
+S4_PBO_MAX = 0.5              # PBO <= 0.5 at registry depth (S5, CSCV S=16 over the pre-registered S5_VARIANT_GRID)
 
 # S0 calibration tolerances
 S0_BETA_TOL = 0.05
@@ -105,6 +125,24 @@ def tau_cal(scope_id: str) -> float:
     if scope_id == "free_5y_top1k" or scope_id.startswith("research_"):
         return S4_T_NET_5Y
     return S4_T_NET_FULL
+
+
+def s5_variant_grid() -> tuple[dict, ...]:
+    """The pre-registered S5 CSCV variant grid (see S5_VARIANT_GRID above).
+    Returned as a tuple of plain dicts, stable order — the PBO input for
+    S5's CSCV (soundness #2)."""
+    return tuple(dict(v) for v in S5_VARIANT_GRID)
+
+
+def s5_variant_grid_digest() -> str:
+    """SHA-256 over the canonical JSON of the variant grid — recorded in
+    the s5 stage detail so the exact PBO input is auditable / pre-registered
+    (hashed alongside the trial's config_hash)."""
+    import hashlib
+    import json
+    canon = json.dumps([dict(v) for v in S5_VARIANT_GRID],
+                       sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canon.encode()).hexdigest()
 
 
 def scope_T(scope_id: str) -> int:
