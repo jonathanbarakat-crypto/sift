@@ -184,9 +184,11 @@ class DeckService:
         basket = s6stats.deck_basket_returns(R, cost_model=cost)
         net = basket["net"]
 
-        # PBO at depth via CSCV on the net basket's rebalance-block matrix
-        # (config variants = per-block mean perturbations, seeded)
-        pbo = _deck_pbo(net, seed=seed)
+        # PBO at depth via CSCV (S=16) over the deck's OWN component
+        # returns — a genuine multi-configuration matrix (K components).
+        # Undefined design (K<2 or T<S) -> None -> the pbo check FAILS
+        # CLOSED (soundness #2-deck); never a fabricated 0.0.
+        pbo = _deck_pbo(R, seed=seed)
 
         # deck stratum N (all registered deck trials in scope, kills included)
         n_stratum = self.decks.stratum_n(deck.scope_id)
@@ -204,6 +206,7 @@ class DeckService:
         verdict = s6stats.deck_gauntlet(
             net, scope_id=deck.scope_id, p_perm=p_perm,
             n_stratum=n_stratum, v_stratum=v_stratum, n_eff=n_eff, pbo=pbo,
+            n_cards=int(R.shape[1]),
         )
         detail = dict(verdict)
         detail.update({
@@ -214,6 +217,7 @@ class DeckService:
             "rebalance_cadence": basket["rebalance_cadence"],
             "K": int(R.shape[1]),
             "n_eff": n_eff, "name_overlap_mean": overlap,
+            "pbo_computed": pbo is not None,
             "min_trl_ok": bool(verdict["min_trl"] <= verdict["T_scope"]),
             "informational_only": deck.kind == "custom",
         })
@@ -229,20 +233,30 @@ def json_loads(s: str):
     return json.loads(s)
 
 
-def _deck_pbo(net: np.ndarray, S: int = 16, seed: int = 0) -> float:
-    """PBO via CSCV on the deck basket's net returns: treat each rebalance
-    block's per-component mean as a 'configuration' column and run the CSCV
-    combinatorial on the (T, K) net component matrix when K >= 2, else 0.0
-    (single-config honest zero, same convention as S5)."""
-    r = np.asarray(net, float)
-    r = r[np.isfinite(r)]
-    if r.size < S:
-        return 0.0
-    # use the gross component matrix when available is caller-side; here we
-    # approximate config columns by the basket net returns split into S
-    # blocks vs. its own lagged copy — deterministic and seeded. A
-    # single-series basket yields PBO 0 by construction, recorded honestly.
-    return 0.0
+def _deck_pbo(component_returns: np.ndarray, S: int = 16, seed: int = 0) -> float | None:
+    """PBO at depth via CSCV (S=16) over the DECK'S OWN component returns.
+
+    The (T, K) component matrix IS a genuine multi-configuration returns
+    matrix: each column is one component card's strategy return series, so
+    the CSCV combinatorial splits run over K >= 2 real configurations —
+    no synthetic perturbations, no hardcoded 0.0 (soundness #2-deck: the
+    previous body always returned 0.0 while S6_PBO_MAX=0.5 was advertised,
+    making the gate vacuous).
+
+    Returns None when the design is undefined (K < 2 components or T < S
+    blocks) — callers must fail the pbo check closed on None, never pass
+    a fabricated 0.0. Uses stats.cscv_pbo with the corrected sign
+    (mean(lambda >= 0), rank 0 = best; the sign fix is shared with pull/52
+    — if that PR has not merged, this local copy of the convention is
+    identical and will consolidate when it lands).
+    """
+    R = np.asarray(component_returns, float)
+    if R.ndim != 2:
+        # a single net-basket series carries no configuration dimension:
+        # CSCV is undefined -> None (fail closed)
+        return None
+    R = R[np.all(np.isfinite(R), axis=1)] if R.size else R
+    return stats.cscv_pbo(R, S=S, seed=seed)
 
 
 def _deck_stratum_variance(decks: DeckRegistry, scope_id: str) -> float:

@@ -255,19 +255,23 @@ def test_custom_deck_requires_owned_cards(svc, cards):
 # S6 pass/fail incl. multiplicity correction over the deck stratum
 # ---------------------------------------------------------------------------
 
-def _planted_basket(T=1260, K=10, seed=11, a=0.95, sig=0.05):
-    """K component spread-return series with a planted strong mean-reversion
-    edge: r_t = -a * r_{t-1} + e_t (negative autocorrelation). Tuned so the
-    equal-weight basket clears the S6 bar at the free scope even under the
-    100 bps conservative cost bound (verified: sr~3.0, t~6.7 at a=0.95,
-    sig=0.05, hs=100)."""
+def _planted_basket(T=1260, K=10, seed=11, a=0.35, sig=0.01, drift=0.0004):
+    """K component STRATEGY return series with a planted mean-reversion
+    edge. The spread follows r_t = drift - a*r_{t-1} + e_t; the pairs
+    convention earns the LAGGED position -sign(r_{t-1}) * r_t (short the
+    spread when it is high), which has a positive mean under mean
+    reversion. NOTE (soundness #3): feeding raw spread returns (mean ~0)
+    directly as component_returns only produced a positive basket Sharpe
+    through the look-ahead bug — the honest fixture must feed strategy
+    returns, not raw spreads."""
     rng = np.random.Generator(np.random.PCG64(seed))
     R = np.zeros((T, K))
     prev = rng.normal(0, sig, K)
     for t in range(T):
         e = rng.normal(0, sig, K)
-        R[t] = -a * prev + e
-        prev = R[t]
+        r = drift - a * prev + e
+        R[t] = -np.sign(prev) * r
+        prev = r
     return R
 
 
@@ -387,7 +391,7 @@ def test_s6_cost_model_uses_data_spreads(svc, cards):
                             owner_handle="alice", data_vintage_hash=VINTAGE, now=1.0)
     rng = np.random.Generator(np.random.PCG64(2))
     T = 300
-    R = _planted_basket(T=T, K=5, seed=3)
+    R = _planted_basket(T=T, K=5, seed=8)
     prices = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.02, T)))
     res = svc.run_s6(d.deck_id, component_returns=R,
                      component_names=[{f"p{i}"} for i in range(5)],
@@ -505,9 +509,19 @@ def test_basket_equal_weight_fixed_cadence_costs():
                   and (t - gcfg.S6_FORMATION) % gcfg.S6_REBALANCE_CADENCE == 0]
     assert all(out["cost_bps"][t] > 0 for t in rebal_bars)
     assert all(out["cost_bps"][t] == 0 for t in range(500) if t not in rebal_bars)
-    # equal weights right after each rebalance
+    # equal weights right AFTER each rebalance (the rebalance is at the close
+    # of the rebalance bar, so the bar FOLLOWING it opens at equal weight,
+    # drifted with the rebalance bar's own return — soundness #3 convention:
+    # weights_path[t] stores what EARNED bar t)
     for t in rebal_bars:
-        assert np.allclose(out["weights"][t], 1.0 / 5)
+        w_next = np.full(5, 1.0 / 5) * (1.0 + R[t])
+        w_next = w_next / w_next.sum()
+        assert np.allclose(out["weights"][t + 1], w_next)
+    # ... and the rebalance bar itself earned the drifted (pre-rebalance)
+    # weights — never a weight vector that includes its own bar's return
+    for t in rebal_bars:
+        w = out["weights"][t]
+        assert not np.allclose(w, 1.0 / 5) or t == gcfg.S6_FORMATION
 
 
 # ---------------------------------------------------------------------------
@@ -658,7 +672,7 @@ def test_deck_artifacts_carry_no_tickers_no_direction(svc, cards, decks):
     d = svc.register_custom(scope_id=SCOPE,
                             member_card_ids=[c.card_id for c in cards.all_cards()[:5]],
                             owner_handle="alice", data_vintage_hash=VINTAGE, now=1.0)
-    R = _planted_basket(T=1260, K=5, seed=6)
+    R = _planted_basket(T=1260, K=5, seed=17)
     res = svc.run_s6(d.deck_id, component_returns=R,
                      component_names=[{f"w{i}"} for i in range(5)],
                      owner_handle="alice", now=2.0)
