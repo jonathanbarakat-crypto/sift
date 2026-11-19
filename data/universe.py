@@ -36,13 +36,24 @@ import pandas as pd
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from data import warehouse as wh  # type: ignore
+    from data.security_type import is_common_stock_symbol  # type: ignore
 else:
     from . import warehouse as wh
+    from .security_type import is_common_stock_symbol
 
 DEFAULT_WAREHOUSE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "data", "warehouse")
 
 RESEARCH_VENDORS = {"yfinance", "yf", "yahoo"}
+
+# Pre-registered universe QUALITY FLOORS (hermes-tasks #182): 1-bar names and
+# micro-caps must not be rankable into the top-N universe. Defaults assume a
+# ~5y daily window (~1260 bars); scale --min-bars with a shorter window
+# (escape hatch: explicit --min-bars 1 / --min-avg-dollar-volume 0 restores
+# the old permissive behavior). Non-common symbols (warrants/units/rights/
+# preferred) are ALWAYS excluded from ranking, regardless of floors.
+DEFAULT_MIN_BARS = 20
+DEFAULT_MIN_AVG_DOLLAR_VOLUME = 1_000_000.0  # $1M mean daily dollar volume
 
 
 def log(msg: str) -> None:
@@ -80,12 +91,21 @@ def load_all_bars(root: str) -> pd.DataFrame:
 
 
 def build_ranked_table(bars: pd.DataFrame, asof: str,
-                       research_grade: bool = False) -> pd.DataFrame:
+                       research_grade: bool = False,
+                       min_bars: int = 0,
+                       min_avg_dollar_volume: float = 0.0) -> pd.DataFrame:
     """Point-in-time ranking as of ``asof`` (YYYY-MM-DD).
 
     Uses only bars with date <= asof. Average dollar volume = mean(close*volume)
     over the available window up to asof. Symbols whose last bar is before
     asof are kept (no survivorship bias) and flagged.
+
+    Quality floors (hermes-tasks #182): non-common-stock symbols (warrants,
+    units, rights, preferred — classified by data/security_type.py) are
+    ALWAYS excluded; rows with ``bars < min_bars`` or
+    ``avg_dollar_volume < min_avg_dollar_volume`` are excluded when the
+    caller passes floors > 0 (the CLI defaults are DEFAULT_MIN_BARS /
+    DEFAULT_MIN_AVG_DOLLAR_VOLUME).
 
     ``research_grade=True`` (yfinance/Yahoo vintage): the vendor has NO
     delisted list, so the ingested universe is ACTIVE-ONLY — every ranked
@@ -122,8 +142,18 @@ def build_ranked_table(bars: pd.DataFrame, asof: str,
     # record that explicitly instead of silently treating the data as
     # survivorship-free. On production vintages with a delisted=1 list this is True.
     out["delist_idx_available"] = not research_grade
+    # quality floors: non-common symbols always out; bars / ADV floors when set
+    bare = out["symbol"].str.split(".").str[0]
+    common_mask = bare.map(is_common_stock_symbol)
+    n_non_common = int((~common_mask).sum())
+    out = out.loc[common_mask].copy()
+    if min_bars > 0:
+        out = out[out["bars"] >= min_bars]
+    if min_avg_dollar_volume > 0:
+        out = out[out["avg_dollar_volume"] >= min_avg_dollar_volume]
     out = out.sort_values("avg_dollar_volume", ascending=False).reset_index(drop=True)
     out.insert(0, "rank", range(1, len(out) + 1))
+    out.attrs["non_common_excluded"] = n_non_common
     return out
 
 
@@ -140,8 +170,14 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--n", type=int, default=1000, help="universe size (default 1000, free tier)")
     ap.add_argument("--asof", default=None,
                     help="point-in-time as-of date YYYY-MM-DD (default: today)")
-    ap.add_argument("--min-bars", type=int, default=1,
-                    help="minimum number of bars up to asof to be rankable (default 1)")
+    ap.add_argument("--min-bars", type=int, default=DEFAULT_MIN_BARS,
+                    help=f"minimum number of bars up to asof to be rankable "
+                         f"(default {DEFAULT_MIN_BARS}; pre-registered quality floor, "
+                         "hermes-tasks #182 — pass 1 to restore the old permissive mode)")
+    ap.add_argument("--min-avg-dollar-volume", type=float, default=DEFAULT_MIN_AVG_DOLLAR_VOLUME,
+                    help=f"minimum mean daily dollar volume (close*volume) to be rankable, "
+                         f"in USD (default {DEFAULT_MIN_AVG_DOLLAR_VOLUME:.0f} = $1M; "
+                         "pre-registered floor — pass 0 to disable)")
     args = ap.parse_args(argv)
 
     root = os.path.abspath(args.warehouse)
@@ -156,11 +192,19 @@ def main(argv: list | None = None) -> int:
     bars = load_all_bars(root)
     log(f"loaded {len(bars)} bars, {bars['symbol'].nunique() if not bars.empty else 0} symbols")
 
-    ranked = build_ranked_table(bars, asof, research_grade=research)
-    ranked = ranked[ranked["bars"] >= args.min_bars].copy()
+    ranked = build_ranked_table(bars, asof, research_grade=research,
+                                min_bars=args.min_bars,
+                                min_avg_dollar_volume=args.min_avg_dollar_volume)
+    n_non_common = int(ranked.attrs.get("non_common_excluded", 0))
+    if n_non_common:
+        log(f"quality filter: excluded {n_non_common} non-common-stock symbols "
+            f"(warrants/units/rights/preferred) from ranking")
+    if args.min_bars > 0 or args.min_avg_dollar_volume > 0:
+        log(f"quality floors: min_bars>={args.min_bars}, "
+            f"min_avg_dollar_volume>=${args.min_avg_dollar_volume:,.0f} "
+            f"(hermes-tasks #182 pre-registered floors)")
     if "rank" in ranked.columns:
-        ranked = ranked.drop(columns=["rank"])
-    ranked = ranked.reset_index(drop=True)
+        ranked = ranked.drop(columns=["rank"]).reset_index(drop=True)
     ranked.insert(0, "rank", range(1, len(ranked) + 1))
     top = build_pit_listing(ranked, args.n)
 
@@ -190,6 +234,8 @@ def main(argv: list | None = None) -> int:
         "asof": asof,
         "n": args.n,
         "min_bars": args.min_bars,
+        "min_avg_dollar_volume": args.min_avg_dollar_volume,
+        "non_common_excluded": n_non_common,
         "ranked_path": ranked_path,
         "top_path": top_path,
         "symbols_ranked": int(len(ranked)),

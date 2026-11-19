@@ -36,15 +36,21 @@ server (the warehouse is gitignored); no tokens needed for Yahoo; nothing
 secret is printed or committed; SIFT does not trade.
 
 Usage:
-    python3 -m data.ingest_yf --warehouse data/warehouse --period 5y --top 500
+    python3 -m data.ingest_yf --warehouse data/warehouse --period 5y            # full seed; universe.py cuts top-N by dollar volume
     python3 -m data.ingest_yf --tickers AAPL MSFT --period 5y --sleep 2
-    python3 -m data.ingest_yf --seed-list sp500 --period 5y --top 500 --sleep 1.5
+    python3 -m data.ingest_yf --seed-list sp500 --period 5y --max-ingest 500 --sleep 1.5
+
+NOTE on universe size: --top is DEPRECATED (it truncated the alphabetically
+sorted seed list — the A/B-only universe of hermes-tasks #182). Ingest the
+full seed (or a seeded-random --max-ingest sample) and let data/universe.py
+rank by point-in-time average dollar volume and cut top-N.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import random
 import sys
 from datetime import date, datetime, timedelta, timezone
 
@@ -54,16 +60,22 @@ import pandas as pd
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from data import warehouse as wh  # type: ignore
+    from data.security_type import is_common_stock_symbol  # type: ignore
     from data.yf_client import (  # type: ignore
         DEFAULT_PERIOD, RESEARCH_GRADE, VENDOR, VALID_PERIODS, YfClient, YfError,
         YfRateLimited, history_to_bars_frame,
     )
 else:
     from . import warehouse as wh
+    from .security_type import is_common_stock_symbol
     from .yf_client import (
         DEFAULT_PERIOD, RESEARCH_GRADE, VENDOR, VALID_PERIODS, YfClient, YfError,
         YfRateLimited, history_to_bars_frame,
     )
+
+# Default seed for --max-ingest shuffling: fixed so a run is reproducible
+# (same seed list + same --max-ingest -> same candidate pool every time).
+CAP_RNG_SEED = 20261119
 
 DEFAULT_WAREHOUSE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "data", "warehouse")
@@ -128,15 +140,44 @@ def _fetch_json(url: str, user_agent: str, timeout: int = 30):
     return json.loads(raw.decode("utf-8"))
 
 
+def filter_common_stock(symbols: list[str]) -> list[str]:
+    """Drop warrants/units/rights/preferred from a seed list (symbol-pattern
+    filter — Yahoo has no security-type field; mirrors the EODHD ingest's
+    Type='Common Stock' filter, data/ingest_eodhd.py). Returns the kept
+    symbols in their original order."""
+    return [s for s in symbols if is_common_stock_symbol(s)]
+
+
+def alphabet_sanity_ok(symbols: list[str],
+                       min_letters: int = 10, max_single_letter_frac: float = 0.5) -> bool:
+    """Guard against alphabetically truncated / degenerate candidate pools
+    (the hermes-tasks #182 root cause: ``sorted(seed)[:top]`` produced an
+    A-only pool). A healthy full US seed spans ~26 letters with no letter
+    above ~50%. Returns False when the pool is degenerate."""
+    if not symbols:
+        return False
+    letters = [s[0].upper() for s in symbols if s]
+    if len(set(letters)) < min_letters:
+        return False
+    top_letter = max(letters.count(c) for c in set(letters))
+    return top_letter / len(letters) <= max_single_letter_frac
+
+
 def seed_list_sec() -> list[str]:
     """Active US listings from SEC EDGAR company_tickers_exchange.json
-    (Nasdaq + NYSE + NYSE American/Arca). Fetched at runtime, never committed."""
+    (Nasdaq + NYSE + NYSE American/Arca), restricted to COMMON STOCK symbols
+    (warrants/units/rights/preferred excluded by pattern — the SEC seed has
+    no type field, so data/security_type.py classifies). Fetched at runtime,
+    never committed."""
     d = _fetch_json(SEC_TICKERS_EXCHANGE_URL, SEC_USER_AGENT)
     data = d["data"] if isinstance(d, dict) and "data" in d else d
     wanted = {"nasdaq", "nyse", "nyse american", "nyse arca", "nyse mkt", "amex"}
     syms = sorted({row[2] for row in data if str(row[3]).lower() in wanted})
-    log(f"seed-list sec: {len(syms)} active US listings from SEC EDGAR")
-    return syms
+    common = filter_common_stock(syms)
+    log(f"seed-list sec: {len(syms)} active US listings from SEC EDGAR, "
+        f"{len(syms) - len(common)} non-common (warrant/unit/right/preferred) excluded, "
+        f"{len(common)} common-stock candidates")
+    return common
 
 
 def seed_list_sp500() -> list[str]:
@@ -161,8 +202,10 @@ def seed_list_sp500() -> list[str]:
         if re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", sym or ""):
             syms.append(sym.replace(".", "-"))  # Yahoo convention: BRK.B -> BRK-B
     syms = sorted(set(syms))
-    log(f"seed-list sp500: {len(syms)} constituents from Wikipedia")
-    return syms
+    common = filter_common_stock(syms)
+    log(f"seed-list sp500: {len(common)} constituents from Wikipedia"
+        + (f" ({len(syms) - len(common)} non-common excluded)" if len(common) != len(syms) else ""))
+    return common
 
 
 def load_seed_list(kind: str) -> list[str]:
@@ -174,8 +217,13 @@ def load_seed_list(kind: str) -> list[str]:
         path = kind.split(":", 1)[1]
         with open(path, "r", encoding="utf-8") as f:
             syms = sorted({ln.strip().upper() for ln in f if ln.strip() and not ln.startswith("#")})
-        log(f"seed-list file:{path}: {len(syms)} symbols")
-        return syms
+        common = filter_common_stock(syms)
+        if len(common) != len(syms):
+            log(f"seed-list file:{path}: {len(syms)} symbols, "
+                f"{len(syms) - len(common)} non-common excluded, {len(common)} kept")
+        else:
+            log(f"seed-list file:{path}: {len(syms)} symbols")
+        return common
     raise YfError(f"unknown --seed-list {kind!r} (sec | sp500 | file:<path>)")
 
 
@@ -243,8 +291,20 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--seed-list-file", default=None,
                     help="path to a newline-separated symbol list (overrides --seed-list)")
     ap.add_argument("--top", type=int, default=None,
-                    help="keep only the first N seed-list symbols (e.g. 500); "
-                         "default: all seed symbols")
+                    help="DEPRECATED: never truncated the seed alphabetically safely — "
+                         "the seed list is alphabetically sorted, so the old "
+                         "'symbols[:top]' kept only the first N symbols A-Z (an "
+                         "A/B-only universe; hermes-tasks #182). Ignored for selection "
+                         "(accepted with a warning); top-N selection is by POINT-IN-TIME "
+                         "DOLLAR VOLUME in data/universe.py. Use --max-ingest for a "
+                         "cost cap.")
+    ap.add_argument("--max-ingest", type=int, default=None,
+                    help="cost cap: ingest a seeded-RANDOM sample of at most N seed "
+                         "symbols (default: all). The sample is reproducible "
+                         "(fixed seed) and alphabetically unbiased — never the "
+                         "alphabetical head.")
+    ap.add_argument("--cap-seed", type=int, default=CAP_RNG_SEED,
+                    help=f"RNG seed for --max-ingest sampling (default {CAP_RNG_SEED})")
     ap.add_argument("--period", default=DEFAULT_PERIOD, choices=VALID_PERIODS,
                     help=f"yfinance history period (default {DEFAULT_PERIOD})")
     ap.add_argument("--from", dest="from_date", default=None,
@@ -275,12 +335,30 @@ def main(argv: list | None = None) -> int:
         except YfError as e:
             log(f"ERROR: {e}")
             return 2
+        if not alphabet_sanity_ok(symbols):
+            log("ERROR: candidate seed pool is degenerate — first-letter distribution "
+                "spans < 10 letters or one letter > 50% (alphabetical-truncation "
+                "signature, hermes-tasks #182). Refusing to ingest a biased pool; "
+                "check the seed list.")
+            return 2
         if args.top:
-            symbols = symbols[: args.top]
+            log("WARNING: --top is DEPRECATED and ignored for selection — the seed "
+                "list is alphabetically sorted, so 'first N' would keep only A-Z "
+                "head symbols (the alphabetical-truncation bias of hermes-tasks "
+                "#182). Ingesting the FULL seed; top-N selection happens by "
+                "point-in-time dollar volume in data/universe.py. For a cost cap "
+                "use --max-ingest (seeded random sample, alphabetically unbiased).")
+        if args.max_ingest and args.max_ingest < len(symbols):
+            n_seed = len(symbols)
+            rng = random.Random(args.cap_seed)
+            symbols = sorted(rng.sample(symbols, args.max_ingest))
+            log(f"--max-ingest {args.max_ingest}: seeded-random sample of "
+                f"{args.max_ingest}/{n_seed} seed symbols "
+                f"(seed={args.cap_seed}) — alphabetically unbiased cost cap")
     else:
         symbols = [s.upper() for s in symbols]
 
-    scope_id = scope_id_for("yf", args.period, args.top if args.tickers is None else None)
+    scope_id = scope_id_for("yf", args.period, None)
     log(f"RESEARCH-ONLY feed: vendor={VENDOR} research_grade={RESEARCH_GRADE} "
         f"scope_id={scope_id} period={args.period} window=[{from_date}..{to_date}] "
         f"tickers={len(symbols)} sleep={args.sleep}s")

@@ -132,7 +132,11 @@ python3 -m data.ingest_eodhd --probe-deep-history AAPL   # expected to fail on f
 python3 -m data.universe --warehouse data/warehouse --n 1000 --asof 2026-11-15
 python3 -m pytest tests/ -q
 # research feed (yfinance/Yahoo, RESEARCH-ONLY — never production):
-python3 -m data.ingest_yf --warehouse data/warehouse --period 5y --seed-list sec --top 500 --sleep 1.5
+# NOTE: --top is deprecated (it truncated the alphabetically sorted seed list —
+# the A/B-only universe bias, hermes-tasks #182). Ingest the full seed (or a
+# seeded-random --max-ingest sample); data/universe.py cuts top-N by dollar volume.
+python3 -m data.ingest_yf --warehouse data/warehouse --period 5y --seed-list sec --sleep 1.5
+python3 -m data.universe --warehouse data/warehouse --n 500
 python3 -m sift.engine.first_run --warehouse data/warehouse --universe data/warehouse/universe/top500_pit_<asof>.parquet --source yf --window 5y
 ```
 
