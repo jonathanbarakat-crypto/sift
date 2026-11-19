@@ -110,15 +110,31 @@ class GauntletRunner:
 
     def run_s3(self, trial_id: str, sr_hat_per_bar: float, T: int,
                p_value: float, scope_id: str) -> StageResult:
-        """S3 scope-stratified DSR >= 0.95 with N, V from the ledger stratum;
-        BH-FDR q=0.10 recorded at family level.
+        """S3 scope-stratified DSR >= 0.95 AND BH-FDR enforced at family level:
+        the candidate must be in the BH rejection set at q = S3_BH_Q over the
+        stratum's S2 p-values (soundness #6, path A ENFORCE — the README
+        advertises 'DSR>=0.95 + BH-FDR', so both gate).
 
-        UNITS (#1): `sr_hat_per_bar` is PER-BAR (callers pass
+        UNITS (#1/#16): `sr_hat_per_bar` is PER-BAR (callers pass
         sr_ann/sqrt(BARS_PER_YEAR)) and the ledger's stratum V is per-bar
         SR^2 (update_var_stat converts the stored ANNUALIZED s4 statistics
         before the variance), so sr_star inside stats.dsr shares units with
         sr_hat; stats.dsr runs the mint-time guard assert_sr_units_consistent
         before returning.
+
+        What BH adds beyond S2's per-trial p<=0.05: S2 is a per-trial screen;
+        BH-FDR controls the family-wise false discovery rate across the whole
+        stratum (all trials sharing this scope), so a candidate that is only
+        marginally significant in a large family (q_bh > q) is NOT admitted.
+
+        Dependence caveat (documented, not silently assumed): BH assumes
+        independence/PRDS on the p-values. Within-stratum trials share the
+        universe and overlapping windows, so their p-values are positively
+        correlated. Under PRDS BH still controls FDR; the conservative
+        alternative under arbitrary dependence is Benjamini-Yekutieli
+        (q/m -> q/(m * sum 1/i)). We state the PRDS assumption here rather
+        than pretending independence; if the stratum is ever found to
+        violate PRDS, switch to BY — do not weaken the gate.
 
         v4.2 §2-§3 (#170): S3's DSR is the MINT-TIME ADMISSION GATE only. The
         stage row records dsr, sr_star, n_stratum, v_stratum, q_bh as
@@ -139,8 +155,13 @@ class GauntletRunner:
         ).fetchall()
         pvals = [r[0] for r in rows] + [p_value]
         bh = stats.bh_fdr(np.array(pvals), q=cfg.S3_BH_Q)
-        q_bh = float(bh["q_values"][-1])
-        passed = d["dsr"] >= cfg.S3_DSR_MIN
+        cand_idx = len(pvals) - 1                 # the candidate is appended last
+        q_bh = float(bh["q_values"][cand_idx])
+        in_rejection_set = cand_idx in set(int(i) for i in bh["rejected"])
+        # path A: BOTH gates — DSR threshold AND BH membership at q=S3_BH_Q
+        dsr_ok = d["dsr"] >= cfg.S3_DSR_MIN
+        bh_ok = in_rejection_set and q_bh <= cfg.S3_BH_Q
+        passed = bool(dsr_ok and bh_ok)
         return StageResult("s3", "pass" if passed else "fail",
                            statistic=d["dsr"], threshold=cfg.S3_DSR_MIN,
                            p_value=p_value, n_stratum=n_stratum,
@@ -150,7 +171,18 @@ class GauntletRunner:
                                    "admission_label": (
                                        "admission evidence at mint-time N "
                                        "(DSR gate only — never a tier input, "
-                                       "never re-deflated by a later N)")})
+                                       "never re-deflated by a later N)"),
+                                   "dsr_ok": bool(dsr_ok), "bh_ok": bool(bh_ok),
+                                   "bh_rejected": bool(in_rejection_set),
+                                   "bh_m": int(bh["m"]),
+                                   "bh_q": cfg.S3_BH_Q,
+                                   "bh_prds_assumption": (
+                                       "BH assumes independence/PRDS; "
+                                       "stratum p-values are correlated "
+                                       "(shared universe, overlapping "
+                                       "windows) — PRDS stated, BY is the "
+                                       "conservative fallback under "
+                                       "arbitrary dependence")})
 
     def run_s4(self, trial_id: str, net_returns: np.ndarray, scope_id: str,
                p_perm: float | None = None) -> StageResult:
