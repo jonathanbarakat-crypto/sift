@@ -151,12 +151,20 @@ def s5_full_depth_verdict(
       * MinTRL <= T_full (4032)
       * p_perm <= 0.05 (block permutation at full depth, b=ceil(T^(1/3))=16)
       * DSR >= 0.95 with the registry_depth stratum denominator
-      * PBO <= 0.5 (CSCV, S=16)
+      * PBO <= 0.5 (CSCV, S=16, over the pre-registered variant grid)
 
     Every input is computed on the full window with the delist mask applied
     (post-delist cells excluded). Returns pass/fail per criterion plus the
     overall verdict; the survivor class is assigned by the caller (runner):
     pass -> validated-green, fail -> on-watch-amber (v3 §8.4).
+
+    FAIL CLOSED (soundness #15): the required statistics p_perm, dsr and
+    pbo are None -> the check FAILS. "A stage not run cannot pass": a None
+    stat means the statistic was never computed, and passing on it would
+    let an unrun check masquerade as a pass. (Previously ``(x is None) or
+    ...`` let None through.) ``min_trl_max=None`` is different and stays
+    permissive on purpose: it is the documented opt-out meaning "no MinTRL
+    bar at this scope", not a missing statistic.
     """
     r = np.asarray(net_returns, float)
     if mask is not None:
@@ -179,9 +187,11 @@ def s5_full_depth_verdict(
         "net_sr_positive": sr_ann > net_sr_min,
         "t_full_depth": abs(t_net) >= t_hurdle,
         "min_trl": (min_trl_max is None) or (min_trl <= min_trl_max),
-        "p_perm": (p_perm is None) or (p_perm <= p_perm_max),
-        "dsr": (dsr is None) or (dsr >= dsr_min),
-        "pbo": (pbo is None) or (pbo <= pbo_max),
+        # fail closed: a required statistic that is None (never computed)
+        # FAILS its check — a stage not run cannot pass (soundness #15).
+        "p_perm": (p_perm is not None) and (p_perm <= p_perm_max),
+        "dsr": (dsr is not None) and (dsr >= dsr_min),
+        "pbo": (pbo is not None) and (pbo <= pbo_max),
     }
     passed = all(checks.values())
     return {

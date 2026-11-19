@@ -173,6 +173,10 @@ def test_cscv_pbo_bounds():
     R = rng.normal(0, 0.01, (256, 8))
     pbo = stats.cscv_pbo(R, S=16, seed=1)
     assert 0.0 <= pbo <= 1.0
+    # direction: under the null of iid configs PBO concentrates near 0.5,
+    # and a dominant config (best IS+OOS every split) has PBO exactly 0 —
+    # see tests/gauntlet/test_pbo_soundness.py for the known-answer fixtures
+    # (soundness #2: the old <= 0 comparison returned 1 - PBO here).
 
 
 # -- config -------------------------------------------------------------------
