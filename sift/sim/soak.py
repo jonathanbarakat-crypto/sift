@@ -64,7 +64,7 @@ def _open_lane(db_dir: Path, seed: int, rng: SimRng, clock: SimClock, universe) 
     layer = CardLayer(ledger, db_dir / "cards", card_secret=b"sim-hmac-secret-test-only")
     # client-side busy timeout so contending writers wait instead of failing
     for con in (ledger.con, layer.cards.con, layer.vault.con, layer.shares.con,
-                layer.badges.con, layer.notify.con):
+                layer.notify.con):
         con.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     return LaneCtx(ledger=ledger, layer=layer, rng=rng, seed=seed,
                    clock=clock, universe=universe)

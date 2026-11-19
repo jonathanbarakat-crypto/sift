@@ -9,7 +9,6 @@ card layer:
       -> CardFaceRenderer            (anonymized shareable face, pull/15)
       -> anchored run mode           (pull/16)
       -> ShareService                (share-for-capacity, cards 5/8, pull/18)
-      -> BadgeService                (knowledge-reward badges, cards 6/8)
       -> Notifier                    (per-card opt-in notifications, cards 7/8, pull/19)
       -> SignalEventService          (rich v1 signal-event payload + channels:
                                       email/RSS/API webhook, quiet hours, pull/32)
@@ -38,7 +37,6 @@ from pathlib import Path
 from sift import flags
 from sift.cards import CardRegistry
 from sift.cards.anchored import AnchoredRunError  # noqa: F401  (re-export surface)
-from sift.cards.badges import BadgeService
 from sift.cards.copy import CopyError  # noqa: F401  (re-export surface)
 from sift.cards.decay import RegistryDecayJob
 from sift.cards.events import SignalEventService
@@ -70,7 +68,6 @@ class CardLayer:
         self.vault = Vault(self.cards, db_dir / "vault.db")
         self.face = CardFaceRenderer(ledger, self.cards)
         self.shares = ShareService(self.cards, self.vault, db_dir / "shares.db")
-        self.badges = BadgeService(ledger, db_dir / "badges.db")
         self.notify = Notifier(self.cards, db_dir / "notify.db")
         self.events = SignalEventService(self.notify, ledger,
                                          db_dir / "signal.db")
@@ -90,7 +87,7 @@ class CardLayer:
     def close(self) -> None:
         # RegistryDecayJob holds no DB of its own (it writes through the
         # ledger + registry), so there is nothing to close on it.
-        for c in (self.events, self.notify, self.badges, self.shares,
+        for c in (self.events, self.notify, self.shares,
                   self.vault, self.cards, self.decks):
             c.close()
 

@@ -20,7 +20,7 @@ DSR denominators are scope-stratified; public cards show survival facts only.
   `s5.py` (registry-depth validation + delist-safe panel helpers),
   `config.py` (pre-registered thresholds), `runner.py` (stage wiring + ledger)
 - `sift/cards/` — the whole v4.1 card layer behind `cards_v4_1` (registry,
-  minting, vault, faces, anchored, share, badges, notify, decay, metrics,
+  minting, vault, faces, anchored, share, notify, decay, metrics,
   `service.py` composition root) — see "Feature flags (v4.1)" below
 - `sift/engine/` — server-side mining engine (first trial run)
 - `sift/data/`, `sift/web/` — scaffolded packages (ingest/landing live at
@@ -201,7 +201,6 @@ card layer and defaults **ON for the beta cohort**:
   verified share of a card's anonymized face, one per (account, card),
   hard cap +5, with the anti-abuse stack (device/IP clustering, per-device
   rate limits, live-post verification, append-only audit log, fraud queue)
-- `sift/cards/badges.py` — knowledge-reward badges computed read-only from
   the trial registry (kill rate, pre-registration streak, peer re-test,
   scope honesty), opt-in display, fail-closed guard against any
   P&L/win-rate/directional payload
@@ -252,7 +251,7 @@ card layer and defaults **ON for the beta cohort**:
 **Kill-switch:** set env `SIFT_CARDS_V4_1=0` (global) or call
 `flags.set_flag("cards_v4_1", False)` / `flags.disable_for_user("cards_v4_1", handle)`
 (per user). With the flag off every cards module fails closed with its own
-error type (`VaultError` / `FaceError` / `ShareError` / `BadgeError` /
+error type (`VaultError` / `FaceError` / `ShareError` /
 `NotifyError` / `DecayError` / `CopyError` / `LayerError`, all carrying
 `flag_off`), the
 runner mints no cards, and no new engagement is granted. Reads stay
@@ -266,7 +265,6 @@ cards are **non-transferable** (ownership is asserted on every path);
 share-for-capacity slots are non-transferable, expire with the account,
 and are never sellable — no money changes hands; there is **no P&L, no win
 rates, no directional calls, no market language** anywhere in card content
-(the face renderer and the badge guard fail closed on any such token);
 there is **no randomness for sale** (no lotteries, no paid random draws —
 tier changes happen only through the pre-registered registry rules and never
 re-randomize); and there is **no marketplace** (cards and slots cannot be
