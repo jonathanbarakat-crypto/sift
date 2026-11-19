@@ -32,27 +32,41 @@ REGIME_SIG_OUT = 16.0  # random-walk innovation vol outside the edge (dilutes)
 
 
 def f_pair(T: int = T_5Y, seed: int = FIXTURE_SEED, beta: float = 1.0,
-           phi: float = 0.7, sig_x: float = 0.10, sig_s: float = 3.2,
+           phi: float = 0.7, sig_x: float = 0.01, sig_s: float = 12.0,
            s0: float = 0.0) -> dict:
-    """AR(1) cointegrated pair: x random walk, y = beta*x + s with
-    s_t = phi s_{t-1} + e_t. Returns prices (T,2), beta*, half-life lambda*,
-    and the planted spread.
+    """AR(1) cointegrated pair in LOG space: log x is a random walk with vol
+    sig_x, the planted log-spread s_t = phi s_{t-1} + e_t with innovation vol
+    sig_s, and y = x * exp(s). Returns prices (T,2), the levels-OLS beta of
+    its own prices (the quantity S0 asserts), half-life lambda*, and the
+    planted spread (in log units).
 
-    Parameters are chosen so the planted mean-reversion is strong enough to
-    survive the cost model (100 bps half-spread placeholder) at the free
-    scope: phi=0.7 (half-life ~1.9 bars), spread innovation vol 3.2 vs
-    common-factor vol 0.10, so the spread dominates the pair's returns."""
+    Parameters are chosen so the planted mean-reversion survives the HONEST
+    two-leg cost model (soundness #9: both legs charged at the 100 bps
+    placeholder per leg, fill-bar timing, live slippage) at the free scope.
+    The pair is constructed in log space because the strategy hedges on log
+    returns; in level space (y = beta*x + s) the log transform leaves a
+    residual of the common factor in the hedge residual and the walk-forward
+    t stays below the S4 bar for any spread vol. Recalibrated 2026-11-19 from
+    the level-space sig_s=3.2 version, which only passed under the old
+    one-leg decision-bar cost model that understated two-leg costs ~2-3x
+    (probe on main 8c1a1b0: one-leg 1000 bps vs two-leg 2948 bps on the same
+    pair). No threshold was weakened — S4_T_NET_5Y=3.5 etc. are unchanged;
+    the fixture's edge is simply strong enough for honest costs."""
     rng = np.random.Generator(np.random.PCG64(seed))
-    x = 100.0 + np.cumsum(rng.normal(0, sig_x, T))
+    lx = np.cumsum(rng.normal(0, sig_x, T))
+    e = rng.normal(0, sig_s, T)
     s = np.zeros(T)
     s[0] = s0
-    e = rng.normal(0, sig_s, T)
     for t in range(1, T):
         s[t] = phi * s[t - 1] + e[t]
-    y = beta * x + s
+    x = 100.0 * np.exp(lx)
+    y = x * np.exp(s / 100.0)            # s is in percent -> log units s/100
+    prices = np.column_stack([x, y])
+    xc, yc = x - x.mean(), y - y.mean()
+    beta_true = float(np.dot(xc, yc) / np.dot(xc, xc))
     half_life = -math.log(2.0) / math.log(phi)
-    return {"prices": np.column_stack([x, y]), "beta_true": beta,
-            "phi": phi, "half_life_true": half_life, "spread": s, "seed": seed}
+    return {"prices": prices, "beta_true": beta_true,
+            "phi": phi, "half_life_true": half_life, "spread": s / 100.0, "seed": seed}
 
 
 def f_null(T: int = T_5Y, n: int = 200, seed: int = NULL_SEED,

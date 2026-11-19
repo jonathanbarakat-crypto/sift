@@ -184,7 +184,11 @@ def pair_series(prices: np.ndarray, i: int, j: int, formation: int) -> dict:
     spread = ly - beta * lx
     rs = np.zeros(T)
     rs[1:] = np.diff(spread)
-    wf = stats.walk_forward_returns(prices[:, [i, j]], formation=formation)
+    # soundness #9: real warehouse prices -> per-name data-driven half-spreads
+    # (Roll) instead of the flagged 100 bps placeholder; two-leg cost, fill-bar
+    # timing and live slippage are applied inside walk_forward_returns.
+    wf = stats.walk_forward_returns(prices[:, [i, j]], formation=formation,
+                                    half_spreads="roll")
     return {"beta": beta, "beta_levels": stats.ols_hedge_ratio(x, y),
             "spread": spread, "spread_returns": rs, "net": wf["net"]}
 
@@ -341,7 +345,8 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
         if holdout is not None and v["verdict"] == "survivor":
             ps_h = pair_series(holdout, i, j, min(formation, holdout.shape[0] // 2))
             wf_h = stats.walk_forward_returns(holdout[:, [i, j]],
-                                              formation=min(formation, holdout.shape[0] // 2))
+                                              formation=min(formation, holdout.shape[0] // 2),
+                                              half_spreads="roll")
             net_h = wf_h["net"]
             net_h = net_h[np.isfinite(net_h)]
             t_net_h = stats.t_stat_sharpe(net_h) if net_h.size >= 2 else None
