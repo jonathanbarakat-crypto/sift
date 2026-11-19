@@ -264,7 +264,8 @@ def expected_max_sharpe(n_trials: int, var_sharpe: float) -> float:
     """E[max_N] under the null (Bailey & Lopez de Prado 2014):
     SR* = sqrt(V) * [ (1-gamma) Phi^{-1}(1 - 1/N) + gamma Phi^{-1}(1 - 1/(N e)) ].
     Per-bar units. N = trials in the same scope stratum (incl. kills);
-    V = empirical variance of the stratum's Sharpe estimates."""
+    V = empirical variance of the stratum's Sharpe estimates (PER-BAR —
+    soundness #1: callers must pass V in the same units as sr_hat)."""
     if n_trials < 1:
         raise ValueError("N must be >= 1")
     g = EULER_GAMMA
@@ -273,6 +274,30 @@ def expected_max_sharpe(n_trials: int, var_sharpe: float) -> float:
         (1 - g) * _norm_ppf(1 - 1.0 / n_eff)
         + g * _norm_ppf(1 - 1.0 / (n_eff * math.e))
     )
+
+
+def assert_sr_units_consistent(sr_star: float, sr_hat: float,
+                               bars_per_year: int = 252,
+                               max_per_bar_sr_star: float = 1.0) -> None:
+    """Mint-time runtime guard (soundness #1): assert sr_star and sr_hat
+    share units. sr_hat is per-bar at every call site (runner divides
+    sr_ann by sqrt(BARS_PER_YEAR) before dsr), so sr_star must also be
+    per-bar: an annualized sr_star (~sqrt(252)x too big, e.g. 2.44 vs 0.15)
+    would silently collapse DSR to 0. A per-bar Sharpe benchmark above
+    ``max_per_bar_sr_star`` (default 1.0 per bar = annSR ~15.9) is not a
+    plausible per-bar value and indicates a units mismatch — raise."""
+    if not (math.isfinite(sr_star) and math.isfinite(sr_hat)):
+        raise AssertionError(
+            f"non-finite sr_star/sr_hat: sr_star={sr_star}, sr_hat={sr_hat}")
+    if sr_star < 0:
+        raise AssertionError(f"negative sr_star={sr_star}")
+    if sr_star > max_per_bar_sr_star:
+        raise AssertionError(
+            f"unit mismatch: sr_star={sr_star:.4f} exceeds the per-bar sanity "
+            f"bound {max_per_bar_sr_star} while sr_hat={sr_hat:.4f} is "
+            f"per-bar (annualized sr_star would be ~{sr_star / math.sqrt(bars_per_year):.4f} "
+            f"per bar) — stratum V and sr_hat must share units (#1)")
+
 
 
 def psr(sr_hat: float, sr_star: float, T: int, skew: float, kurt: float,
@@ -310,17 +335,29 @@ def dsr(
     """Deflated Sharpe Ratio at the candidate's registered scope.
 
     The deflation benchmark uses the scope-stratified denominator:
-    N = n_stratum, V = max(v_stratum, var_floor) with var_floor = 1/T
-    (theoretical minimum variance of a Sharpe estimate). ``t_eff`` is the
-    optional effective sample size forwarded to ``psr`` (serial-correlation
-    option, #12); None keeps the iid sqrt(T-1). Returns the DSR,
-    the benchmark SR*, and the inputs used (all recorded in the ledger).
+    N = n_stratum, V = max(v_stratum, var_floor). UNITS (#1): sr_hat is
+    PER-BAR at every call site and V must be per-bar SR^2 as well — the
+    ledger's update_var_stat converts the stored ANNUALIZED s4 statistics
+    to per-bar before the variance, exactly like the deck path
+    (decks/service.py::_deck_stratum_variance). A mint-time guard
+    (assert_sr_units_consistent) is applied to sr_star before returning.
+
+    var_floor (#16): default is the normal-theory variance of a Sharpe
+    estimate, (1 + sr_hat^2/2)/T — the PSR denominator convention — NOT
+    the plain 1/T (probe: sr_hat=0.1, T=252 -> 0.003988 vs 0.003968).
+    Pass var_floor explicitly to override (backwards compat).
+    ``t_eff`` is the optional effective sample size forwarded to ``psr``
+    (serial-correlation option, #12); None keeps the iid sqrt(T-1).
+    Returns the DSR, the benchmark SR*, and the inputs used (all recorded
+    in the ledger).
     """
     v = v_stratum
-    floor = (1.0 / T) if var_floor is None else var_floor
+    floor = ((1.0 + sr_hat ** 2 / 2.0) / T) if var_floor is None else var_floor
     if v < floor:
         v = floor
     sr_star = expected_max_sharpe(n_stratum, v)
+    # mint-time units guard (#1): sr_hat is per-bar, so sr_star must be too
+    assert_sr_units_consistent(sr_star, sr_hat)
     d = psr(sr_hat, sr_star, T, skew, kurt, t_eff=t_eff)
     return {"dsr": d, "sr_star": sr_star, "sr_hat": sr_hat, "T": T,
             "n_stratum": n_stratum, "v_stratum": v, "skew": skew, "kurt": kurt,

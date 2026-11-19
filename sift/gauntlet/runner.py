@@ -113,6 +113,13 @@ class GauntletRunner:
         """S3 scope-stratified DSR >= 0.95 with N, V from the ledger stratum;
         BH-FDR q=0.10 recorded at family level.
 
+        UNITS (#1): `sr_hat_per_bar` is PER-BAR (callers pass
+        sr_ann/sqrt(BARS_PER_YEAR)) and the ledger's stratum V is per-bar
+        SR^2 (update_var_stat converts the stored ANNUALIZED s4 statistics
+        before the variance), so sr_star inside stats.dsr shares units with
+        sr_hat; stats.dsr runs the mint-time guard assert_sr_units_consistent
+        before returning.
+
         v4.2 §2-§3 (#170): S3's DSR is the MINT-TIME ADMISSION GATE only. The
         stage row records dsr, sr_star, n_stratum, v_stratum, q_bh as
         "admission evidence at mint-time N" context — the card tier never
@@ -152,7 +159,12 @@ class GauntletRunner:
         (net SR > S4_NET_SR_MIN, |t_net| >= tau_cal(scope), MinTRL <= T) AND
         the full score (net SR, t_net, MinTRL, T) in the stage detail either
         way; in v4.2 the bar defines the gold/platinum evidence tiers, not a
-        kill line — S0-S2 passers survive S4 regardless."""
+        kill line — S0-S2 passers survive S4 regardless.
+
+        UNITS (#1): the s4 stage row stores statistic=sr_ann (ANNUALIZED);
+        it stays annualized because every reader of the column (minting tier
+        evidence, decay re-eval) expects sr_ann — the per-bar conversion for
+        the stratum variance happens in Ledger.update_var_stat, not here."""
         r = np.asarray(net_returns, float)
         r = r[np.isfinite(r)]
         T = r.size
@@ -222,6 +234,8 @@ class GauntletRunner:
         # strategy yields PBO 0 by construction, recorded honestly.
         pbo = 0.0
         # S3 at registry_depth with the stratum denominator from the ledger
+        # (UNITS #1: sr_bar is per-bar; the ledger V is per-bar SR^2 —
+        # stats.dsr guards the units at mint time)
         sr_ann = stats.sharpe_ratio(net) if net.size >= 2 else 0.0
         t_net = stats.t_stat_sharpe(net) if net.size >= 2 else 0.0
         T = int(net.size)
