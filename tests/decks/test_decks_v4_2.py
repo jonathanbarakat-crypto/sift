@@ -463,9 +463,11 @@ def test_half_spread_2d_nonfinite_handled_per_column():
 
 
 def test_half_spread_1d_behavior_unchanged():
-    """1D single-series input: identical result to the pre-fix formula
-    (2 * median(|diff(log p)|) * 1e4 path via std proxy), floor/bound logic
-    untouched."""
+    """1D single-series input: result is max(liquidity_concentration,
+    dispersion, floor) — the dispersion term still matches the pre-fix
+    formula exactly (0.25 * std(|diff(log p)|) * 1e4 floored), and the
+    liquidity term adds the soundness-#8 liquidity signal on top;
+    floor/bound logic untouched."""
     rng = np.random.Generator(np.random.PCG64(1))
     prices = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.01, 500)))
     est = s6stats.estimate_half_spread_bps(prices)
@@ -474,9 +476,15 @@ def test_half_spread_1d_behavior_unchanged():
     p = p[np.isfinite(p)]
     r = np.abs(np.diff(np.log(p)))
     r = r[np.isfinite(r)]
-    expected = float(np.maximum(0.25 * float(np.std(r, ddof=1)) * 1e4,
-                                gcfg.S6_HALF_SPREAD_BPS_FLOOR))
-    assert est["median_bps"] == pytest.approx(expected, rel=1e-12)
+    expected_disp = float(np.maximum(0.25 * float(np.std(r, ddof=1)) * 1e4,
+                                     gcfg.S6_HALF_SPREAD_BPS_FLOOR))
+    expected_liq = s6stats._liquidity_concentration_bps(p)
+    assert expected_disp == pytest.approx(
+        s6stats._dispersion_half_spread_bps(p), rel=1e-12)
+    assert est["median_bps"] == pytest.approx(
+        max(expected_disp, expected_liq, gcfg.S6_HALF_SPREAD_BPS_FLOOR), rel=1e-12)
+    assert est["median_bps"] >= expected_disp   # never below the legacy bound
+    assert est["proxy"] == gcfg.S6_HALF_SPREAD_PROXY
     assert est["per_name_bps"].shape == (1,)
     # degenerate 1D still falls back to the conservative bound
     est0 = s6stats.estimate_half_spread_bps(np.array([100.0, 100.0, 100.0]))

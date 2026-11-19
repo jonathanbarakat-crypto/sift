@@ -304,12 +304,17 @@ the card layer):
 - `sift/decks/service.py` — `DeckService`: ranked/custom registration and
   the S6 runner (`run_s6`): equal-weight basket, fixed rebalance cadence
   (21 bars), cost-aware walk-forward with realistic per-name half-spreads
-  computed from the data (100 bps placeholder replaced, kept as the
-  conservative bound), PBO at depth, pass bar net SR>0 / |t_net|>=
-  tau_cal(scope) / MinTRL<=T / PBO<=0.5 multiplicity-corrected over the
-  deck stratum (N = all registered deck trials in scope across all users,
-  kills included) using EFFECTIVE N (independent bets — components sharing
-  names correlate; 50 mixed cards != 50 independent bets)
+  computed from the data — two pre-registered price-only proxies run per
+  name, charged as max(liquidity_concentration, dispersion, floor) (the
+  dispersion term is a volatility-scaled cost bound, NOT a liquidity
+  measure; the liquidity-concentration term is the liquidity-aware signal;
+  soundness #8). The 100 bps placeholder is kept as the conservative
+  fallback bound when no usable evidence exists, PBO at depth, pass bar
+  net SR>0 / |t_net|>= tau_cal(scope) / MinTRL<=T / PBO<=0.5
+  multiplicity-corrected over the deck stratum (N = all registered deck
+  trials in scope across all users, kills included) using EFFECTIVE N
+  (independent bets — components sharing names correlate; 50 mixed cards
+  != 50 independent bets)
 - `sift/gauntlet/s6.py` — pure S6 statistics: data-driven half-spread
   estimator, equal-weight basket with fixed cadence + turnover costs,
   `effective_n` (name-overlap/Jaccard), `multiplicity_corrected_p`,

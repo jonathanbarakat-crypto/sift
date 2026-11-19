@@ -170,13 +170,15 @@ class DeckService:
             raise DeckError(
                 f"component_returns must be (T, K={len(json_loads(deck.member_card_ids))})"
             )
-        # realistic per-name half-spreads from the data (replace 100bps
-        # placeholder; keep 100bps as the conservative bound)
+        # realistic per-name half-spreads from the data (two pre-registered
+        # proxies: max(liquidity_concentration, dispersion, floor); keep the
+        # 100 bps conservative bound as fallback when no usable evidence)
         if prices is not None:
             est = s6stats.estimate_half_spread_bps(prices)
         else:
             est = {"median_bps": gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
-                   "source": "conservative_bound"}
+                   "source": "conservative_bound",
+                   "proxy": gcfg.S6_HALF_SPREAD_PROXY}
         cost = s6stats.DeckCostModel(
             half_spread_bps=s6stats.effective_half_spread_bps(est),
             conservative_bound_bps=gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
@@ -208,6 +210,7 @@ class DeckService:
         detail = dict(verdict)
         detail.update({
             "cost_source": est.get("source", "conservative_bound"),
+            "half_spread_proxy": est.get("proxy", gcfg.S6_HALF_SPREAD_PROXY),
             "half_spread_bps_used": cost.half_spread_bps,
             "conservative_bound_bps": cost.conservative_bound_bps,
             "total_cost_bps": basket["total_cost_bps"],

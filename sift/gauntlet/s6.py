@@ -7,10 +7,15 @@ explicit PCG64 seed.
 Contents
 --------
 - `estimate_half_spread_bps(prices)` — REALISTIC per-name half-spread
-  computed from the data (proxy: absolute log-return dispersion scaled to
-  round-trip bps, floored at S6_HALF_SPREAD_BPS_FLOOR). This replaces the
-  100 bps placeholder; `S6_HALF_SPREAD_BPS_CONSERVATIVE` (100 bps) is kept
-  as the conservative bound used when the data estimate is unavailable.
+  computed from the data. Soundness #8 remainder: TWO pre-registered
+  price-only proxies are run per name and the charged estimate is
+  max(liquidity_concentration, dispersion, S6_HALF_SPREAD_BPS_FLOOR):
+  the dispersion proxy is a VOLATILITY-scaled cost bound (not a liquidity
+  measure); the liquidity-concentration proxy (participation ratio of
+  |log-returns|) is the liquidity-aware signal, ~invariant to volatility
+  at fixed quote continuity. `S6_HALF_SPREAD_BPS_CONSERVATIVE` (100 bps)
+  remains the fallback bound when no usable evidence exists; the estimate
+  dict records the `proxy` name that produced the cost.
 - `deck_basket_returns(...)` — equal-weight basket of component spread
   returns with a FIXED pre-registered rebalance cadence, cost-aware
   walk-forward (per-name half-spreads from the data; turnover charged on
@@ -50,14 +55,35 @@ from sift.gauntlet import stats
 
 # --------------------------------------------------------------------------
 # Realistic per-name half-spreads from the data (replaces the 100 bps placeholder)
+#
+# Soundness #8 remainder (hermes-tasks #181 finding #8, CONFIRMED): the legacy
+# dispersion proxy `k * std(|diff(log p)|) * 1e4` is MONOTONE IN VOLATILITY,
+# not liquidity — probe: sigma=0.5% -> 7.61 bps, sigma=3% -> 45.63 bps, so a
+# low-vol ILLIQUID name is understated. Server-side there is NO volume/ADV
+# feed (see `adv_proxy` in stats.py::CostModel), so a true Amihud is not
+# computable from prices alone. Pre-registered fix: run TWO price-only
+# proxies and charge max(liquidity, dispersion, floor):
+#   - dispersion proxy (volatility-scaled cost bound, legacy semantics kept
+#     as a FLOOR so high-vol names are never undercharged);
+#   - liquidity-concentration proxy K_STALE*(1 - n_eff/T) with the
+#     participation ratio n_eff = (sum|r|)^2 / sum|r|^2 of absolute
+#     log-returns — liquid names re-quote every bar (n_eff/T ~ 0.6), illiquid
+#     names print in rare jumps (n_eff/T ~ 0.03-0.08); ~invariant to
+#     volatility at fixed liquidity (probe: 21-22 bps across sigma 0.1%-6%
+#     for liquid, 55-57 bps across the same range for illiquid).
+# Failure modes of the liquidity proxy (documented, pre-registered): (a) a
+# genuinely quiet but LIQUID market (low vol, continuous quotes) is
+# overcharged — accepted, costs err high; (b) a manipulated/wash-printed
+# series with many tiny prints looks liquid — mitigated by the dispersion
+# floor and the conservative bound; (c) short samples make n_eff/T noisy —
+# names with < 3 usable points fall back to the conservative bound.
 # --------------------------------------------------------------------------
 
-def _estimate_half_spread_1d(p: np.ndarray) -> float:
-    """Single-name half-spread in bps from one price series (1D path —
-    unchanged semantics): k * std(|diff(log p)|, ddof=1) * 1e4, floored at
-    S6_HALF_SPREAD_BPS_FLOOR; non-finite entries dropped. Returns NaN when
-    there is no usable evidence (too few points or zero dispersion), so the
-    caller can fall back to the conservative bound."""
+def _dispersion_half_spread_bps(p: np.ndarray) -> float:
+    """Legacy dispersion proxy in bps: k * std(|diff(log p)|, ddof=1) * 1e4,
+    floored at S6_HALF_SPREAD_BPS_FLOOR. This is a VOLATILITY-scaled cost
+    bound, NOT a liquidity measure (soundness #8). Returns NaN when there
+    is no usable evidence."""
     p = np.asarray(p, float)
     p = p[np.isfinite(p)]
     if p.size < 3:
@@ -66,23 +92,80 @@ def _estimate_half_spread_1d(p: np.ndarray) -> float:
     r = r[np.isfinite(r)]
     if r.size == 0 or float(np.std(r, ddof=1)) == 0.0:
         return float("nan")
-    k = 0.25
-    return float(np.maximum(k * float(np.std(r, ddof=1)) * 1e4,
+    return float(np.maximum(cfg.S6_HALF_SPREAD_K * float(np.std(r, ddof=1)) * 1e4,
                             cfg.S6_HALF_SPREAD_BPS_FLOOR))
+
+
+def _liquidity_concentration_bps(p: np.ndarray) -> float:
+    """Liquidity-concentration proxy in bps (prices alone, soundness #8):
+    K_STALE * (1 - n_eff / T) where n_eff = (sum |r_t|)^2 / sum |r_t|^2 is
+    the participation ratio of absolute log-returns over T = len(r) bars.
+
+    Liquid names move a little EVERY bar (many small prints -> n_eff/T high,
+    ~0.6 for continuous quotes); illiquid names print in RARE LARGE jumps
+    (few prints -> n_eff/T low, ~0.03-0.08), which is exactly what a wide
+    quoted half-spread looks like in a price series. The term is
+    ~invariant to volatility at fixed trade frequency, so it measures
+    liquidity (quote continuity), not volatility. Returns NaN when there
+    is no usable evidence (too few points / zero total move)."""
+    p = np.asarray(p, float)
+    p = p[np.isfinite(p)]
+    if p.size < 3:
+        return float("nan")
+    r = np.abs(np.diff(np.log(p)))
+    r = r[np.isfinite(r)]
+    if r.size == 0:
+        return float("nan")
+    denom = float((r ** 2).sum())
+    if denom <= 0.0:
+        return float("nan")
+    n_eff = float(r.sum()) ** 2 / denom
+    conc = 1.0 - n_eff / r.size          # 0 = perfectly even moves, -> 1 = one jump
+    return float(max(cfg.S6_LIQUIDITY_K_STALE * conc,
+                     cfg.S6_HALF_SPREAD_BPS_FLOOR))
+
+
+def _estimate_half_spread_1d(p: np.ndarray) -> float:
+    """Single-name half-spread in bps from one price series (1D path):
+    max(liquidity_concentration, dispersion, floor) — both pre-registered
+    proxies run, the stricter is charged (soundness #8 remainder). Returns
+    NaN when there is no usable evidence from EITHER proxy, so the caller
+    can fall back to the conservative bound."""
+    disp = _dispersion_half_spread_bps(p)
+    liq = _liquidity_concentration_bps(p)
+    vals = [v for v in (disp, liq) if np.isfinite(v)]
+    if not vals:
+        return float("nan")
+    return float(max(max(vals), cfg.S6_HALF_SPREAD_BPS_FLOOR))
 
 
 def estimate_half_spread_bps(prices: np.ndarray,
                              bars_per_year: int = cfg.BARS_PER_YEAR) -> dict:
     """Per-name half-spread estimate in bps, computed FROM THE DATA.
 
-    Proxy: the quoted half-spread is estimated as a fraction of the name's
-    daily log-return dispersion — half_spread_bps ≈ k * sigma_daily * 1e4
-    with k = 0.25 (a name's tradable half-spread is a fraction of its daily
-    range; conservative vs the old flat 100 bps placeholder for liquid
-    names, and it GROWS for illiquid names instead of staying flat).
-    Floored at S6_HALF_SPREAD_BPS_FLOOR bps so costs are never assumed
-    away. Returns per-name bps array + median (the deck-level cost input)
-    + the conservative bound for comparison.
+    Pre-registered proxy (soundness #8 remainder, hermes-tasks #181 #8): TWO
+    price-only proxies are run per name and the CHARGED estimate is
+    ``max(liquidity_concentration, dispersion, S6_HALF_SPREAD_BPS_FLOOR)``:
+
+    - ``dispersion`` = k * std(|diff(log p)|) * 1e4 (k = S6_HALF_SPREAD_K) —
+      a VOLATILITY-scaled cost bound (large moves cost more to trade), NOT a
+      liquidity measure; kept as a floor so high-vol names are never
+      undercharged.
+    - ``liquidity_concentration`` = S6_LIQUIDITY_K_STALE * (1 - n_eff/T) with
+      the participation ratio n_eff of absolute log-returns — measures
+      quote/trade continuity (LIQUIDITY): liquid names re-quote every bar,
+      illiquid names print in rare jumps. ~invariant to volatility at fixed
+      liquidity, so a high-vol liquid name ranks CHEAPER than a low-vol
+      illiquid one (probe in tests/gauntlet/test_s6_liquidity_proxy.py).
+
+    No volume/ADV feed exists server-side (see adv_proxy in
+    stats.py::CostModel), so a true Amihud is not computable; the
+    concentration proxy is the pre-registered liquidity-aware substitute
+    from prices alone. Floored at S6_HALF_SPREAD_BPS_FLOOR so costs are
+    never assumed away; the 100 bps S6_HALF_SPREAD_BPS_CONSERVATIVE bound
+    remains the fallback for a name with no usable evidence. Returns
+    per-name bps array + median + the proxy name (``proxy``) that produced
+    the cost + the conservative bound.
 
     Input may be a 1D single-name series or a 2D (T, K) per-name panel
     (bars x names, one column per name — e.g. DeckService.run_s6's
@@ -94,16 +177,17 @@ def estimate_half_spread_bps(prices: np.ndarray,
     name only. 1D input behaves exactly as before (single-element
     per_name_bps).
     """
+    proxy_name = cfg.S6_HALF_SPREAD_PROXY
     p = np.asarray(prices, float)
     if p.ndim == 2:
         raw = np.array([_estimate_half_spread_1d(p[:, j]) for j in range(p.shape[1])])
         if not np.any(np.isfinite(raw)):
-            # no name has usable dispersion evidence -> conservative bound,
+            # no name has usable evidence -> conservative bound,
             # never assume zero cost
             med = cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
             return {"per_name_bps": np.array([med]), "median_bps": med,
                     "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
-                    "source": "conservative_bound"}
+                    "source": "conservative_bound", "proxy": proxy_name}
         # a name with no usable evidence falls back to the conservative
         # bound for that name only
         per_name = np.where(np.isfinite(raw), raw,
@@ -111,25 +195,26 @@ def estimate_half_spread_bps(prices: np.ndarray,
         med = float(np.median(per_name))
         return {"per_name_bps": per_name, "median_bps": med,
                 "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
-                "source": "data_estimate"}
+                "source": "data_estimate", "proxy": proxy_name}
     # 1D path — unchanged
     v = _estimate_half_spread_1d(p)
     if not np.isfinite(v):
         med = cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
         return {"per_name_bps": np.array([med]), "median_bps": med,
                 "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
-                "source": "conservative_bound"}
+                "source": "conservative_bound", "proxy": proxy_name}
     med = v
     return {"per_name_bps": np.array([med]), "median_bps": med,
             "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
-            "source": "data_estimate"}
+            "source": "data_estimate", "proxy": proxy_name}
 
 
 def effective_half_spread_bps(estimate: dict) -> float:
-    """The cost actually charged: the data estimate, but never below the
-    floor; the 100 bps placeholder remains available as the conservative
-    bound (callers may run both and report the stricter). Costs are never
-    understated: max(data_estimate, floor)."""
+    """The cost actually charged: the data estimate (already
+    max(liquidity_concentration, dispersion, floor) per name), but never
+    below the floor; the 100 bps placeholder remains the conservative bound
+    when no usable evidence exists (costs are never understated, never
+    assumed zero): max(data_estimate, floor)."""
     med = float(estimate.get("median_bps", cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE))
     return max(med, cfg.S6_HALF_SPREAD_BPS_FLOOR)
 
@@ -141,7 +226,8 @@ def effective_half_spread_bps(estimate: dict) -> float:
 @dataclass(frozen=True)
 class DeckCostModel:
     """S6 cost model: per-name half-spreads from the data (dict name->bps
-    or a scalar median), conservative bound kept for reporting."""
+    or a scalar median), produced by the pre-registered proxy recorded in
+    the estimate dict (``proxy``); conservative bound kept for reporting."""
     half_spread_bps: float            # effective (data) half-spread, bps
     conservative_bound_bps: float = cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
     per_name_bps: dict | None = None  # optional per-name mapping
