@@ -52,6 +52,25 @@ from sift.gauntlet import stats
 # Realistic per-name half-spreads from the data (replaces the 100 bps placeholder)
 # --------------------------------------------------------------------------
 
+def _estimate_half_spread_1d(p: np.ndarray) -> float:
+    """Single-name half-spread in bps from one price series (1D path —
+    unchanged semantics): k * std(|diff(log p)|, ddof=1) * 1e4, floored at
+    S6_HALF_SPREAD_BPS_FLOOR; non-finite entries dropped. Returns NaN when
+    there is no usable evidence (too few points or zero dispersion), so the
+    caller can fall back to the conservative bound."""
+    p = np.asarray(p, float)
+    p = p[np.isfinite(p)]
+    if p.size < 3:
+        return float("nan")
+    r = np.abs(np.diff(np.log(p)))
+    r = r[np.isfinite(r)]
+    if r.size == 0 or float(np.std(r, ddof=1)) == 0.0:
+        return float("nan")
+    k = 0.25
+    return float(np.maximum(k * float(np.std(r, ddof=1)) * 1e4,
+                            cfg.S6_HALF_SPREAD_BPS_FLOOR))
+
+
 def estimate_half_spread_bps(prices: np.ndarray,
                              bars_per_year: int = cfg.BARS_PER_YEAR) -> dict:
     """Per-name half-spread estimate in bps, computed FROM THE DATA.
@@ -64,26 +83,43 @@ def estimate_half_spread_bps(prices: np.ndarray,
     Floored at S6_HALF_SPREAD_BPS_FLOOR bps so costs are never assumed
     away. Returns per-name bps array + median (the deck-level cost input)
     + the conservative bound for comparison.
+
+    Input may be a 1D single-name series or a 2D (T, K) per-name panel
+    (bars x names, one column per name — e.g. DeckService.run_s6's
+    `prices`). 2D panels are estimated PER NAME (column-wise): diff(log)
+    is taken within each column so the step across a symbol boundary is
+    never treated as a return. The deck-level figure is the MEDIAN of the
+    per-name estimates. Non-finite entries are dropped per column; a name
+    with no usable evidence falls back to the conservative bound for that
+    name only. 1D input behaves exactly as before (single-element
+    per_name_bps).
     """
     p = np.asarray(prices, float)
-    p = p[np.isfinite(p)]
-    if p.size < 3:
+    if p.ndim == 2:
+        raw = np.array([_estimate_half_spread_1d(p[:, j]) for j in range(p.shape[1])])
+        if not np.any(np.isfinite(raw)):
+            # no name has usable dispersion evidence -> conservative bound,
+            # never assume zero cost
+            med = cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
+            return {"per_name_bps": np.array([med]), "median_bps": med,
+                    "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
+                    "source": "conservative_bound"}
+        # a name with no usable evidence falls back to the conservative
+        # bound for that name only
+        per_name = np.where(np.isfinite(raw), raw,
+                            cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE)
+        med = float(np.median(per_name))
+        return {"per_name_bps": per_name, "median_bps": med,
+                "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
+                "source": "data_estimate"}
+    # 1D path — unchanged
+    v = _estimate_half_spread_1d(p)
+    if not np.isfinite(v):
         med = cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
         return {"per_name_bps": np.array([med]), "median_bps": med,
                 "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
                 "source": "conservative_bound"}
-    r = np.abs(np.diff(np.log(p)))
-    r = r[np.isfinite(r)]
-    if r.size == 0 or float(np.std(r, ddof=1)) == 0.0:
-        # degenerate (constant) series: no data evidence of a spread —
-        # fall back to the conservative bound, never assume zero cost
-        med = cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
-        return {"per_name_bps": np.array([med]), "median_bps": med,
-                "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
-                "source": "conservative_bound"}
-    k = 0.25
-    med = float(np.maximum(k * float(np.std(r, ddof=1)) * 1e4,
-                           cfg.S6_HALF_SPREAD_BPS_FLOOR))
+    med = v
     return {"per_name_bps": np.array([med]), "median_bps": med,
             "conservative_bound_bps": cfg.S6_HALF_SPREAD_BPS_CONSERVATIVE,
             "source": "data_estimate"}
