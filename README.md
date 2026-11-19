@@ -309,4 +309,53 @@ the card layer):
 `SIFT_CARDS_V4_1=0` disables both (decks require cards). Flag off -> every
 deck path fails closed with `DeckError`/`DeckCopyError` (`flag_off`).
 
+## Simulated-user harness (`sift/sim/`) — SIMULATED, infrastructure validation only
+
+> **SIMULATED - infrastructure validation, not user-behavior evidence.**
+> The sims in `sift/sim/` generate **synthetic users** (`sim-user-XXXX`) and
+> **synthetic instruments** (`SIM####`) against an **ephemeral test DB**
+> (`SIFT_ENV=test` is hard-required — the CLI refuses otherwise). They
+> validate *infrastructure*: queueing, DB contention under concurrent lanes,
+> the v4.1 §4.7 anti-abuse controls, append-only log integrity, and the
+> card-layer lifecycle. Per spec §8, sim output says **nothing about real
+> users** and must never be cited as user-behavior evidence. Every report
+> (JSON and text) leads with the banner above, enforced in code
+> (`sift/sim/header.py`).
+
+- **Load soak** — N simulated users × runs-per-user mining runs through the
+  real register → gauntlet S0–S5 → verdict → mint/admit path, on concurrent
+  worker lanes with their own DB connections (real SQLite contention).
+  Reports latency p50/p95/p99, queue depth, and asserts no
+  deadlocks/timeouts/lane errors. Wall-clock timings are reported only
+  under a `measured` block; `deterministic_view()` strips them so
+  **same seed → same report** (seeded PCG64 RNG + fixed injected clock).
+- **Anti-abuse attack sims** — device/IP/ASN clustering, day-zero sharing
+  before first completed run, unverifiable share posts (grant must NOT
+  fire), duplicate shares of the same card, per-device velocity limits
+  (>3 grants/device/30d), the +5 slot cap, revocation on an abuse flag, and
+  fraud-queue SLA routing. Asserts the append-only `share_grant` log
+  rejects UPDATE/DELETE via its triggers and that the audit log is written.
+- **Card-layer lifecycle sim** — mint → duplicate-spec ghost mint →
+  FIFO promotion on discard → decay (downgrade-only, never upgrades) →
+  archive. Behind the `cards_v4_1` flag, fail-closed when off; the
+  `SIFT_CARDS_V4_1=0` kill-switch is respected (`tests/sim/test_killswitch.py`).
+
+Run it (test env only):
+
+```bash
+SIFT_ENV=test python3 -m sift.sim.run --sim all --n-users 50 --runs-per-user 3 --workers 8 --out sim-report.json
+```
+
+CI runs the full suite plus a small-N (20 users) smoke soak
+(`.github/workflows/ci.yml`, job `sim-smoke`); tests live in `tests/sim/`.
+
+**Persona spec** — `sift/sim/personas.json` (72 simulated-user personas,
+schema-validated by `sift/sim/personas.py`) + `sift/sim/bots.py` (seeded,
+deterministic bot sessions) + rationale/distribution tables in
+`docs/sim-user-personas.md`. Personas parameterize the bots ONLY — the mix
+is a design choice for coverage, **not** a market estimate, and is never
+user-behavior evidence (spec §8 is answered from the limited alpha/beta,
+pull/25). Every bot run logs persona id + seed; every report carries the
+SIMULATED banner.
+
 ## Non-negotiables (scope doc v3 §12)
