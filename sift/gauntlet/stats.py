@@ -455,7 +455,19 @@ def walk_forward_returns(
     """S4 walk-forward: re-estimate the hedge on each rolling formation window
     and trade the following step block with parameters estimated at its start
     (no look-ahead). Concatenates per-bar net returns of the OOS blocks; bars
-    before the first full formation window stay zero."""
+    before the first full formation window stay zero.
+
+    Soundness #4 (hermes-tasks #181 cross-check): the block spread is ANCHORED
+    to the formation window's terminal level — spread = train_spread[-1] +
+    cumsum(rs) — so z = (spread - mu)/sd is continuous across block boundaries.
+    The pre-fix code used spread = cumsum(rs) restarting at 0 each block, which
+    mixed origins (block level vs training mean) and produced a spurious
+    (0 - mu)/sd z-jump at every block start. Parameters (h, mu, sd) are still
+    estimated strictly from bars <= block start; the anchor uses only the
+    training window's own terminal value, so no look-ahead is introduced.
+    Note: anchoring removes the DISCONTINUITY only — a trending
+    (non-cointegrated) pair can still show extreme z; stationarity protection
+    is S2's mean-reversion gate, not this function."""
     if cost_model is None:
         cost_model = CostModel()
     prices = np.asarray(prices, float)
@@ -479,7 +491,8 @@ def walk_forward_returns(
         sd = float(train_spread.std(ddof=1))
         if not np.isfinite(sd) or sd <= 0:
             sd = 1.0
-        spread = np.cumsum(rs)
+        # anchored origin: continue the training terminal level into the block
+        spread = float(train_spread[-1]) + np.cumsum(rs)
         pos = np.zeros(len(block))
         for k in range(1, len(block)):
             z = (spread[k] - mu) / sd
