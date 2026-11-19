@@ -114,13 +114,25 @@ S6_REBALANCE_CADENCE = 21    # fixed rebalance cadence in bars (monthly), pre-re
 S6_FORMATION = 60            # formation window for the per-name hedge/z stats
 S6_STEP = 120                # walk-forward step (same convention as S4)
 
-# Cost model for S6: realistic per-name half-spreads computed FROM THE DATA
-# (median absolute log-return-scaled quoted spread proxy) replace the 100 bps
-# placeholder; 100 bps is kept as the conservative BOUND (costs are never
-# understated: effective half-spread = max(data estimate, floor), and the
-# 100 bps placeholder stays as an upper safety check in tests).
+# Cost model for S6: realistic per-name half-spreads computed FROM THE DATA.
+# Two pre-registered price-only proxies are run and the CHARGED half-spread
+# is max(liquidity_concentration, dispersion, floor) — costs are never
+# understated (soundness #8 remainder, hermes-tasks #181 finding #8):
+#   - dispersion proxy (legacy): k * std(|diff(log p)|) * 1e4 — a
+#     VOLATILITY-scaled cost bound (large moves cost more to trade), NOT a
+#     liquidity measure;
+#   - liquidity-concentration proxy: K_STALE * (1 - n_eff/T) where
+#     n_eff = (sum |r|)^2 / sum |r|^2 is the participation ratio of absolute
+#     log-returns — liquid names re-quote every bar (n_eff/T ~ 0.6), illiquid
+#     names print in rare jumps (n_eff/T ~ 0.03-0.08), so this term is
+#     ~invariant to volatility at fixed liquidity and DRIVEN by liquidity.
+# The 100 bps placeholder stays as the conservative BOUND (fallback when a
+# name has no usable evidence), never assumed zero.
 S6_HALF_SPREAD_BPS_FLOOR = 1.0     # never assume below 1 bps half-spread
 S6_HALF_SPREAD_BPS_CONSERVATIVE = 100.0   # the old placeholder, kept as bound
+S6_HALF_SPREAD_K = 0.25            # dispersion-proxy coefficient (legacy)
+S6_LIQUIDITY_K_STALE = 60.0        # bps charged at full return concentration (1 - n_eff/T = 1)
+S6_HALF_SPREAD_PROXY = "max(liquidity_concentration, dispersion)"  # recorded in stage detail
 
 # Effective N (independent bets): components sharing names correlate, so
 # N_eff is computed from the name-overlap graph of the deck's components

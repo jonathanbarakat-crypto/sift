@@ -99,9 +99,18 @@ questions, so they treat the pool size (stratum N) differently on purpose.
   back to that user as INFORMATIONAL ONLY (amber, unranked, unshareable as a claim),
   because arbitrary C(N,k) selections enable try-until-it-passes.
 - S6 portfolio gauntlet on ranked decks: pre-registered basket rules, equal-weight,
-  cost-aware walk-forward with REALISTIC per-name half-spreads from the data
-  (replace the 100 bps placeholder; keep 100 bps as conservative bound), rebalance
-  cadence fixed in advance. Pass bar: net SR > 0, |t_net| >= tau_cal(scope),
+  cost-aware walk-forward with REALISTIC per-name half-spreads from the data.
+  Two pre-registered price-only proxies run per name and the charged half-spread
+  is max(liquidity_concentration, dispersion, 1 bps floor): the dispersion term
+  (k·std(|Δlog p|)·1e4) is a VOLATILITY-scaled cost bound, not a liquidity
+  measure; the liquidity-concentration term (participation ratio of |Δlog p|)
+  is the liquidity-aware proxy, ~invariant to volatility at fixed quote
+  continuity (no volume/ADV feed server-side, so a true Amihud is not
+  computable from prices alone — soundness #8). The 100 bps placeholder is kept
+  as the conservative fallback bound when a name has no usable evidence;
+  costs are never understated, never assumed zero. The S6 stage detail records
+  which proxy produced the cost (`half_spread_proxy`). Rebalance cadence fixed
+  in advance. Pass bar: net SR > 0, |t_net| >= tau_cal(scope),
   MinTRL <= T, PBO <= 0.5 at depth — multiplicity-corrected over the deck stratum
   (N = all registered deck trials in scope, all users, kills included).
 - Effective N = independent bets, NOT card count: components sharing names correlate;
