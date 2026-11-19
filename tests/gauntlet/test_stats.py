@@ -113,9 +113,11 @@ def test_dsr_at_or_below_benchmark_is_low():
 
 
 def test_dsr_var_floor():
-    # V floored at 1/T when the stratum variance is smaller
-    d = stats.dsr(sr_hat=0.1, T=1260, n_stratum=10, v_stratum=0.0)
-    assert d["v_stratum"] == pytest.approx(1 / 1260)
+    # V floored at the normal-theory Var(SR_hat) = (1 + sr_hat^2/2)/T when the
+    # stratum variance is smaller (#16: PSR variance convention, not 1/T)
+    sr_hat = 0.1
+    d = stats.dsr(sr_hat=sr_hat, T=1260, n_stratum=10, v_stratum=0.0)
+    assert d["v_stratum"] == pytest.approx((1.0 + sr_hat ** 2 / 2.0) / 1260)
 
 
 def test_bh_fdr_controls():

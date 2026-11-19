@@ -121,7 +121,10 @@ def test_psr_dsr_accept_effective_T():
     # dsr passes t_eff through and records it (against the DSR benchmark
     # sr_star, which is NOT rescaled — only the candidate's own evidence is)
     d = stats.dsr(sr_hat, T, 100, 1.0 / T, skew=skew, kurt=kurt, t_eff=100.0)
-    sr_star = stats.expected_max_sharpe(100, max(1.0 / T, 1.0 / T))
+    # #16: dsr's default var_floor is now the PSR variance (1+sr_hat^2/2)/T,
+    # so the effective V is max(1/T, floor) — recompute sr_star with THAT V:
+    v_eff = max(1.0 / T, (1.0 + sr_hat ** 2 / 2.0) / T)
+    sr_star = stats.expected_max_sharpe(100, v_eff)
     assert d["dsr"] == pytest.approx(
         stats.psr(sr_hat, sr_star, T, skew, kurt, t_eff=100.0), rel=1e-12)
     assert d["t_eff"] == 100.0

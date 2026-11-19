@@ -29,6 +29,16 @@ SURVIVOR_CLASSES = (
 )
 PROVENANCES = ("operator_sweep", "user_initiated", "peer_retest")
 
+# Soundness #1: the s4 stage statistic is stored ANNUALIZED (sr_ann, see
+# gauntlet/runner.py::run_s4), while stats.dsr consumes a PER-BAR sr_hat.
+# update_var_stat therefore divides each stored s4 statistic by
+# sqrt(BARS_PER_YEAR) before the sample variance, so stratum var_stat is in
+# per-bar SR^2 units. BARS_PER_YEAR mirrors sift.gauntlet.config (252) —
+# duplicated here as a constant so the ledger layer keeps its no-import-of-
+# the-gauntlet layering (pure stdlib at import time).
+BARS_PER_YEAR = 252
+_BARS_PER_YEAR_SQRT = BARS_PER_YEAR ** 0.5
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS trial (
     trial_id           TEXT PRIMARY KEY,
@@ -52,11 +62,17 @@ CREATE TABLE IF NOT EXISTS stage_result (
     trial_id    TEXT NOT NULL REFERENCES trial(trial_id),
     stage       TEXT NOT NULL,
     status      TEXT NOT NULL DEFAULT 'pending',   -- pending|pass|fail
-    statistic   REAL,
-    threshold   REAL,
+    statistic   REAL,   -- UNITS PER STAGE (#1): s0=hedge ratio beta_hat (unitless),
+                        -- s1=t-stat (unitless), s2=observed mean-reversion stat (unitless),
+                        -- s3=DSR in [0,1] (probability), s4=ANNUALIZED Sharpe sr_ann
+                        -- (per-bar would be sr_ann/sqrt(252); see update_var_stat),
+                        -- s5=full-depth t_net (unitless)
+    threshold   REAL,   -- units match the stage's statistic column
     p_value     REAL,
     n_stratum   INTEGER,
-    v_stratum   REAL,
+    v_stratum   REAL,   -- PER-BAR SR^2 units (#1): update_var_stat stores the sample
+                        -- variance of the s4 statistics AFTER dividing by
+                        -- sqrt(BARS_PER_YEAR), matching the per-bar sr_hat fed to dsr
     dsr         REAL,
     q_bh        REAL,
     seed        INTEGER,
@@ -67,7 +83,9 @@ CREATE TABLE IF NOT EXISTS stage_result (
 CREATE TABLE IF NOT EXISTS stratum_stats (
     scope_id    TEXT PRIMARY KEY,
     n_trials    INTEGER NOT NULL,
-    var_stat    REAL NOT NULL,
+    var_stat    REAL NOT NULL,  -- PER-BAR SR^2 units (#1): sample variance of the
+                                -- stratum's s4 statistics converted to per-bar
+                                -- (statistic / sqrt(BARS_PER_YEAR)) BEFORE the variance
     updated_at  REAL NOT NULL
 );
 
@@ -281,8 +299,11 @@ class Ledger:
     # -- scope-stratified denominators -------------------------------------
     def _bump_stratum(self, scope_id: str, now: float) -> None:
         """N counts every registered trial in the stratum, including kills.
-        var_stat is the sample variance of the stratum's recorded S4 statistics
-        (floored at the theoretical 1/T by the caller via update_var_stat)."""
+        var_stat is the sample variance of the stratum's recorded S4
+        statistics CONVERTED TO PER-BAR units (divided by sqrt(BARS_PER_YEAR))
+        before the variance — #1: the s4 row stores ANNUALIZED sr_ann, and
+        dsr() consumes a per-bar sr_hat, so V must be per-bar SR^2 (the deck
+        path does the same in decks/service.py::_deck_stratum_variance)."""
         n = self.con.execute(
             "SELECT COUNT(*) FROM trial WHERE scope_id=?", (scope_id,)
         ).fetchone()[0]
@@ -302,11 +323,19 @@ class Ledger:
         """Recompute the stratum's variance of S4 statistics from the ledger.
 
         V is the sample variance of the stratum's recorded S4 `statistic`
-        values (per-period units matching the candidate's). Computed strictly
-        within the scope — never pooled across scopes.
+        values AFTER converting them from annualized to PER-BAR units
+        (each statistic is divided by sqrt(BARS_PER_YEAR) first), so V comes
+        out in per-bar SR^2 units matching the per-bar sr_hat that
+        runner.run_s3/run_s5 feed into stats.dsr (#1). The s4 statistic
+        column itself stays ANNUALIZED (sr_ann) — every other reader
+        (minting.py tier evidence, decay.py re-eval) consumes status/sr_ann
+        semantics, so the conversion happens here, at the single choke
+        point, exactly like the deck path (decks/service.py::
+        _deck_stratum_variance). Computed strictly within the scope —
+        never pooled across scopes.
         """
         vals = [
-            r[0]
+            r[0] / _BARS_PER_YEAR_SQRT
             for r in self.con.execute(
                 "SELECT sr.statistic FROM stage_result sr JOIN trial t"
                 " ON sr.trial_id = t.trial_id"

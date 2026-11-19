@@ -226,9 +226,17 @@ def test_stratum_var_is_variance_of_s4_stats_within_scope(ledger):
     ledger.update_var_stat(SCOPE_FREE)
     n, v = ledger.stratum_stats(SCOPE_FREE)
     assert n == 4
-    assert v == pytest.approx(sample_variance(vals))
-    # sample variance of [0.5, 1.0, 1.5, 2.0] = 5/12 = 0.41666...
-    assert v == pytest.approx(5.0 / 12.0, abs=1e-9)
+    # #1: s4 statistics are stored ANNUALIZED (sr_ann); update_var_stat
+    # converts to per-bar (÷ sqrt(252)) BEFORE the variance, so V is per-bar
+    # SR^2 — matching the per-bar sr_hat fed to stats.dsr (deck-path
+    # convention). Variance scales by 1/BARS_PER_YEAR under the conversion.
+    import math as _math
+    from sift.registry import BARS_PER_YEAR as _BPY
+    assert v == pytest.approx(sample_variance(vals) / _BPY)
+    # sample variance of [0.5, 1.0, 1.5, 2.0] = 5/12 = 0.41666... annualized;
+    # per-bar: (5/12)/252
+    assert v == pytest.approx(5.0 / 12.0 / _BPY, abs=1e-12)
+    assert v == pytest.approx(sample_variance([x / _math.sqrt(_BPY) for x in vals]))
 
 
 def test_stratum_var_not_pooled_across_scopes(ledger):
