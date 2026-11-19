@@ -63,6 +63,40 @@ COSTS = {
     "max_open_positions": 20,
 }
 
+# ---------------------------------------------------------------------------
+# S6 deck (portfolio) gauntlet — spec v4.2 §4 (hermes-tasks #166)
+# ---------------------------------------------------------------------------
+# Fixed, enumerable bucket grid (no free-form sizes):
+#   card-count {5,10,20,50,100} x optional GICS sector split ("all" +
+#   each GICS sector) x family mix (pairs, lead-lag; mixing allowed).
+DECK_BUCKET_SIZES = (5, 10, 20, 50, 100)
+DECK_SECTOR_ALL = "all"
+DECK_FAMILIES = ("pairs", "lead_lag")
+
+# S6 pass bar (pre-registered; same shape as S4/S5, never weakened):
+#   net SR > 0, |t_net| >= tau_cal(scope), MinTRL <= T, PBO <= 0.5 at depth —
+#   multiplicity-corrected over the deck stratum (N = all registered deck
+#   trials in scope across ALL users, kills included).
+S6_NET_SR_MIN = 0.0          # net SR > 0 after costs
+S6_PBO_MAX = 0.5             # PBO <= 0.5 at depth (CSCV, S=16)
+S6_REBALANCE_CADENCE = 21    # fixed rebalance cadence in bars (monthly), pre-registered
+S6_FORMATION = 60            # formation window for the per-name hedge/z stats
+S6_STEP = 120                # walk-forward step (same convention as S4)
+
+# Cost model for S6: realistic per-name half-spreads computed FROM THE DATA
+# (median absolute log-return-scaled quoted spread proxy) replace the 100 bps
+# placeholder; 100 bps is kept as the conservative BOUND (costs are never
+# understated: effective half-spread = max(data estimate, floor), and the
+# 100 bps placeholder stays as an upper safety check in tests).
+S6_HALF_SPREAD_BPS_FLOOR = 1.0     # never assume below 1 bps half-spread
+S6_HALF_SPREAD_BPS_CONSERVATIVE = 100.0   # the old placeholder, kept as bound
+
+# Effective N (independent bets): components sharing names correlate, so
+# N_eff is computed from the name-overlap graph of the deck's components
+# (see sift.decks.effective_n), NOT from the card count. 50 mixed cards are
+# NOT 50 independent bets (spec v4.2 §4).
+S6_EFF_N_MIN = 1.0
+
 
 def tau_cal(scope_id: str) -> float:
     """Scope-matched t hurdle for S4: tau_cal ~ 3.5 for a 5-yr scope,

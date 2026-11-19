@@ -356,7 +356,8 @@ def test_unknown_flag_fails_closed():
         flags.set_flag("no_such_flag", True)
     with pytest.raises(ValueError):
         flags.disable_for_user("no_such_flag", "alice")
-    assert set(flags.known_flags()) == {"cards_v4_1"}
+    # v4.2 added decks_v4_2 (hermes-tasks #166); unknown names still fail closed
+    assert set(flags.known_flags()) == {"cards_v4_1", "decks_v4_2"}
 
 
 def test_beta_cohort_default_on():

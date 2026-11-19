@@ -17,13 +17,18 @@ card layer:
                                        downgrades any time + pre-registered
                                        live-window upgrades, cards 7/8, pull/31)
       -> Metrics                     (gate-1 metric hooks)
+      -> DeckRegistry + DeckService  (v4.2 deck layer: bucket registry,
+                                      S6 portfolio gauntlet, F-S ranking —
+                                      behind decks_v4_2, hermes-tasks #166)
 
 Every component independently enforces the flag (each mutating path raises
 its own fail-closed error type with flag_off when `cards_v4_1` is off);
 this facade adds ONE guard, `require_layer(handle)`, so an operator path
 that touches several components fails closed once, up front, with
 LayerError(flag_off). The env kill-switch SIFT_CARDS_V4_1=0 disables the
-whole layer because every read goes through sift.flags.
+whole layer because every read goes through sift.flags. The v4.2 deck
+layer additionally requires `decks_v4_2` (kill-switch SIFT_DECKS_V4_2=0)
+and sits on top of the card layer: `decks_v4_2_enabled` ANDs the two.
 """
 
 from __future__ import annotations
@@ -43,6 +48,8 @@ from sift.cards.minting import CardMinter
 from sift.cards.notify import Notifier
 from sift.cards.share import ShareService
 from sift.cards.vault import Vault
+from sift.decks import DeckRegistry
+from sift.decks.service import DeckService
 from sift.registry import Ledger
 
 
@@ -69,6 +76,10 @@ class CardLayer:
                                          db_dir / "signal.db")
         self.decay = RegistryDecayJob(self.cards, ledger, notifier=self.notify)
         self.metrics = Metrics(ledger, self.cards, self.vault, self.shares)
+        # v4.2 deck layer (hermes-tasks #166): its own registry + service,
+        # gated by decks_v4_2 (which also requires cards_v4_1).
+        self.decks = DeckRegistry(db_dir / "decks.db", secret=card_secret)
+        self.deck_service = DeckService(self.cards, self.decks)
 
     def __enter__(self) -> "CardLayer":
         return self
@@ -80,7 +91,7 @@ class CardLayer:
         # RegistryDecayJob holds no DB of its own (it writes through the
         # ledger + registry), so there is nothing to close on it.
         for c in (self.events, self.notify, self.badges, self.shares,
-                  self.vault, self.cards):
+                  self.vault, self.cards, self.decks):
             c.close()
 
     # -- the one flag guard ---------------------------------------------------------
@@ -100,6 +111,10 @@ class CardLayer:
             "flag": flags.FLAG_CARDS_V4_1,
             "global": flags.is_enabled(flags.FLAG_CARDS_V4_1),
             "for_handle": flags.cards_v4_1_enabled(handle),
+            "decks_v4_2": {
+                "global": flags.is_enabled(flags.FLAG_DECKS_V4_2),
+                "for_handle": flags.decks_v4_2_enabled(handle),
+            },
             "known_flags": list(flags.known_flags()),
         }
 

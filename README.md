@@ -272,4 +272,41 @@ tier changes happen only through the pre-registered registry rules and never
 re-randomize); and there is **no marketplace** (cards and slots cannot be
 bought, sold, or traded).
 
+## Deck layer (v4.2, spec §4 — hermes-tasks #166)
+
+`sift/decks/` implements the v4.2 deck layer behind the `decks_v4_2` flag
+(which additionally requires `cards_v4_1` — the deck layer sits on top of
+the card layer):
+
+- `sift/decks/__init__.py` — bucket registry + append-only deck ledger:
+  the FIXED enumerable bucket grid (sizes {5,10,20,50,100} x optional GICS
+  sector split ("all" + sectors) x family mix (pairs, lead-lag, mixing
+  allowed) — all buckets free-tier), deterministic top-K membership by card
+  tier (K = bucket size), dedupe on (scope, bucket config, vintage) like
+  cards, F–S deck ranking (`deck_rank_from_stats`, distinct from card
+  tiers), custom decks registered as `kind="custom"` (informational only:
+  amber, unranked, unshareable), deck events append-only with read-back,
+  decks non-transferable
+- `sift/decks/service.py` — `DeckService`: ranked/custom registration and
+  the S6 runner (`run_s6`): equal-weight basket, fixed rebalance cadence
+  (21 bars), cost-aware walk-forward with realistic per-name half-spreads
+  computed from the data (100 bps placeholder replaced, kept as the
+  conservative bound), PBO at depth, pass bar net SR>0 / |t_net|>=
+  tau_cal(scope) / MinTRL<=T / PBO<=0.5 multiplicity-corrected over the
+  deck stratum (N = all registered deck trials in scope across all users,
+  kills included) using EFFECTIVE N (independent bets — components sharing
+  names correlate; 50 mixed cards != 50 independent bets)
+- `sift/gauntlet/s6.py` — pure S6 statistics: data-driven half-spread
+  estimator, equal-weight basket with fixed cadence + turnover costs,
+  `effective_n` (name-overlap/Jaccard), `multiplicity_corrected_p`,
+  `deck_gauntlet` verdict
+- `sift/decks/copy.py` — the ONLY place deck strings are built; every deck
+  string passes the SAME fail-closed banned-phrase guard as cards (v3 §12
+  bans extended to ALL deck strings); beta posture: deck results are amber
+  telemetry only, never performance claims
+
+**Kill-switch:** `SIFT_DECKS_V4_2=0` disables only the deck layer;
+`SIFT_CARDS_V4_1=0` disables both (decks require cards). Flag off -> every
+deck path fails closed with `DeckError`/`DeckCopyError` (`flag_off`).
+
 ## Non-negotiables (scope doc v3 §12)
