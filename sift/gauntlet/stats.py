@@ -11,6 +11,14 @@ Conventions
   (PCG64 via ``numpy.random.Generator(np.random.PCG64(seed))``).
 * Returns are per-bar unless noted; annualization uses ``bars_per_year``
   (default 252 daily bars).
+* Serial correlation (#12): ``t_stat_sharpe`` / ``psr`` / the sqrt(252)
+  annualization assume IID returns. Under POSITIVE autocorrelation the iid
+  t is ANTICONSERVATIVE (std of t ~ sqrt((1+phi)/(1-phi)) > 1); under
+  mean-reversion (negative autocorrelation) it is conservative. The
+  mean-reversion pairs path keeps the iid variants (conservative direction);
+  positive-autocorrelation exposures (e.g. deck baskets, pull/37) must use
+  ``t_stat_sharpe_hac`` / the ``t_eff`` option of ``psr``/``dsr`` — every
+  switch is explicit, never silent.
 * Pre-registered constants live in ``sift/gauntlet/config.py`` and are hashed
   into each trial's config_hash by the runner.
 
@@ -125,7 +133,15 @@ def calibrate_ar1_fixture(
 
     `spread` (optional) is the planted spread series itself (used by
     log-space fixtures where the level hedge is not exactly beta*); when
-    given, the half-life assertion runs on it directly."""
+    given, the half-life assertion runs on it directly.
+
+    REAL-DATA ROLE (finding #14, doc-only — no behavior change): on real
+    data the caller (first_run) sets beta_true = the pair's OLS hedge on
+    levels and half_life_true = the measured half-life, so the beta
+    assertion is TAUTOLOGICAL (beta_hat - beta_true = 0.0 exactly) and the
+    genuine gate is the finite-half-life (mean-reversion) check: an
+    explosive spread (phi_hat > 1 -> half-life = inf) FAILS S0. The planted
+    AR(1) fixture (F-PAIR) remains the real calibration of both assertions."""
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     beta_hat = ols_hedge_ratio(x, y)
@@ -259,18 +275,26 @@ def expected_max_sharpe(n_trials: int, var_sharpe: float) -> float:
     )
 
 
-def psr(sr_hat: float, sr_star: float, T: int, skew: float, kurt: float) -> float:
+def psr(sr_hat: float, sr_star: float, T: int, skew: float, kurt: float,
+        t_eff: float | None = None) -> float:
     """Probabilistic Sharpe Ratio (Bailey & Lopez de Prado 2012):
     PSR = Phi( (sr_hat - sr_star) * sqrt(T-1) / sqrt(1 - skew*sr_hat + (kurt-1)*sr_hat^2/4) ).
-    kurt is the (non-excess) kurtosis; gamma_4 - 1 in the formula is
-    (kurt - 3) - ... standard form uses gamma_4 = kurtosis, so the term is
-    (kurt - 1) * sr^2 / 4 with kurt = raw 4th standardized moment as in the paper."""
+    kurt is the (non-excess, RAW) kurtosis; the term (kurt - 1) * sr^2 / 4
+    uses the raw 4th standardized moment as in the paper.
+
+    ``t_eff`` (effective sample size, e.g. from ``effective_sample_size``)
+    replaces T under the sqrt: sqrt(t_eff - 1). Use it for series with
+    POSITIVE serial correlation, where the iid sqrt(T-1) is
+    anticonservative (#12). Default None keeps the iid sqrt(T-1)."""
     if T < 2:
         raise ValueError("T must be >= 2")
+    n_eff = T if t_eff is None else float(t_eff)
+    if n_eff < 2:
+        raise ValueError("t_eff must be >= 2")
     denom = math.sqrt(1.0 - skew * sr_hat + (kurt - 1.0) * sr_hat ** 2 / 4.0)
     if denom <= 0:
         return 0.0 if sr_hat < sr_star else 1.0
-    return _norm_cdf((sr_hat - sr_star) * math.sqrt(T - 1) / denom)
+    return _norm_cdf((sr_hat - sr_star) * math.sqrt(n_eff - 1) / denom)
 
 
 def dsr(
@@ -281,12 +305,15 @@ def dsr(
     skew: float = 0.0,
     kurt: float = 3.0,
     var_floor: float | None = None,
+    t_eff: float | None = None,
 ) -> dict:
     """Deflated Sharpe Ratio at the candidate's registered scope.
 
     The deflation benchmark uses the scope-stratified denominator:
     N = n_stratum, V = max(v_stratum, var_floor) with var_floor = 1/T
-    (theoretical minimum variance of a Sharpe estimate). Returns the DSR,
+    (theoretical minimum variance of a Sharpe estimate). ``t_eff`` is the
+    optional effective sample size forwarded to ``psr`` (serial-correlation
+    option, #12); None keeps the iid sqrt(T-1). Returns the DSR,
     the benchmark SR*, and the inputs used (all recorded in the ledger).
     """
     v = v_stratum
@@ -294,9 +321,10 @@ def dsr(
     if v < floor:
         v = floor
     sr_star = expected_max_sharpe(n_stratum, v)
-    d = psr(sr_hat, sr_star, T, skew, kurt)
+    d = psr(sr_hat, sr_star, T, skew, kurt, t_eff=t_eff)
     return {"dsr": d, "sr_star": sr_star, "sr_hat": sr_hat, "T": T,
-            "n_stratum": n_stratum, "v_stratum": v, "skew": skew, "kurt": kurt}
+            "n_stratum": n_stratum, "v_stratum": v, "skew": skew, "kurt": kurt,
+            "t_eff": t_eff}
 
 
 def bh_fdr(p_values: np.ndarray, q: float = 0.10) -> dict:
@@ -330,19 +358,36 @@ def min_trl(sr: float, skew: float, kurt: float, alpha: float = 0.05) -> float:
 
 
 def skew_kurt(returns: np.ndarray) -> tuple[float, float]:
-    """Sample skewness and (raw, non-excess) kurtosis of a return series."""
+    """Bias-corrected sample skewness (G1, adjusted Fisher-Pearson) and RAW
+    (non-excess) kurtosis (G2 = excess + 3) of a return series.
+
+    Convention (#13): the plain standardized-moment estimators
+    mean(z^3)/mean(z^4) are downward-biased (MC on N(0,1): mean raw kurt
+    2.80 at n=60, 2.95 at n=252 vs true 3.0), which feeds PSR/DSR/MinTRL
+    slightly anticonservative for positive SR at short windows. We return
+    the standard bias-corrected forms:
+        G1 = sqrt(n(n-1))/(n-2) * g1,   g1 = m3 / m2^1.5
+        G2 = (n-1)/((n-2)(n-3)) * ((n+1) g2 - 3(n-1)) + 3,  g2 = m4 / m2^2
+    G2 is RAW kurtosis (excess + 3): PSR expects the raw 4th standardized
+    moment in its (kurt - 1) * sr^2 / 4 term — do NOT pass excess kurtosis.
+    Degenerate guards unchanged: n < 4 or zero variance -> (0.0, 3.0)."""
     r = np.asarray(returns, float)
     n = r.size
     if n < 4:
         return 0.0, 3.0
     m = r.mean()
-    sd = r.std(ddof=1)
-    if sd == 0:
+    d = r - m
+    m2 = float(np.dot(d, d)) / n
+    if m2 <= 0:
         return 0.0, 3.0
-    z = (r - m) / sd
-    skew = float(np.mean(z ** 3))
-    kurt = float(np.mean(z ** 4))
-    return skew, kurt
+    m3 = float(np.mean(d ** 3))
+    m4 = float(np.mean(d ** 4))
+    g1 = m3 / m2 ** 1.5
+    g2 = m4 / m2 ** 2
+    skew = math.sqrt(n * (n - 1.0)) / (n - 2.0) * g1
+    kurt = ((n - 1.0) / ((n - 2.0) * (n - 3.0))
+            * ((n + 1.0) * g2 - 3.0 * (n - 1.0)) + 3.0)
+    return float(skew), float(kurt)
 
 
 def sharpe_ratio(returns: np.ndarray, bars_per_year: int = 252) -> float:
@@ -356,7 +401,12 @@ def sharpe_ratio(returns: np.ndarray, bars_per_year: int = 252) -> float:
 
 
 def t_stat_sharpe(returns: np.ndarray) -> float:
-    """t-stat of the mean return: t = SR_per_bar * sqrt(T)."""
+    """t-stat of the mean return: t = SR_per_bar * sqrt(T). ASSUMES IID
+    returns (#12): under positive autocorrelation this is anticonservative
+    (std of t ~ sqrt((1+phi)/(1-phi))); under mean reversion it is
+    conservative. The pairs gauntlet path keeps this iid variant (the pairs
+    family is mean-reversion, the conservative direction); positive-
+    autocorrelation exposures must use ``t_stat_sharpe_hac`` explicitly."""
     r = np.asarray(returns, float)
     n = r.size
     if n < 2:
@@ -365,6 +415,65 @@ def t_stat_sharpe(returns: np.ndarray) -> float:
     if sd == 0:
         return 0.0
     return float(r.mean() / (sd / math.sqrt(n)))
+
+
+# --------------------------------------------------------------------------
+# Serial-correlation-aware (HAC) variants — soundness finding #12.
+# Lag rule: Andrews (1991) automatic lag L = floor(4 * (T/100)^(2/9)),
+# floored at 1 and capped at T-1. Bartlett kernel weights 1 - k/(L+1).
+# --------------------------------------------------------------------------
+
+def nw_lag(T: int) -> int:
+    """Newey-West automatic lag floor(4*(T/100)^(2/9)) (Andrews 1991),
+    floored at 1 (T=252 -> 4, T=1260 -> 6)."""
+    if T < 2:
+        return 1
+    return max(1, min(int(math.floor(4.0 * (T / 100.0) ** (2.0 / 9.0))), T - 1))
+
+
+def _hac_long_run_var(r: np.ndarray, lag: int) -> tuple[float, float]:
+    """Bartlett-kernel long-run variance S and gamma_0 of a demeaned series.
+    S = g0 + 2 * sum_{k=1..L} (1 - k/(L+1)) g_k, with g_k = mean(d_t d_{t-k})."""
+    T = r.size
+    d = r - r.mean()
+    g0 = float(np.dot(d, d)) / T
+    S = g0
+    for k in range(1, lag + 1):
+        gk = float(np.dot(d[:-k], d[k:])) / T
+        S += 2.0 * (1.0 - k / (lag + 1.0)) * gk
+    return g0, S
+
+
+def t_stat_sharpe_hac(returns: np.ndarray, lag: int | None = None) -> dict:
+    """Newey-West/HAC t-stat of the mean return (Bartlett kernel):
+    t = mean(r) / sqrt(S / T), S = long-run variance with automatic lag
+    ``nw_lag(T)`` unless `lag` is given. Valid under AR(1) serial
+    correlation; under positive autocorrelation it removes the iid t's
+    anticonservatism (MC, T=252, phi=+0.5: iid t dispersion ~1.73 vs HAC
+    ~1). Returns the t, the lag used, gamma_0, the long-run variance, and
+    the effective sample size T_eff = T * g0 / S."""
+    r = np.asarray(returns, float)
+    T = r.size
+    if T < 2:
+        return {"t": 0.0, "lag": 0, "gamma0": 0.0, "long_run_var": 0.0,
+                "t_eff": 0.0}
+    L = nw_lag(T) if lag is None else max(1, min(int(lag), T - 1))
+    g0, S = _hac_long_run_var(r, L)
+    if S <= 0:
+        return {"t": 0.0, "lag": L, "gamma0": g0, "long_run_var": S,
+                "t_eff": 0.0}
+    t = float(r.mean() / math.sqrt(S / T))
+    t_eff = float(T * g0 / S)
+    return {"t": t, "lag": L, "gamma0": g0, "long_run_var": S, "t_eff": t_eff}
+
+
+def effective_sample_size(returns: np.ndarray, lag: int | None = None) -> float:
+    """Effective sample size T_eff = T * gamma_0 / S (HAC). T_eff < T under
+    positive autocorrelation, T_eff > T under mean reversion. Feed T_eff to
+    ``psr``/``dsr`` via their ``t_eff`` argument for positive-autocorrelation
+    series (#12). Degenerate series (T < 2 or S <= 0) -> 0.0."""
+    out = t_stat_sharpe_hac(returns, lag=lag)
+    return out["t_eff"]
 
 
 # --------------------------------------------------------------------------
