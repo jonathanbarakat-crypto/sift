@@ -144,6 +144,9 @@ class DeckService:
         - equal-weight basket, fixed rebalance cadence, cost-aware
           walk-forward with realistic per-name half-spreads from the data
           (`prices`, when supplied — else the conservative 100 bps bound);
+          `prices` may be a 1D single-name series or a 2D (T, K) per-name
+          panel (bars x names, one column per name); 2D panels are
+          estimated per name, never flattened across symbol boundaries;
         - PBO via CSCV at depth over the basket's rebalance blocks;
         - pass bar: net SR>0, |t_net|>=tau_cal(scope), MinTRL<=T_scope,
           PBO<=0.5 — multiplicity-corrected over the deck stratum

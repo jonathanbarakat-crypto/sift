@@ -397,6 +397,102 @@ def test_s6_cost_model_uses_data_spreads(svc, cards):
     assert res["s6"]["half_spread_bps_used"] < 100.0 or res["s6"]["half_spread_bps_used"] >= 1.0
 
 
+# ---------------------------------------------------------------------------
+# Regression: 2D multi-name price panels must be estimated PER NAME
+# (column-wise), never flattened across symbol boundaries (t_d8534dbc)
+# ---------------------------------------------------------------------------
+
+def _name_series(rng, T, level, sigma):
+    return level * np.exp(np.cumsum(rng.normal(0.0, sigma, T)))
+
+
+def test_half_spread_2d_panel_matches_median_of_per_name_estimates():
+    """(a) 2D panel with known per-name dispersion -> estimate ~= median of
+    the per-name medians, NOT inflated by cross-symbol boundary steps."""
+    rng = np.random.Generator(np.random.PCG64(11))
+    T, K = 400, 6
+    sigmas = [0.005, 0.008, 0.010, 0.012, 0.015, 0.020]
+    panel = np.column_stack([_name_series(rng, T, 100.0, s) for s in sigmas])
+    est = s6stats.estimate_half_spread_bps(panel)
+    assert est["source"] == "data_estimate"
+    per_name = np.array([s6stats.estimate_half_spread_bps(panel[:, j])["median_bps"]
+                         for j in range(K)])
+    assert est["per_name_bps"].shape == (K,)
+    assert np.allclose(est["per_name_bps"], per_name)
+    assert est["median_bps"] == pytest.approx(float(np.median(per_name)), rel=1e-12)
+
+
+def test_half_spread_2d_wildly_different_price_levels_not_inflated():
+    """(b) symbols at wildly different price levels (0.01 vs 10000): the
+    old flattened estimator saw huge spurious 'returns' at each boundary;
+    the per-name estimate stays bounded by the per-name dispersion."""
+    rng = np.random.Generator(np.random.PCG64(12))
+    T, K = 300, 5
+    levels = [0.01, 0.5, 10.0, 250.0, 10000.0]
+    panel = np.column_stack([_name_series(rng, T, lv, 0.01) for lv in levels])
+    est = s6stats.estimate_half_spread_bps(panel)
+    assert est["source"] == "data_estimate"
+    per_name = np.array([s6stats.estimate_half_spread_bps(panel[:, j])["median_bps"]
+                         for j in range(K)])
+    # every per-name estimate is a ~1%-daily-vol name -> small, bounded bps
+    assert np.all(per_name < 100.0)
+    assert est["median_bps"] == pytest.approx(float(np.median(per_name)), rel=1e-12)
+    assert est["median_bps"] < 100.0  # NOT the 33%-per-side garbage from flattening
+
+
+def test_half_spread_2d_nonfinite_handled_per_column():
+    """(c) non-finite entries are dropped per column; a column that is all
+    non-finite falls back to the conservative bound for that name only."""
+    rng = np.random.Generator(np.random.PCG64(13))
+    T, K = 200, 4
+    panel = np.column_stack([_name_series(rng, T, 100.0, 0.01) for _ in range(K)])
+    panel[5, 0] = np.nan          # hole in column 0
+    panel[10, 1] = np.inf         # hole in column 1
+    panel[:, 3] = np.nan          # column 3 entirely non-finite
+    est = s6stats.estimate_half_spread_bps(panel)
+    assert est["source"] == "data_estimate"
+    good = s6stats.estimate_half_spread_bps(panel[:, 0][np.isfinite(panel[:, 0])])["median_bps"]
+    assert est["per_name_bps"][0] == pytest.approx(good, rel=1e-12)
+    assert est["per_name_bps"][3] == gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
+    finite_per_name = [est["per_name_bps"][j] for j in range(K) if j != 3]
+    assert est["median_bps"] == pytest.approx(
+        float(np.median([est["per_name_bps"][0], est["per_name_bps"][1],
+                         est["per_name_bps"][2], gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE])),
+        rel=1e-12)
+    assert np.isfinite(est["median_bps"])
+
+
+def test_half_spread_1d_behavior_unchanged():
+    """1D single-series input: identical result to the pre-fix formula
+    (2 * median(|diff(log p)|) * 1e4 path via std proxy), floor/bound logic
+    untouched."""
+    rng = np.random.Generator(np.random.PCG64(1))
+    prices = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.01, 500)))
+    est = s6stats.estimate_half_spread_bps(prices)
+    assert est["source"] == "data_estimate"
+    p = np.asarray(prices, float)
+    p = p[np.isfinite(p)]
+    r = np.abs(np.diff(np.log(p)))
+    r = r[np.isfinite(r)]
+    expected = float(np.maximum(0.25 * float(np.std(r, ddof=1)) * 1e4,
+                                gcfg.S6_HALF_SPREAD_BPS_FLOOR))
+    assert est["median_bps"] == pytest.approx(expected, rel=1e-12)
+    assert est["per_name_bps"].shape == (1,)
+    # degenerate 1D still falls back to the conservative bound
+    est0 = s6stats.estimate_half_spread_bps(np.array([100.0, 100.0, 100.0]))
+    assert est0["source"] == "conservative_bound"
+    assert est0["median_bps"] == gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
+
+
+def test_half_spread_2d_degenerate_panel_falls_back_to_bound():
+    """A 2D panel with no usable per-name variation at all -> conservative
+    bound, never zero cost."""
+    panel = np.full((50, 3), 100.0)
+    est = s6stats.estimate_half_spread_bps(panel)
+    assert est["source"] == "conservative_bound"
+    assert est["median_bps"] == gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
+
+
 def test_basket_equal_weight_fixed_cadence_costs():
     rng = np.random.Generator(np.random.PCG64(4))
     R = rng.normal(0.0005, 0.01, (500, 5))
