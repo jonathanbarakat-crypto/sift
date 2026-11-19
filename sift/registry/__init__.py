@@ -18,7 +18,15 @@ from pathlib import Path
 
 STAGES = ("s0", "s1", "s2", "s3", "s4", "s5")
 VERDICTS = ("pending", "killed", "survivor")
-SURVIVOR_CLASSES = ("none", "on-watch-amber", "validated-green")
+# v4.2 §3: S0-S2 passers that miss the S4/S3 bar are survivors at the bronze
+# evidence tier (not killed) — their classes are named after the missed bar.
+SURVIVOR_CLASSES = (
+    "none",
+    "on-watch-amber",
+    "validated-green",
+    "on-watch-amber-s4-evidence",
+    "on-watch-amber-s3-evidence",
+)
 PROVENANCES = ("operator_sweep", "user_initiated", "peer_retest")
 
 SCHEMA_SQL = """

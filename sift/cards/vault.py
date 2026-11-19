@@ -32,7 +32,7 @@ from sift import flags
 from sift.cards import CARD_TIERS, Card, CardError, CardRegistry
 
 VAULT_STATES = ("vault", "archive")     # custody states; pool membership is separate
-BASE_CAPACITY = {"gold": 6, "silver": 4, "bronze": 2}
+BASE_CAPACITY = {"platinum": 8, "gold": 6, "silver": 4, "bronze": 2}
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS vault_entry (

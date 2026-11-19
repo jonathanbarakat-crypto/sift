@@ -17,6 +17,7 @@ import numpy as np
 from sift.gauntlet import config as cfg
 from sift.gauntlet import s5 as s5stats
 from sift.gauntlet import stats
+from sift.gauntlet import v42
 from sift.registry import Ledger
 
 
@@ -43,8 +44,9 @@ class GauntletRunner:
         self.ledger = ledger
         self.seed = seed
         # v4.1: optional CardMinter (sift.cards.minting). When set, a
-        # validated-green survivor mints exactly one card (flag-gated);
-        # killed/amber trials mint nothing. None keeps v3 behavior.
+        # survivor mints exactly one card (flag-gated) — v4.2: EVERY S0-S2
+        # passer mints at bronze+; killed trials (S0-S2 failures) mint
+        # nothing. None keeps v3 behavior.
         self.card_minter = card_minter
 
     # -- individual stages -------------------------------------------------
@@ -109,7 +111,12 @@ class GauntletRunner:
     def run_s3(self, trial_id: str, sr_hat_per_bar: float, T: int,
                p_value: float, scope_id: str) -> StageResult:
         """S3 scope-stratified DSR >= 0.95 with N, V from the ledger stratum;
-        BH-FDR q=0.10 recorded at family level."""
+        BH-FDR q=0.10 recorded at family level.
+
+        v4.2 §2-§3 (#170): S3's DSR is the MINT-TIME ADMISSION GATE only. The
+        stage row records dsr, sr_star, n_stratum, v_stratum, q_bh as
+        "admission evidence at mint-time N" context — the card tier never
+        re-deflates by a later N."""
         n_stratum, v_stratum = self.ledger.stratum_stats(scope_id)
         # the candidate's own S4 statistic enters the stratum variance
         returns = getattr(self, "_last_s4_returns", None)
@@ -132,12 +139,20 @@ class GauntletRunner:
                            p_value=p_value, n_stratum=n_stratum,
                            v_stratum=d["v_stratum"], dsr=d["dsr"], q_bh=q_bh,
                            detail={"sr_star": d["sr_star"], "sr_hat": d["sr_hat"],
-                                   "skew": skew, "kurt": kurt})
+                                   "skew": skew, "kurt": kurt,
+                                   "admission_label": (
+                                       "admission evidence at mint-time N "
+                                       "(DSR gate only — never a tier input, "
+                                       "never re-deflated by a later N)")})
 
     def run_s4(self, trial_id: str, net_returns: np.ndarray, scope_id: str,
                p_perm: float | None = None) -> StageResult:
-        """S4 cost-aware walk-forward: net SR > 0, |t_net| >= tau_cal(scope),
-        MinTRL <= T_scope."""
+        """S4 cost-aware walk-forward — v4.2 §2: a SCORED stage, not a kill.
+        The stage row records pass|fail against the pre-registered bar
+        (net SR > S4_NET_SR_MIN, |t_net| >= tau_cal(scope), MinTRL <= T) AND
+        the full score (net SR, t_net, MinTRL, T) in the stage detail either
+        way; in v4.2 the bar defines the gold/platinum evidence tiers, not a
+        kill line — S0-S2 passers survive S4 regardless."""
         r = np.asarray(net_returns, float)
         r = r[np.isfinite(r)]
         T = r.size
@@ -154,7 +169,9 @@ class GauntletRunner:
                            p_value=p_perm,
                            detail={"t_net": t_net, "sr_ann": sr_ann,
                                    "min_trl": min_trl, "T": T,
-                                   "skew": skew, "kurt": kurt})
+                                   "skew": skew, "kurt": kurt,
+                                   "tau_cal": tau,
+                                   "s4_bar_met": bool(passed)})
 
     # -- S5: registry-depth validation (automatic, never opt-in) ------------
     def run_s5(
@@ -305,20 +322,32 @@ class GauntletRunner:
         if s2.status == "fail":
             return self._verdict(trial_id, results, killed_at="s2")
 
-        # S4 first (its net returns feed S3's skew/kurt and stratum variance)
+        # S4 first (its net returns feed S3's skew/kurt and stratum variance).
+        # v4.2 §2: S4 is SCORED, not a kill — a fail here does NOT short-circuit.
         wf = stats.walk_forward_returns(prices)
         net = wf["net"]
         s4 = self.run_s4(trial_id, net, scope_id, p_perm=s2.p_value)
         self.record(trial_id, s4); results.append(s4)
         self.ledger.update_var_stat(scope_id)  # refresh N and V from ledger
-        if s4.status == "fail":
-            return self._verdict(trial_id, results, killed_at="s4")
+        s4_bar_met = v42.s4_passed(s4.detail, scope_id)
 
         sr_bar = (s4.detail["sr_ann"] / np.sqrt(cfg.BARS_PER_YEAR))
         s3 = self.run_s3(trial_id, sr_bar, s4.detail["T"], s2.p_value, scope_id)
         self.record(trial_id, s3); results.append(s3)
-        if s3.status == "fail":
-            return self._verdict(trial_id, results, killed_at="s3")
+        s3_pass = s3.status == "pass"
+        # v4.2 §2-§3: an S0-S2 passer that misses the S4 or S3 bar is NOT
+        # killed — it is a survivor at the bronze evidence tier.
+        if not s4_bar_met or not s3_pass:
+            cls = v42.survivor_class_for(
+                s4_pass=s4_bar_met, s3_pass=s3_pass, s5_pass=None)
+            self.ledger.decide(trial_id, "survivor", cls)
+            card_id = self._maybe_mint_card(trial_id, "survivor", cls)
+            return {"trial_id": trial_id, "verdict": "survivor",
+                    "survivor_class": cls, "stages": results,
+                    "killed_at": None, "card_id": card_id,
+                    "s4_score": {k: s4.detail.get(k) for k in
+                                 ("sr_ann", "t_net", "min_trl", "T", "tau_cal",
+                                  "s4_bar_met")}}
 
         # All of S0-S4 passed at the registered scope. S5 registry-depth
         # validation is AUTOMATIC and never opt-in (v3 §8.3): when the
@@ -327,6 +356,7 @@ class GauntletRunner:
         # fail -> on-watch-amber (v3 §8.4). Without full-window data the trial
         # stays on-watch-amber with the s5 row pending (a stage not run cannot
         # pass).
+        s5_pass: bool | None = None
         if full_prices is not None and full_spread_returns is not None:
             s5 = self.run_s5(
                 trial_id,
@@ -339,23 +369,31 @@ class GauntletRunner:
             )
             self.record(trial_id, s5); results.append(s5)
             self.ledger.update_var_stat("registry_depth")
+            s5_pass = s5.status == "pass"
             cls = s5.detail["survivor_class"]
             self.ledger.decide(trial_id, "survivor", cls)
             card_id = self._maybe_mint_card(trial_id, "survivor", cls)
             return {"trial_id": trial_id, "verdict": "survivor",
                     "survivor_class": cls, "stages": results,
-                    "killed_at": None, "s5": s5.detail, "card_id": card_id}
+                    "killed_at": None, "s5": s5.detail, "card_id": card_id,
+                    "s4_score": {k: s4.detail.get(k) for k in
+                                 ("sr_ann", "t_net", "min_trl", "T", "tau_cal",
+                                  "s4_bar_met")}}
 
         self.ledger.decide(trial_id, "survivor", "on-watch-amber")
         card_id = self._maybe_mint_card(trial_id, "survivor", "on-watch-amber")
         return {"trial_id": trial_id, "verdict": "survivor",
                 "survivor_class": "on-watch-amber", "stages": results,
-                "killed_at": None, "card_id": card_id}
+                "killed_at": None, "card_id": card_id,
+                "s4_score": {k: s4.detail.get(k) for k in
+                             ("sr_ann", "t_net", "min_trl", "T", "tau_cal",
+                              "s4_bar_met")}}
 
     def _maybe_mint_card(self, trial_id: str, verdict: str, survivor_class: str) -> str | None:
-        """v4.1 mechanics 1: mint a card on validated-green survivors only,
-        behind the cards_v4_1 flag. Killed/amber mint nothing. Owner handle:
-        the trial's discoverer; operator sweeps use 'operator'. Returns the
+        """v4.2 mechanics: mint a card on EVERY S0-S2 passer (bronze+),
+        behind the cards_v4_1 flag. Killed trials (S0-S2 failures,
+        survivor_class='none') mint nothing. Owner handle: the trial's
+        discoverer; operator sweeps use 'operator'. Returns the
         read-back-verified card id or None."""
         if self.card_minter is None:
             return None

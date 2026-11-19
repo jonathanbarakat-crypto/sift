@@ -352,4 +352,11 @@ def test_diagram_rejects_out_of_range_marker():
 
 def test_unknown_tier_refused():
     with pytest.raises(FaceError):
-        render_face_png(_face_dict(tier="platinum"), _pairs_diagram())
+        render_face_png(_face_dict(tier="diamond"), _pairs_diagram())
+
+
+def test_platinum_tier_renders():
+    # v4.2: platinum is a first-class tier on the face
+    out = render_face_png(_face_dict(tier="platinum"), _pairs_diagram())
+    png = out[0] if isinstance(out, tuple) else out
+    assert png.startswith(b"\x89PNG")

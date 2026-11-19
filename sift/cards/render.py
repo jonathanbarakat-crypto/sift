@@ -72,9 +72,10 @@ PALETTE = {
     "ARTBG":   "#0A0D14",
 }
 
-# tier -> frame/title-band accent (gold identity per mechanics 4; silver and
-# bronze keep the same layout with their accent)
+# tier -> frame/title-band accent (gold identity per mechanics 4; silver,
+# bronze and v4.2 platinum keep the same layout with their accent)
 TIER_ACCENTS = {
+    "platinum": {"accent": "#BFE8FF",       "dk": "#7FB8D9",           "bg": "#16222E"},
     "gold":   {"accent": PALETTE["GOLD"], "dk": PALETTE["GOLD_DK"], "bg": PALETTE["GOLD_BG"]},
     "silver": {"accent": "#C7CEDC",       "dk": "#8A93A6",           "bg": "#262B36"},
     "bronze": {"accent": "#D08A5C",       "dk": "#8C5A2B",           "bg": "#2E2318"},

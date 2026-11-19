@@ -197,10 +197,10 @@ GLOSSARY: dict[str, str] = {
         "luck. A survival fact."
     ),
     "tier": (
-        "A rarity label (bronze / silver / gold) set by the pre-registered "
-        "gauntlet stats at mint, and nothing else. It can move down on "
-        "re-evaluation, and up only when pre-registered live-window rules "
-        "are met — never by payment or chance."
+        "A rarity label (bronze / silver / gold / platinum) set by the "
+        "pre-registered gauntlet stats at mint, and nothing else. It can "
+        "move down on re-evaluation, and up only when pre-registered "
+        "live-window rules are met — never by payment or chance."
     ),
     "health": (
         "How the pattern is doing in the trailing live window compared with "

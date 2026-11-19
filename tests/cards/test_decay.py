@@ -72,19 +72,26 @@ def notifier(cards, tmp_path):
 
 
 def _mint_with_stats(cards, ledger, handle="alice", trial="t1",
-                     dsr=0.995, t_net=4.5, p=0.005):
+                     dsr=0.995, t_net=4.5, p=0.005, s4_pass=True,
+                     s5_pass=True):
     """Register a trial with stage rows so default_re_evaluator can read
-    them, then mint a card at the given (mint-time) stats."""
+    them, then mint a card at the given (mint-time) stats. v4.2: the s4/s5
+    stage rows are recorded too, so the full evidence vector reaches
+    tier_from_stats (s4_pass/s5_pass default True -> gold/platinum bars)."""
     t = ledger.register("pairs", "free_5y_top1k", {"cfg": trial}, "v1",
                         discoverer_handle=handle)
     ledger.record_stage(t.trial_id, "s2", "pass", p_value=p)
     ledger.record_stage(t.trial_id, "s3", "pass", dsr=dsr)
-    ledger.record_stage(t.trial_id, "s5", "pass", statistic=t_net)
+    ledger.record_stage(t.trial_id, "s4", "pass" if s4_pass else "fail",
+                        statistic=1.5)
+    ledger.record_stage(t.trial_id, "s5", "pass" if s5_pass else "fail",
+                        statistic=t_net)
     card = cards.mint(
         trial_id=t.trial_id, family=t.family, scope_id=t.scope_id,
         config_hash=t.config_hash, data_vintage_hash=t.data_vintage_hash,
         survivor_class="validated-green", owner_handle=handle,
         dsr=dsr, t_net_full=t_net, p_perm=p,
+        s4_pass=s4_pass, s5_pass=s5_pass,
     )
     return card.card_id, t.trial_id
 
@@ -99,7 +106,7 @@ def _re_evaluator_returning(tier):
 def test_pass_downgrades_card_row_ledger_event_and_notifies(ledger, cards, notifier):
     # mint gold (dsr .995 / t 4.5 / p .005), then the registry's fresh
     # evidence re-evaluates to silver
-    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     assert cards.get_card(card_id).tier == "gold"
     notifier.set_pref(card_id, "alice", enabled=True)
 
@@ -162,26 +169,47 @@ def test_unchanged_tier_is_a_no_op(ledger, cards, notifier):
 
 
 def test_default_re_evaluator_uses_preregistered_ledger_stats(ledger, cards, notifier):
-    """The default re-evaluator re-derives the tier from the card's own S2/S3/S5
-    stage rows — a static function of gauntlet strength, not of payment."""
-    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    """The default re-evaluator re-derives the tier from the card's own S2/S4/S5
+    stage rows — a static function of RAW gauntlet strength, not of payment.
+    v4.2 §3 (#170): the S3 DSR row is NOT an input (N-independence) — s4 fail
+    caps the re-evaluation below gold/platinum."""
+    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False, s4_pass=False)
     card = cards.get_card(card_id)
-    assert default_re_evaluator(card, ledger) == "gold"
-    # weaken the recorded S5 stat -> re-evaluation proposes silver -> downgrade
+    # raw stats: s4 fail + s5 fail + |t| 4.5 + p 0.005 -> silver (|t|>=3, p<=0.05)
+    assert card.tier == "silver"                    # s4 fail caps mint at silver
+    assert default_re_evaluator(card, ledger) == "silver"
+    # restore the S4 row to pass -> raw vector reaches gold (p 0.005, |t| 4.5)
     ledger.con.execute(
-        "UPDATE stage_result SET statistic=3.1 WHERE trial_id=? AND stage='s5'",
+        "UPDATE stage_result SET status='pass' WHERE trial_id=? AND stage='s4'",
         (trial_id,),
     )
     ledger.con.commit()
-    assert default_re_evaluator(cards.get_card(card_id), ledger) == "silver"
+    assert default_re_evaluator(cards.get_card(card_id), ledger) == "gold"
+    # weaken the recorded S5 stat AND fail S5, and drop p_perm above 0.05 ->
+    # the raw vector drops to bronze (|t| 3.1 >= 3.0 but p 0.06 > 0.05);
+    # the S3 DSR row is deliberately also lowered and must NOT matter (#170)
+    ledger.con.execute(
+        "UPDATE stage_result SET statistic=3.1, status='fail' WHERE trial_id=? AND stage='s5'",
+        (trial_id,),
+    )
+    ledger.con.execute(
+        "UPDATE stage_result SET p_value=0.06 WHERE trial_id=? AND stage='s2'",
+        (trial_id,),
+    )
+    ledger.con.execute(
+        "UPDATE stage_result SET dsr=0.10 WHERE trial_id=? AND stage='s3'",
+        (trial_id,),
+    )
+    ledger.con.commit()
+    assert default_re_evaluator(cards.get_card(card_id), ledger) == "bronze"
     job = RegistryDecayJob(cards, ledger, notifier=notifier)   # default evaluator
     (r,) = job.run_pass(now=1000.0)
-    assert r.downgraded and r.to_tier == "silver"
-    assert cards.get_card(card_id).tier == "silver"
+    assert r.downgraded and r.to_tier == "bronze"
+    assert cards.get_card(card_id).tier == "bronze"
 
 
 def test_full_downgrade_ladder_gold_to_bronze(ledger, cards, notifier):
-    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     job = RegistryDecayJob(cards, ledger, notifier=notifier,
                            re_evaluator=_re_evaluator_returning("silver"))
     job.run_pass(now=1000.0)
@@ -219,7 +247,7 @@ def test_public_explanation_text_is_public_explained_and_banned_phrase_free():
 
 
 def test_amber_transition_logged_in_ledger_and_visible_on_card(ledger, cards, notifier):
-    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     job = RegistryDecayJob(cards, ledger, notifier=notifier,
                            re_evaluator=_re_evaluator_returning("bronze"))
     (r,) = job.run_pass(now=1000.0)
@@ -237,7 +265,7 @@ def test_amber_transition_logged_in_ledger_and_visible_on_card(ledger, cards, no
 # -- notification hook respects opt-in + caps -------------------------------------------------
 
 def test_decay_notification_respects_opt_in(ledger, cards, notifier):
-    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     # NOT opted in -> downgrade still happens, but no notification enqueued
     job = RegistryDecayJob(cards, ledger, notifier=notifier,
                            re_evaluator=_re_evaluator_returning("silver"))
@@ -250,7 +278,7 @@ def test_decay_notification_respects_opt_in(ledger, cards, notifier):
 
 
 def test_decay_notification_lifecycle_capped_at_one_per_week(ledger, cards, notifier):
-    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     notifier.set_pref(card_id, "alice", enabled=True)
     job = RegistryDecayJob(cards, ledger, notifier=notifier,
                            re_evaluator=_re_evaluator_returning("silver"))
@@ -269,13 +297,14 @@ def test_decay_notification_lifecycle_capped_at_one_per_week(ledger, cards, noti
 # -- ghost cards re-evaluated too --------------------------------------------------------------
 
 def test_ghost_cards_are_re_evaluated(ledger, cards, notifier):
-    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, trial_id = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     t = ledger.get(trial_id)
     ghost = cards.mint(
         trial_id=t.trial_id, family=t.family, scope_id=t.scope_id,
         config_hash=t.config_hash, data_vintage_hash=t.data_vintage_hash,
         survivor_class="validated-green", owner_handle="alice",
         dsr=0.995, t_net_full=4.5, p_perm=0.005,
+        s4_pass=True, s5_pass=False,
     )
     assert ghost.kind == "ghost"
     notifier.set_pref(ghost.card_id, "alice", enabled=True)
@@ -291,7 +320,7 @@ def test_ghost_cards_are_re_evaluated(ledger, cards, notifier):
 # -- flag off -----------------------------------------------------------------------------------
 
 def test_flag_off_raises_decay_error_and_leaves_data(ledger, cards, notifier):
-    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005)
+    card_id, _ = _mint_with_stats(cards, ledger, dsr=0.995, t_net=4.5, p=0.005, s5_pass=False)
     job = RegistryDecayJob(cards, ledger, notifier=notifier,
                            re_evaluator=_re_evaluator_returning("bronze"))
     flags.set_flag("cards_v4_1", False)
@@ -312,7 +341,7 @@ def test_flag_off_raises_decay_error_and_leaves_data(ledger, cards, notifier):
 def test_flag_off_env_kill_switch(ledger, cards, monkeypatch):
     monkeypatch.setenv("SIFT_CARDS_V4_1", "0")
     flags.reset()
-    card_id, _ = _mint_with_stats(cards, ledger)
+    card_id, _ = _mint_with_stats(cards, ledger, s5_pass=False)
     job = RegistryDecayJob(cards, ledger,
                            re_evaluator=_re_evaluator_returning("bronze"))
     with pytest.raises(DecayError):
@@ -325,7 +354,7 @@ def test_flag_off_env_kill_switch(ledger, cards, monkeypatch):
 # -- invalid re-evaluator output ------------------------------------------------------------------
 
 def test_invalid_tier_from_evaluator_raises(ledger, cards):
-    card_id, _ = _mint_with_stats(cards, ledger)
+    card_id, _ = _mint_with_stats(cards, ledger, s5_pass=False)
     job = RegistryDecayJob(cards, ledger, re_evaluator=lambda c, l: "diamond")
     with pytest.raises(DecayError):
         job.run_pass(now=1000.0)
