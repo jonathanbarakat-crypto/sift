@@ -69,7 +69,7 @@ All organic/community-led per v3 §9.3–9.4 and §9.8 (no paid social, no affil
 
 1. **Email + invite code** → account created with email as the only PII held (§5).
 2. **Guided first run (the activation event, §8.5):** the builder opens pre-loaded with one example pattern (e.g. a same-sector pair) at the free scope (top-1,000, 5-yr, labeled). The user presses run; the server-side gauntlet executes (S0–S4 at registered scope, S5 queued automatically — never opt-in, §12.6) and streams the ceremony (flicker → amber control segment → verdict) over SSE. **Activation = first completed mining run** (§8.5).
-3. **Honest-result framing is shown regardless of outcome:** if the example pattern is killed, the copy says so plainly ("killed at stage Sx — this is the product working"). The kill-rate badge (§6.1) is offered opt-in on the profile.
+3. **Honest-result framing is shown regardless of outcome:** if the example pattern is killed, the copy says so plainly ("killed at stage Sx — this is the product working"). The kill-rate (§6.1) is offered opt-in on the profile.
 4. **Week-1 cadence:** 3 suggested runs (their own hypotheses encouraged — hypothesis space sampling, §5.3), one email digest (free tier) summarizing their trials and the registry's cleared space. No pushy lifecycle emails; max 1 email/week in beta.
 5. **Support:** founder answers in the community channels (C1–C6); a shared "#beta" channel in our own Discord for the invitees.
 6. **ToS acceptance is part of account creation** (day one, not later): "not an investment / no resale value / no right to profit", non-transferable cards, no paid randomness (§10). The signup form carries the mandatory checkbox (the endpoint refuses without `tos_accepted`) and the plain onboarding statement ("SIFT shows which relationships in your research held up under stress. It never tells you what to buy or sell; nothing here is advice. You make the calls — we make the evidence legible.") shown at signup and on the first card; the same copy is served by `GET /api/onboarding` and built only in `sift/cards/copy.py` (banned-phrase fail-closed).
@@ -99,7 +99,7 @@ All events land in one append-only event store keyed by an opaque `user_id` (ran
 | `beta_invited` / `beta_accepted` (invite code) | founder invite flow | invite-only provenance; wave tracking |
 | `account_created` | auth service | day-0 anchor per user |
 | `trial_registered` {trial_id, user_id, scope_record, provenance=user_initiated, config_hash, registered_at} | registry (already exists server-side, FL pattern) | **the "active" metric**; §5.3 provenance split |
-| `trial_verdict` {trial_id, verdict, survivor_class, stage} | registry | secondary metrics, kill-rate badge |
+| `trial_verdict` {trial_id, verdict, survivor_class, stage} | registry | secondary metrics |
 | `connection_saved` {connection_id} | app | aha metric (§8.5) |
 | `card_minted` / `card_discarded` / `ghost_promoted` / `share_grant` (card-layer events, flag `cards_v4_1` ON) | card layer | §7 secondary metrics |
 | `session_login` | auth | secondary login metric (not gated) |

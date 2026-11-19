@@ -1176,35 +1176,6 @@
       "description": "Mints easy cards and immediately tries to convert shares into vault slots; velocity-flag target."
     },
     {
-      "id": "badge-farmer",
-      "name": "Badge-farmer",
-      "archetype": "farmer",
-      "sophistication": 3,
-      "information_sources": [
-        "random",
-        "wsb"
-      ],
-      "strategy": "random",
-      "search_behavior": {
-        "query_patterns": [
-          "badge-eligible runs"
-        ],
-        "queries_per_session": 12,
-        "session_minutes": 20,
-        "ticks_per_session": 5
-      },
-      "minting_goal": {
-        "cards_per_week": 8
-      },
-      "sharing_behavior": {
-        "posts_per_week": 5,
-        "verifiable": true
-      },
-      "abuse_flags": [],
-      "deterministic_seed": 660504535698111696,
-      "description": "Optimizes runs for badge-shaped activity rather than discovery quality."
-    },
-    {
       "id": "copycat-farmer",
       "name": "Copycat farmer",
       "archetype": "farmer",

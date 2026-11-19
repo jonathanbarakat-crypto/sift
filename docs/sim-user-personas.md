@@ -79,7 +79,7 @@ archetypes, then extended across the behavior space:
 | `list_pairer` | 6 | **Top-of-list pairer** + screener/gainers/losers/active/upgrade variants |
 | `verifier` | 8 | **Substack verifier** + weekly/portfolio/free-picks/Discord/Telegram/YouTube/pairs variants |
 | `miner` | 6 | **Influencer miner** + X/FinTok/podcast/streamer/pair variants |
-| `farmer` | 6 | **Card farmer** + easy-mint/ghost/share-slot/badge/copycat variants |
+| `farmer` | 6 | **Card farmer** + easy-mint/ghost/share-slot/copycat variants |
 | `power_user` | 8 | systematic quant, lead-lag hunter, multifactor, PIT-aware, backtest-first, specialist, re-test, anchored-run |
 | `casual` | 10 | weekend, lunch-break, occasional, news-reader, paper-trader, retirement, friend-referred, mobile-only, dormant, digest |
 | `abusive` | 12 | day-zero sharer, burner, device farm, IP ring, VPN hopper, velocity hammer, cap buster, duplicate re-sharer, unverifiable poster, screenshot poster, honeypot prober, coordinated share farm |
