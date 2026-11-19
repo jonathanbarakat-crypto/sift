@@ -160,7 +160,14 @@ def window_t_hurdle(t_net_full_bar: float, window_bars: int) -> float:
 def default_re_evaluator(card: Card, ledger: Ledger) -> str:
     """Re-evaluate a card's tier from its pre-registered RAW ledger stats.
     Pure read of stage rows; returns one of CARD_TIERS (v4.2 incl. platinum).
-    DSR is deliberately NOT an input (N-independence, #170)."""
+    DSR is deliberately NOT an input (N-independence, #170).
+
+    soundness #10 note: the stage rows are append-only and never change, so
+    this fallback re-derives the MINT tier and can never downgrade on its own.
+    The engine wires `live_re_evaluator(...)` (below) as the production
+    re_evaluator so the registry pass re-evaluates against FRESH live
+    evidence; this default remains the documented fail-safe fallback when no
+    live series is wired (no-op, never a fabricated change)."""
     s2 = ledger.stage(card.trial_id, "s2")
     s4 = ledger.stage(card.trial_id, "s4")
     s5 = ledger.stage(card.trial_id, "s5")
@@ -169,6 +176,78 @@ def default_re_evaluator(card: Card, ledger: Ledger) -> str:
         t_net_full=s5["statistic"], p_perm=s2["p_value"],
         s4_pass=s4["status"] == "pass", s5_pass=s5["status"] == "pass",
     )
+
+
+def live_re_evaluator(live_returns_fn, *, seed: int = 0,
+                      s2_B: int = gcfg.S2_B) -> Callable[[Card, Ledger], str]:
+    """Build a re_evaluator that re-derives a card's tier from FRESH live
+    evidence (soundness #10): the trailing WINDOW_BARS live window of the
+    card's post-mint return series, computed exactly as the mint-time
+    gauntlet computes them (S2 block-permutation p + window t via
+    `_window_stats`), mapped through the SAME pre-registered raw bars
+    (`meets_tier_bar`) — platinum/gold/silver/bronze, fail-closed on
+    missing stats.
+
+    `live_returns_fn(card) -> np.ndarray | None` supplies the card's
+    post-mint live net-return series (server-side; None -> the evaluator
+    falls back to the static ledger stats via default_re_evaluator, i.e.
+    no-op — never a fabricated tier).
+
+    The proposal is a TIER PROPOSAL only: a LOWER proposal downgrades
+    through the amber path; a HIGHER one still needs the pre-registered
+    live-window upgrade rules (live_window_evaluator) — this factory does
+    not relax them.
+    """
+    def _re(card: Card, ledger: Ledger) -> str:
+        rets = live_returns_fn(card) if live_returns_fn is not None else None
+        if rets is None:
+            return default_re_evaluator(card, ledger)
+        r = np.asarray(rets, float)
+        r = r[np.isfinite(r)]
+        if r.size < 2:
+            return default_re_evaluator(card, ledger)
+        n, v = ledger.stratum_stats(card.scope_id)
+        end = int(r.size)
+        start = max(0, end - WINDOW_BARS)
+        ws = _window_stats(r, start=start, end=end,
+                           n_stratum=n, v_stratum=v, seed=seed, s2_B=s2_B)
+        # map the window evidence through the pre-registered bars, highest
+        # tier whose bar the window meets (fail-closed on None)
+        if meets_tier_bar(ws, "platinum"):
+            return "platinum"
+        if meets_tier_bar(ws, "gold"):
+            return "gold"
+        if meets_tier_bar(ws, "silver"):
+            return "silver"
+        return "bronze"
+    return _re
+
+
+def default_live_evaluator(live_returns_fn, *, n_stratum: int = 1,
+                           v_stratum: float = 0.0, seed: int = 0,
+                           s2_B: int = gcfg.S2_B) -> Callable[[Card], LiveWindowEvidence]:
+    """Build the live_window_evaluator over a server-supplied live series
+    (soundness #10): `live_returns_fn(card) -> np.ndarray | None` gives the
+    card's post-mint live net-return series; `now_bar` is its current length.
+    With no series for a card the evidence is INELIGIBLE (fail closed —
+    upgrades refused), never fabricated."""
+    def _ev(card: Card) -> LiveWindowEvidence:
+        rets = live_returns_fn(card) if live_returns_fn is not None else None
+        if rets is None:
+            r = np.zeros(0)
+        else:
+            r = np.asarray(rets, float)
+            r = r[np.isfinite(r)]
+        return live_window_evaluator(
+            card,
+            live_returns=r,
+            now_bar=int(r.size),
+            n_stratum=n_stratum,
+            v_stratum=v_stratum,
+            seed=seed,
+            s2_B=s2_B,
+        )
+    return _ev
 
 
 # ---------------------------------------------------------------------------
@@ -716,8 +795,10 @@ __all__ = [
     "LiveWindowEvidence",
     "RegistryDecayJob",
     "WindowStats",
+    "default_live_evaluator",
     "default_re_evaluator",
     "health_ratio",
+    "live_re_evaluator",
     "live_window_evaluator",
     "meets_tier_bar",
     "public_explanation",

@@ -40,6 +40,12 @@ Design (v4.1 mechanics 1, behind the `cards_v4_1` flag):
 - Read-back discipline (hard rule): after every mint, the card is read
   back from the registry (`get_card`) before success is claimed; the
   minter returns the read-back row, not just the id.
+- The MINT-TIME HOLDOUT BASELINE (frozen-holdout t_net / annualized Sharpe /
+  holdout bars) is persisted on the card row at mint (soundness #10,
+  hermes-tasks #181): `baseline_t_net` / `baseline_sr_ann` /
+  `baseline_holdout_bars`, NULL when the mint run had no holdout — never
+  fabricated. Display/health only; never an input to tier, decay, or
+  upgrade decisions.
 
 Storage: its own SQLite file (like the trial ledger) with an append-only
 card table + a ghost-counter table. Never destroyed, never randomized
@@ -89,6 +95,14 @@ CREATE TABLE IF NOT EXISTS card (
     mint_dsr           REAL,                      -- DSR at mint-time stratum N
     mint_sr_star       REAL,                      -- expected max Sharpe SR* at mint-time N
     mint_n_stratum     INTEGER,                   -- stratum N at mint
+    -- soundness #10 (hermes-tasks #181): the MINT-TIME HOLDOUT BASELINE,
+    -- persisted per-card at mint (the frozen-holdout live-baseline). All
+    -- three are NULL when the run had no holdout (holdout_bars=0) — a
+    -- missing baseline is recorded as NULL, never fabricated. Display/health
+    -- only; never an input to tier, decay, or upgrade decisions.
+    baseline_t_net        REAL,                   -- frozen-holdout full-window t_net
+    baseline_sr_ann       REAL,                   -- frozen-holdout annualized Sharpe
+    baseline_holdout_bars INTEGER,                -- holdout length in bars at mint
     UNIQUE (spec_hash, kind, ghost_no)
 );
 CREATE INDEX IF NOT EXISTS idx_card_spec ON card(spec_hash);
@@ -157,6 +171,12 @@ class Card:
     mint_dsr: float | None = None
     mint_sr_star: float | None = None
     mint_n_stratum: int | None = None
+    # soundness #10: the mint-time holdout baseline (frozen-holdout t_net /
+    # annualized Sharpe / holdout bars), persisted at mint. None when the
+    # mint run had no holdout — never fabricated. Display/health only.
+    baseline_t_net: float | None = None
+    baseline_sr_ann: float | None = None
+    baseline_holdout_bars: int | None = None
 
 
 def tier_from_stats(dsr: float | None, t_net_full: float | None,
@@ -228,6 +248,13 @@ class CardRegistry:
                           ("mint_n_stratum", "INTEGER")):
             if col not in cols:
                 self.con.execute(f"ALTER TABLE card ADD COLUMN {col} {decl}")
+        # soundness #10 migration: mint-time holdout baseline columns
+        # (additive, idempotent — same pattern as minted_bar above)
+        for col, decl in (("baseline_t_net", "REAL"),
+                          ("baseline_sr_ann", "REAL"),
+                          ("baseline_holdout_bars", "INTEGER")):
+            if col not in cols:
+                self.con.execute(f"ALTER TABLE card ADD COLUMN {col} {decl}")
         self.con.commit()
         self._secret = secret if secret is not None else _default_secret()
 
@@ -258,7 +285,10 @@ class CardRegistry:
              minted_bar: int = 0, s4_pass: bool = False,
              s5_pass: bool = False,
              sr_star: float | None = None,
-             n_stratum: int | None = None) -> Card:
+             n_stratum: int | None = None,
+             baseline_t_net: float | None = None,
+             baseline_sr_ann: float | None = None,
+             baseline_holdout_bars: int | None = None) -> Card:
         """Mint a card for a gauntlet survivor. v4.2 §2-§3 (owner decision
         2026-11-18):
 
@@ -280,6 +310,11 @@ class CardRegistry:
           pre-registered live-window upgrade rules (sift/cards/decay.py);
         - `s4_pass` / `s5_pass` carry the S4 score bar and the S5 full-depth
           pass into tier_from_stats (the raw evidence vector, v4.2 §3);
+        - soundness #10: `baseline_t_net` / `baseline_sr_ann` /
+          `baseline_holdout_bars` persist the MINT-TIME HOLDOUT BASELINE (the
+          frozen-holdout live-baseline) on the card row. None when the mint
+          run had no holdout (holdout_bars=0) — never fabricated. Display /
+          health only; never an input to tier, decay, or upgrade.
         - read-back: the returned Card is re-read from the DB (hard rule:
           never claim success without read-back).
         """
@@ -320,12 +355,14 @@ class CardRegistry:
                 "INSERT INTO card (card_id, canonical_spec, spec_hash, trial_id,"
                 " family, scope_id, survivor_class, kind, ghost_no, tier,"
                 " tier_updated_at, minted_bar, owner_handle, minted_at,"
-                " mint_dsr, mint_sr_star, mint_n_stratum)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " mint_dsr, mint_sr_star, mint_n_stratum,"
+                " baseline_t_net, baseline_sr_ann, baseline_holdout_bars)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (card_id + f":g{no}", canonical_spec_json(spec), sh, trial_id,
                  family, scope_id, survivor_class, "ghost", no, tier,
                  now, int(minted_bar), owner_handle, now,
-                 dsr, sr_star, n_stratum),
+                 dsr, sr_star, n_stratum,
+                 baseline_t_net, baseline_sr_ann, baseline_holdout_bars),
             )
             self.con.commit()
             return self.get_card(card_id + f":g{no}")   # read-back
@@ -334,12 +371,14 @@ class CardRegistry:
             "INSERT INTO card (card_id, canonical_spec, spec_hash, trial_id,"
             " family, scope_id, survivor_class, kind, ghost_no, tier,"
             " tier_updated_at, minted_bar, owner_handle, minted_at,"
-            " mint_dsr, mint_sr_star, mint_n_stratum)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " mint_dsr, mint_sr_star, mint_n_stratum,"
+            " baseline_t_net, baseline_sr_ann, baseline_holdout_bars)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (card_id, canonical_spec_json(spec), sh, trial_id,
              family, scope_id, survivor_class, "regular", None, tier,
              now, int(minted_bar), owner_handle, now,
-             dsr, sr_star, n_stratum),
+             dsr, sr_star, n_stratum,
+             baseline_t_net, baseline_sr_ann, baseline_holdout_bars),
         )
         self.con.commit()
         return self.get_card(card_id)                    # read-back
@@ -402,6 +441,10 @@ class CardRegistry:
             mint_dsr=row["mint_dsr"] if "mint_dsr" in keys else None,
             mint_sr_star=row["mint_sr_star"] if "mint_sr_star" in keys else None,
             mint_n_stratum=row["mint_n_stratum"] if "mint_n_stratum" in keys else None,
+            baseline_t_net=row["baseline_t_net"] if "baseline_t_net" in keys else None,
+            baseline_sr_ann=row["baseline_sr_ann"] if "baseline_sr_ann" in keys else None,
+            baseline_holdout_bars=(row["baseline_holdout_bars"]
+                                   if "baseline_holdout_bars" in keys else None),
         )
 
     # -- decay + non-transferability ------------------------------------------

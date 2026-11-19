@@ -252,11 +252,19 @@ card layer and defaults **ON for the beta cohort**:
   live-window bar per #170 — max one tier change per card per 90 days,
   seeded PCG64 re-evaluation, append-only `card_upgrade` ledger event with
   evidence), publicly explained, never by payment or chance; notification
-  hook
+  hook. The registry pass re-evaluates against FRESH live evidence via the
+  engine-wired `live_re_evaluator` / `default_live_evaluator` (soundness #10;
+  with no live series wired the layer is fail-closed: static no-op
+  re-evaluator, upgrades refused)
 - `sift/engine/first_run.py` — `--holdout-bars N` (default 252) locks the
   most recent N trading days out of S0–S4 discovery/walk-forward;
-  survivors are evaluated once on that frozen holdout (the mint-time
-  live-baseline stored on the card); the holdout is never used for tuning
+  survivors are evaluated once on that frozen holdout and the result is the
+  mint-time live-baseline, **persisted on the minted card** (card columns
+  `baseline_t_net` / `baseline_sr_ann` / `baseline_holdout_bars` + an
+  append-only `card_mint_baseline` ledger event; NULL when the run had no
+  holdout — never fabricated; soundness #10). With `--cards <path>` the
+  engine wires a `CardMinter` so survivors actually mint. The holdout is
+  never used for tuning
 - `sift/cards/metrics.py` — gate-1 metric hooks (instrumentation stubs over
   the server-side stores until the event-store measurement pipeline lands):
   D90 retention split card-holders vs non, ghost ratio, vault turnover,

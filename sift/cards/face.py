@@ -176,6 +176,22 @@ class CardFaceRenderer:
                 "s5_full_depth_t": s5.get("statistic"),
                 "s5_status": s5.get("status"),
             },
+            # soundness #10: the mint-time holdout baseline persisted on the
+            # card at mint (frozen-holdout live-baseline). None when the mint
+            # run had no holdout — never fabricated. Survival facts only; the
+            # note string is built in copy.py and scanned fail-closed there.
+            "mint_baseline": (
+                {
+                    "t_net": card.baseline_t_net,
+                    "sr_ann": card.baseline_sr_ann,
+                    "holdout_bars": card.baseline_holdout_bars,
+                    "note": card_copy.mint_baseline_note(),
+                }
+                if card.baseline_t_net is not None
+                or card.baseline_sr_ann is not None
+                or card.baseline_holdout_bars is not None
+                else None
+            ),
             # -- newcomer-friendly layer (all strings built ONLY in
             # sift/cards/copy.py and banned-phrase fail-closed there) ----
             "explainer": card_copy.face_explainer(

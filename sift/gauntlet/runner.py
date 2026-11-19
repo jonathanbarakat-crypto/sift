@@ -370,6 +370,7 @@ class GauntletRunner:
         full_prices: np.ndarray | None = None,
         full_spread_returns: np.ndarray | None = None,
         delist_idx: np.ndarray | None = None,
+        holdout_baseline: dict | None = None,
     ) -> dict:
         """Run S0-S4 in order, recording each stage row. Short-circuits on the
         first failing stage (later stages stay pending — a stage not run
@@ -377,7 +378,13 @@ class GauntletRunner:
         registry_depth full window) are supplied, S5 runs automatically after
         an S0-S4 pass and decides the survivor class (validated-green vs
         on-watch-amber). `delist_idx` masks post-delist bars everywhere.
-        Returns the verdict dict."""
+        Returns the verdict dict.
+
+        soundness #10: `holdout_baseline` (the frozen-holdout live-baseline:
+        t_net / sr_ann / holdout_bars / holdout_start_bar, computed ONCE by
+        the engine on the locked holdout) is passed to the card minter so it
+        is persisted on the minted card; it is also surfaced on the verdict
+        dict as `holdout_baseline`. None when the run had no holdout."""
         trial = self.ledger.get(trial_id)
         if fixture_x is None or fixture_y is None:
             raise ValueError("S0 requires fixture_x/fixture_y")
@@ -424,10 +431,12 @@ class GauntletRunner:
             cls = v42.survivor_class_for(
                 s4_pass=s4_bar_met, s3_pass=s3_pass, s5_pass=None)
             self.ledger.decide(trial_id, "survivor", cls)
-            card_id = self._maybe_mint_card(trial_id, "survivor", cls)
+            card_id = self._maybe_mint_card(trial_id, "survivor", cls,
+                                            holdout_baseline=holdout_baseline)
             return {"trial_id": trial_id, "verdict": "survivor",
                     "survivor_class": cls, "stages": results,
                     "killed_at": None, "card_id": card_id,
+                    "holdout_baseline": holdout_baseline,
                     "s4_score": {k: s4.detail.get(k) for k in
                                  ("sr_ann", "t_net", "min_trl", "T", "tau_cal",
                                   "s4_bar_met")}}
@@ -455,35 +464,45 @@ class GauntletRunner:
             s5_pass = s5.status == "pass"
             cls = s5.detail["survivor_class"]
             self.ledger.decide(trial_id, "survivor", cls)
-            card_id = self._maybe_mint_card(trial_id, "survivor", cls)
+            card_id = self._maybe_mint_card(trial_id, "survivor", cls,
+                                            holdout_baseline=holdout_baseline)
             return {"trial_id": trial_id, "verdict": "survivor",
                     "survivor_class": cls, "stages": results,
                     "killed_at": None, "s5": s5.detail, "card_id": card_id,
+                    "holdout_baseline": holdout_baseline,
                     "s4_score": {k: s4.detail.get(k) for k in
                                  ("sr_ann", "t_net", "min_trl", "T", "tau_cal",
                                   "s4_bar_met")}}
 
         self.ledger.decide(trial_id, "survivor", "on-watch-amber")
-        card_id = self._maybe_mint_card(trial_id, "survivor", "on-watch-amber")
+        card_id = self._maybe_mint_card(trial_id, "survivor", "on-watch-amber",
+                                        holdout_baseline=holdout_baseline)
         return {"trial_id": trial_id, "verdict": "survivor",
                 "survivor_class": "on-watch-amber", "stages": results,
                 "killed_at": None, "card_id": card_id,
+                "holdout_baseline": holdout_baseline,
                 "s4_score": {k: s4.detail.get(k) for k in
                              ("sr_ann", "t_net", "min_trl", "T", "tau_cal",
                               "s4_bar_met")}}
 
-    def _maybe_mint_card(self, trial_id: str, verdict: str, survivor_class: str) -> str | None:
+    def _maybe_mint_card(self, trial_id: str, verdict: str, survivor_class: str,
+                         holdout_baseline: dict | None = None) -> str | None:
         """v4.2 mechanics: mint a card on EVERY S0-S2 passer (bronze+),
         behind the cards_v4_1 flag. Killed trials (S0-S2 failures,
         survivor_class='none') mint nothing. Owner handle: the trial's
         discoverer; operator sweeps use 'operator'. Returns the
-        read-back-verified card id or None."""
+        read-back-verified card id or None.
+
+        soundness #10: `holdout_baseline` (frozen-holdout live-baseline) is
+        forwarded to the minter so it is persisted on the card."""
         if self.card_minter is None:
             return None
         handle = self.ledger.con.execute(
             "SELECT discoverer_handle FROM trial WHERE trial_id=?", (trial_id,)
         ).fetchone()["discoverer_handle"] or "operator"
-        return self.card_minter.maybe_mint(trial_id, handle, verdict, survivor_class)
+        return self.card_minter.maybe_mint(trial_id, handle, verdict,
+                                           survivor_class,
+                                           holdout_baseline=holdout_baseline)
 
     def _verdict(self, trial_id: str, results: list[StageResult], killed_at: str) -> dict:
         self.ledger.decide(trial_id, "killed", "none")
