@@ -49,7 +49,12 @@ Run it server-side only (v3 §12 — raw data never leaves the server, the
 warehouse is gitignored):
 
 ```
-python3 -m data.ingest_yf --warehouse data/warehouse --period 5y --seed-list sec --top 500 --sleep 1.5
+# --top is DEPRECATED: it cut the alphabetically sorted seed list, yielding an
+# A/B-only universe (hermes-tasks #182). Ingest the full seed (or a seeded-random
+# --max-ingest N cost cap); data/universe.py ranks by point-in-time avg dollar
+# volume, excludes warrants/units/rights, and applies quality floors
+# (min-bars / min avg dollar volume), then cuts top-N.
+python3 -m data.ingest_yf --warehouse data/warehouse --period 5y --seed-list sec --sleep 1.5
 python3 -m data.universe --warehouse data/warehouse --n 500
 python3 -m sift.engine.first_run --warehouse data/warehouse \
     --universe data/warehouse/universe/top500_pit_<asof>.parquet \

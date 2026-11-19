@@ -369,7 +369,10 @@ def test_universe_asof_excludes_future_bars(tmp_path):
 def test_universe_cli_writes_outputs_and_vintage(tmp_path):
     root = str(tmp_path / "wh")
     _seed_bars(root)
-    rc = universe.main(["--warehouse", root, "--n", "2", "--asof", "2026-10-31"])
+    # explicit escape hatch: these fixtures test ended-name flagging, not the
+    # pre-registered quality floors (DEAD has only 5 bars -> below the default)
+    rc = universe.main(["--warehouse", root, "--n", "2", "--asof", "2026-10-31",
+                        "--min-bars", "1", "--min-avg-dollar-volume", "0"])
     assert rc == 0
     top = wh.read_parquet(os.path.join(root, "universe", "top2_pit_2026-10-31.parquet"))
     assert len(top) == 2 and top["rank"].tolist() == [1, 2]
@@ -385,7 +388,9 @@ def test_universe_cli_writes_outputs_and_vintage(tmp_path):
 def test_universe_cli_ended_names_flagged(tmp_path):
     root = str(tmp_path / "wh")
     _seed_bars(root)
-    rc = universe.main(["--warehouse", root, "--n", "1000", "--asof", "2026-10-20"])
+    # explicit escape hatch: ended-name flagging fixtures (DEAD has 5 bars)
+    rc = universe.main(["--warehouse", root, "--n", "1000", "--asof", "2026-10-20",
+                        "--min-bars", "1", "--min-avg-dollar-volume", "0"])
     assert rc == 0
     ranked = wh.read_parquet(os.path.join(root, "universe", "ranked_2026-10-20.parquet"))
     dead = ranked[ranked["symbol"] == "DEAD.US"].iloc[0]

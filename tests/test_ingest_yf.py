@@ -399,3 +399,137 @@ def test_config_research_scope_tau_and_T():
     assert cfg.scope_T("research_5y_top500") == 1260      # fallback for arbitrary research ids
     # production scopes unchanged
     assert cfg.tau_cal("free_5y_top1k") == 3.5 and cfg.tau_cal("pro_full") == 3.0
+
+
+# --------------------------------------------------------------------------
+# universe-selection integrity (hermes-tasks #182 re-file): --top must NOT
+# truncate the seed list alphabetically; warrants/units/rights excluded from
+# the seed and the ranking; alphabet sanity guard on the candidate pool;
+# universe quality floors (min bars + avg dollar volume)
+# --------------------------------------------------------------------------
+from data.security_type import is_common_stock_symbol  # noqa: E402
+
+
+def test_security_type_classifier_warrant_unit_right_preferred():
+    excluded = ["AAC-WT", "AAC-WS", "FOO-W", "BAR-WU",   # warrants (dash form)
+                "XYZ-UN", "ABC-UT", "QQQ-U",              # units
+                "Q-RT", "Q-RS", "Q-R",                     # rights
+                "PREF-P", "PREF-PF", "PREF-PR",           # preferred
+                "AESPW", "APXTW",                          # trailing-W warrants (stem >= 3)
+                "AACG.WS"]                                 # SEC dot form
+    for s in excluded:
+        assert not is_common_stock_symbol(s), s
+    kept = ["AAPL", "MSFT", "BRK-B", "BRK.B", "BF-B", "CW", "GE"]
+    for s in kept:
+        assert is_common_stock_symbol(s), s
+
+
+def test_load_seed_list_file_excludes_non_common_types(tmp_path):
+    p = tmp_path / "seed.txt"
+    p.write_text("\n".join(["AAPL", "MSFT", "BRK.B", "AAC-WT", "FOO-UN", "Q-RT",
+                            "AESPW", "# comment", ""]) + "\n")
+    syms = ingest_yf.load_seed_list(f"file:{p}")
+    assert syms == ["AAPL", "BRK.B", "MSFT"]
+
+
+def _alpha_seed(n_per_letter: int = 4) -> list[str]:
+    """A seed list spanning the whole alphabet (n_per_letter symbols per letter)."""
+    return [f"{c}{c}{i}" for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" for i in range(n_per_letter)]
+
+
+def test_top_no_longer_truncates_seed_list(tmp_path, monkeypatch, capsys):
+    root = str(tmp_path / "wh")
+    seed = _alpha_seed()  # 104 symbols A-Z
+    monkeypatch.setattr(ingest_yf, "load_seed_list", lambda kind: list(seed))
+    f = FakeFetcher(frames={s: make_yf_frame("2026-01-01", 5) for s in seed})
+    _patch_fetcher(monkeypatch, f)
+    rc = ingest_yf.main(["--warehouse", root, "--seed-list", "sec", "--top", "5",
+                         "--period", "5y", "--sleep", "0",
+                         "--from", "2026-01-01", "--to", "2026-01-31"])
+    assert rc == 0
+    assert len(f.calls) == len(seed)                       # NO alphabetical truncation
+    assert [s for s, _, _ in f.calls] != sorted(seed)[:5]
+    vrec = wh.read_json(os.path.join(root, "vintage.json"))
+    assert vrec["scope_id"] == "research_5y"               # --top no longer labels the scope
+    assert "deprecat" in capsys.readouterr().out.lower()   # loud deprecation warning
+
+
+def test_max_ingest_cap_samples_unbiasedly_not_alphabetically(tmp_path, monkeypatch):
+    seed = _alpha_seed(8)  # 208 symbols A-Z
+    monkeypatch.setattr(ingest_yf, "load_seed_list", lambda kind: list(seed))
+    chosen_runs = []
+    for run in range(2):  # deterministic across runs (fixed default seed)
+        root = str(tmp_path / f"wh{run}")
+        f = FakeFetcher(frames={s: make_yf_frame("2026-01-01", 5) for s in seed})
+        _patch_fetcher(monkeypatch, f)
+        rc = ingest_yf.main(["--warehouse", root, "--seed-list", "sec", "--max-ingest", "10",
+                             "--period", "5y", "--sleep", "0",
+                             "--from", "2026-01-01", "--to", "2026-01-31"])
+        assert rc == 0
+        chosen = [s for s, _, _ in f.calls]
+        assert len(chosen) == 10
+        assert chosen != sorted(seed)[:10]                 # not the alphabetical head
+        assert len({s[0] for s in chosen}) >= 5            # spans the alphabet
+        chosen_runs.append(chosen)
+    assert chosen_runs[0] == chosen_runs[1]                # seeded -> reproducible
+
+
+def test_alphabet_sanity_guard_refuses_degenerate_pool(tmp_path, monkeypatch, capsys):
+    root = str(tmp_path / "wh")
+    degenerate = [f"A{i:03d}" for i in range(200)]         # all first-letter A
+    monkeypatch.setattr(ingest_yf, "load_seed_list", lambda kind: list(degenerate))
+    f = FakeFetcher(frames={s: make_yf_frame("2026-01-01", 5) for s in degenerate})
+    _patch_fetcher(monkeypatch, f)
+    rc = ingest_yf.main(["--warehouse", root, "--seed-list", "sec",
+                         "--period", "5y", "--sleep", "0",
+                         "--from", "2026-01-01", "--to", "2026-01-31"])
+    assert rc == 2                                          # refuse, don't silently bias
+    assert f.calls == []                                    # refused before any network call
+    assert not os.path.exists(os.path.join(root, "vintage.json"))
+    assert "degenerate" in capsys.readouterr().out.lower()
+
+    # control: an alphabet-spanning pool passes the guard
+    root2 = str(tmp_path / "wh2")
+    seed = _alpha_seed()
+    monkeypatch.setattr(ingest_yf, "load_seed_list", lambda kind: list(seed))
+    f2 = FakeFetcher(frames={s: make_yf_frame("2026-01-01", 5) for s in seed})
+    _patch_fetcher(monkeypatch, f2)
+    rc2 = ingest_yf.main(["--warehouse", root2, "--seed-list", "sec",
+                          "--period", "5y", "--sleep", "0",
+                          "--from", "2026-01-01", "--to", "2026-01-31"])
+    assert rc2 == 0 and len(f2.calls) == len(seed)
+
+
+def _seed_bars_with_floors(root):
+    eod = os.path.join(root, "eod", "US")
+    os.makedirs(eod, exist_ok=True)
+    frames = {
+        "AAPL": make_yf_frame("2026-10-01", 30, base_close=200.0, vol=5_000_000),  # ADV 1e9, 30 bars
+        "MICRO": make_yf_frame("2026-10-01", 30, base_close=2.0, vol=1_000),       # ADV 2e3
+        "ONEBAR": make_yf_frame("2026-10-30", 1, base_close=500.0, vol=1_000_000),  # 1 bar
+        "AESPW": make_yf_frame("2026-10-01", 30, base_close=1.0, vol=10_000_000),   # warrant, ADV 1e7
+    }
+    for sym, df in frames.items():
+        bars = history_to_bars_frame(df, sym, "US")
+        wh.write_parquet_atomic(bars, os.path.join(eod, f"{sym}.parquet"))
+
+
+def test_universe_quality_floors_and_warrant_exclusion(tmp_path):
+    root = str(tmp_path / "wh")
+    _seed_bars_with_floors(root)
+    rc = universe.main(["--warehouse", root, "--n", "10", "--asof", "2026-11-15"])
+    assert rc == 0
+    ranked = wh.read_parquet(os.path.join(root, "universe", "ranked_2026-11-15.parquet"))
+    # only AAPL survives: MICRO (ADV floor), ONEBAR (min-bars), AESPW (warrant) dropped
+    assert set(ranked["symbol"]) == {"AAPL.US"}
+    manifest = wh.read_json(os.path.join(root, "universe", "manifest.json"))
+    assert manifest["min_bars"] == universe.DEFAULT_MIN_BARS >= 20
+    assert manifest["min_avg_dollar_volume"] == universe.DEFAULT_MIN_AVG_DOLLAR_VOLUME
+    assert manifest["non_common_excluded"] == 1
+
+    # escape hatch: explicit low floors keep the low-ADV / 1-bar names (warrants still out)
+    rc = universe.main(["--warehouse", root, "--n", "10", "--asof", "2026-11-15",
+                        "--min-bars", "1", "--min-avg-dollar-volume", "0"])
+    assert rc == 0
+    ranked2 = wh.read_parquet(os.path.join(root, "universe", "ranked_2026-11-15.parquet"))
+    assert set(ranked2["symbol"]) == {"AAPL.US", "MICRO.US", "ONEBAR.US"}
