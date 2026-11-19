@@ -107,7 +107,9 @@ DECK_FAMILIES = ("pairs", "lead_lag")
 #   multiplicity-corrected over the deck stratum (N = all registered deck
 #   trials in scope across ALL users, kills included).
 S6_NET_SR_MIN = 0.0          # net SR > 0 after costs
-S6_PBO_MAX = 0.5             # PBO <= 0.5 at depth (CSCV, S=16)
+S6_PBO_MAX = 0.5             # PBO <= 0.5 at depth (CSCV, S=16, over the deck's own
+                             # component-returns matrix — COMPUTED via _deck_pbo;
+                             # None (undefined design) fails the check closed)
 S6_REBALANCE_CADENCE = 21    # fixed rebalance cadence in bars (monthly), pre-registered
 S6_FORMATION = 60            # formation window for the per-name hedge/z stats
 S6_STEP = 120                # walk-forward step (same convention as S4)

@@ -185,6 +185,26 @@ def test_cscv_pbo_bounds():
     # (soundness #2: the old <= 0 comparison returned 1 - PBO here).
 
 
+def test_cscv_pbo_direction_and_none():
+    """Soundness #2: cscv_pbo must return PBO (overfit -> HIGH), not 1-PBO,
+    and None (not 0.0) when the CSCV design is undefined (N<2 or T<S)."""
+    S = 16
+    # dominant config: best IS and OOS in every split -> true PBO = 0
+    dom = np.zeros((S * 8, 3))
+    dom[:, 0] = 0.01
+    dom[:, 1] = 0.0
+    dom[:, 2] = -0.01
+    assert stats.cscv_pbo(dom, S=S) == pytest.approx(0.0, abs=1e-9)
+    # mirror-overfit N=3 fixture: true PBO = 0.619 over 12,870 splits
+    A = np.concatenate([np.ones(8), -0.9 * np.ones(8)])
+    M = np.column_stack([A, -A, np.full(16, 0.001)])
+    assert stats.cscv_pbo(M, S=S) == pytest.approx(0.619, abs=0.02)
+    # undefined designs -> None (fail closed), never a fabricated 0.0
+    assert stats.cscv_pbo(np.zeros((256, 1)), S=S) is None      # N < 2
+    assert stats.cscv_pbo(np.zeros((8, 3)), S=S) is None         # T < S
+    assert stats.cscv_pbo(np.zeros(256), S=S) is None            # not 2D
+
+
 # -- config -------------------------------------------------------------------
 
 def test_tau_cal_scope_matched():
