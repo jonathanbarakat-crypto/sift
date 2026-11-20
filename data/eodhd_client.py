@@ -1,17 +1,21 @@
 """Minimal EODHD API client for the SIFT data pipeline.
 
-Free tier (https://eodhd.com/help/plans, probed 2026-11-15, sift-research
-docs/probe-plan.md S14/S15/S36):
-  * 20 API calls per day (+ 500 welcome calls on a new account)
-  * daily EOD history limited to the past 1 year
-  * live / real-time quotes included
-  * NO deep history, NO delisted=1 symbol lists, NO bulk endpoints
-    (those 403/limit on the free tier — expected, see DeepHistoryBlocked)
+Plans (https://eodhd.com/help/plans, verified 2026-11-20 against a paid
+"EOD Historical Data — All World" key):
+  * Free: 20 API calls/day (+ 500 welcome calls), past-1-year EOD only,
+    live/delayed quotes, NO deep history, NO delisted=1 symbol lists, NO bulk.
+  * Paid EOD Historical Data — All World ($19.99/mo): 100,000 calls/day,
+    30+ years of EOD history per ticker, delisted tickers + lists, bulk API.
+
+The plan is selected with ``plan=`` ("free" | "paid"); the call-budget hard
+cap defaults to the plan's daily limit so a run can never silently overspend.
+``deep_history=True`` probes that 403 on the free tier raise
+:class:`DeepHistoryBlocked` (expected there — never retried or bypassed).
 
 Token resolution order (the value is never printed, logged, or committed):
   1. explicit ``token`` argument / --api-token flag
   2. EODHD_TOKEN environment variable
-  3. ``pass eodhd/api-token`` (VM password store)
+  3. ``pass eodhd/api-token`` (host password store)
 
 Every request goes through :meth:`EodhdClient.get`, which increments a
 persisted call counter; ``max_calls`` is a hard guard that raises
@@ -29,6 +33,8 @@ import requests
 
 BASE_URL = "https://eodhd.com/api"
 FREE_TIER_DAILY_CALLS = 20
+PAID_EOD_DAILY_CALLS = 100_000   # EOD Historical Data — All World plan (verified 2026-11-20)
+PLAN_DAILY_CALLS = {"free": FREE_TIER_DAILY_CALLS, "paid": PAID_EOD_DAILY_CALLS}
 
 
 class EodhdError(RuntimeError):
@@ -93,18 +99,26 @@ class EodhdClient:
     def __init__(
         self,
         token: Optional[str] = None,
-        max_calls: int = FREE_TIER_DAILY_CALLS - 1,
+        max_calls: Optional[int] = None,
         state_file: Optional[str] = None,
         session: Optional[requests.Session] = None,
         timeout: int = 60,
+        plan: str = "free",
     ):
+        if plan not in PLAN_DAILY_CALLS:
+            raise ValueError(f"unknown plan {plan!r}; expected one of {sorted(PLAN_DAILY_CALLS)}")
+        self.plan = plan
+        plan_limit = PLAN_DAILY_CALLS[plan]
+        if max_calls is None:
+            # default: just under the plan's daily hard limit
+            max_calls = plan_limit - 1
         if max_calls < 0:
             raise ValueError("max_calls must be >= 0")
-        if max_calls >= FREE_TIER_DAILY_CALLS:
-            # free tier hard limit is 20/day; refuse to configure above it
+        if max_calls >= plan_limit:
+            # hard cap = the plan's daily limit; refuse to configure above it
             raise ValueError(
-                f"max_calls={max_calls} exceeds the EODHD free-tier hard limit of "
-                f"{FREE_TIER_DAILY_CALLS} calls/day; lower --max-calls"
+                f"max_calls={max_calls} exceeds the EODHD {plan}-plan hard limit of "
+                f"{plan_limit} calls/day; lower --max-calls"
             )
         self._token = token if token else resolve_token()
         self.max_calls = max_calls
@@ -157,7 +171,7 @@ class EodhdClient:
         if self.calls_remaining() <= 0:
             raise CallBudgetExceeded(
                 f"API call budget exhausted: {self.calls_made}/{self.max_calls} calls used "
-                f"(free tier hard limit {FREE_TIER_DAILY_CALLS}/day). "
+                f"({self.plan}-plan hard limit {PLAN_DAILY_CALLS[self.plan]}/day). "
                 "Re-run tomorrow or lower the workload; cached parquet files are reused "
                 "without spending calls."
             )

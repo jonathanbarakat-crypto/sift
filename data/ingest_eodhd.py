@@ -44,13 +44,13 @@ import pandas as pd
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from data.eodhd_client import (  # type: ignore
-        BASE_URL, FREE_TIER_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
+        BASE_URL, PLAN_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
         EodhdClient, EodhdError,
     )
     from data import warehouse as wh  # type: ignore
 else:
     from .eodhd_client import (
-        BASE_URL, FREE_TIER_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
+        BASE_URL, PLAN_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
         EodhdClient, EodhdError,
     )
     from . import warehouse as wh
@@ -70,9 +70,14 @@ def log(msg: str) -> None:
     print(f"[ingest_eodhd {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {msg}", flush=True)
 
 
-def default_window(today: date | None = None) -> tuple[str, str]:
-    """Free-tier window: (today - 365d, today). Deep history is not available."""
+def default_window(today: date | None = None, plan: str = "free") -> tuple[str, str]:
+    """Default ingest window. Free plan: (today - 365d, today) — deep history
+    is not available there. Paid plan: (2000-01-01, today) — the delisted
+    ticker list only covers names from January 2000, so earlier windows are
+    survivorship-biased by construction (S5 exists to kill exactly that)."""
     today = today or date.today()
+    if plan == "paid":
+        return ("2000-01-01", today.isoformat())
     return ((today - timedelta(days=FREE_TIER_HISTORY_DAYS)).isoformat(), today.isoformat())
 
 
@@ -226,12 +231,17 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--tickers", nargs="*", default=None,
                     help="specific symbols (without .US suffix), e.g. AAPL MSFT; "
                          "default: all active common stocks from the cached/fetched symbol list")
+    ap.add_argument("--plan", choices=["free", "paid"], default="free",
+                    help="EODHD plan the key is entitled to: 'free' = 20 calls/day, past-1y EOD "
+                         "only; 'paid' = EOD Historical Data — All World (100k calls/day, 30+ "
+                         "yrs, delisted lists, bulk). The call-budget hard cap follows the plan "
+                         "(default: paid -> 99999, free -> 19)")
+    ap.add_argument("--max-calls", type=int, default=None,
+                    help="hard API-call guard for this run (default: plan limit - 1)")
     ap.add_argument("--from", dest="from_date", default=None,
-                    help="window start YYYY-MM-DD (default: today-365d, the free-tier max)")
+                    help="window start YYYY-MM-DD (default: today-365d on free plan, "
+                         "2000-01-01 on paid plan — delisted coverage starts 2000)")
     ap.add_argument("--to", dest="to_date", default=None, help="window end (default: today)")
-    ap.add_argument("--max-calls", type=int, default=FREE_TIER_DAILY_CALLS - 1,
-                    help=f"hard API-call guard for this run (default {FREE_TIER_DAILY_CALLS - 1}, "
-                         f"under the free-tier limit of {FREE_TIER_DAILY_CALLS}/day)")
     ap.add_argument("--refresh-live", action="store_true",
                     help="also fetch the live real-time quote per ticker (1 extra call each)")
     ap.add_argument("--exchanges-list-only", action="store_true",
@@ -248,7 +258,7 @@ def main(argv: list | None = None) -> int:
     os.makedirs(root, exist_ok=True)
     from_date, to_date = args.from_date, args.to_date
     if not from_date or not to_date:
-        d_from, d_to = default_window()
+        d_from, d_to = default_window(plan=args.plan)
         from_date = from_date or d_from
         to_date = to_date or d_to
 
@@ -258,13 +268,15 @@ def main(argv: list | None = None) -> int:
             max_calls=args.max_calls,
             state_file=os.path.join(root, "state", "calls.json"),
             session=_SESSION,  # tests inject a FakeSession here
+            plan=args.plan,
         )
     except EodhdError as e:
         log(f"ERROR: {e}")
         return 2
 
     log(f"budget: {client.calls_made} already used today, max {client.max_calls} "
-        f"(free-tier hard limit {FREE_TIER_DAILY_CALLS}/day)")
+        f"({args.plan}-plan hard limit {PLAN_DAILY_CALLS[args.plan]}/day); "
+        f"window {from_date}..{to_date}")
 
     if args.probe_deep_history:
         # deliberate, single, explicit deep-history probe — expected to fail on free tier

@@ -15,8 +15,8 @@ import pytest
 
 from data import warehouse as wh
 from data.eodhd_client import (
-    FREE_TIER_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked, EodhdClient, EodhdError,
-    resolve_token,
+    FREE_TIER_DAILY_CALLS, PAID_EOD_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
+    EodhdClient, EodhdError, resolve_token,
 )
 from data import ingest_eodhd, universe
 
@@ -141,6 +141,35 @@ def test_max_calls_above_free_limit_rejected(tmp_path):
         make_client(tmp_path, FakeSession(), max_calls=FREE_TIER_DAILY_CALLS)
     with pytest.raises(ValueError):
         make_client(tmp_path, FakeSession(), max_calls=100)
+
+
+def test_plan_paid_raises_cap_and_default_budget(tmp_path):
+    sess = FakeSession()
+    # paid plan default budget = plan limit - 1, no explicit max_calls
+    c = EodhdClient(token="t", max_calls=None, state_file=str(tmp_path / "s" / "c.json"),
+                   session=sess, plan="paid")
+    assert c.max_calls == PAID_EOD_DAILY_CALLS - 1
+    # paid plan accepts budgets up to its own limit, still rejects above it
+    c2 = EodhdClient(token="t", max_calls=50_000, state_file=str(tmp_path / "s2" / "c.json"),
+                    session=FakeSession(), plan="paid")
+    assert c2.max_calls == 50_000
+    with pytest.raises(ValueError):
+        EodhdClient(token="t", max_calls=PAID_EOD_DAILY_CALLS,
+                    state_file=str(tmp_path / "s3" / "c.json"), session=FakeSession(), plan="paid")
+    # free plan still rejects paid-scale budgets
+    with pytest.raises(ValueError):
+        EodhdClient(token="t", max_calls=1000,
+                    state_file=str(tmp_path / "s4" / "c.json"), session=FakeSession(), plan="free")
+    with pytest.raises(ValueError):
+        EodhdClient(token="t", plan="enterprise")  # unknown plan
+
+
+def test_default_window_paid_starts_2000(tmp_path):
+    import datetime as dt
+    d_from, d_to = ingest_eodhd.default_window(today=dt.date(2026, 11, 20), plan="paid")
+    assert d_from == "2000-01-01" and d_to == "2026-11-20"
+    d_from, d_to = ingest_eodhd.default_window(today=dt.date(2026, 11, 20), plan="free")
+    assert d_from == "2025-11-20" and d_to == "2026-11-20"
 
 
 def test_budget_exceeded_raises_before_http(tmp_path):
