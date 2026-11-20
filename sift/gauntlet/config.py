@@ -13,8 +13,16 @@ BARS_PER_YEAR = 252
 
 # Scope table (design doc §1): (scope_id -> window length in bars)
 SCOPE_T = {
+    # Production free-tier scope (engine default, first_run.SCOPE_ID): the
+    # EODHD free tier serves ONLY the trailing ~1y of daily EOD (deep
+    # history 403s with DeepHistoryBlocked), and the engine's default
+    # window/holdout is 1y / 252 bars — so the honest bar count is ONE
+    # trading year (252), NOT the paid-plan full-history window. The paid
+    # EODHD window (2000-01-01..today) stays mapped to its own entries
+    # (pro_full / registry_depth, 4032) — issue #58 scoping decision.
+    "free_1y_top1k": BARS_PER_YEAR,  # 252 — trailing 1 year, ~252 daily bars
     "free_5y_top1k": 1260,     # trailing 5 years, ~1260 daily bars
-    "pro_full": 4032,          # full history 2010-01-01..2025-12-31
+    "pro_full": 4032,          # full history 2010-01-01..2025-12-31 (paid plan)
     "registry_depth": 4032,    # S5 validation scope (same data as pro_full)
     # RESEARCH-only scope (yfinance/Yahoo 5y feed, task t_bb9ebe51): same ~5y
     # bar count as free_5y_top1k but a DIFFERENT vendor with no delisted list
@@ -169,6 +177,13 @@ def s5_variant_grid_digest() -> str:
 
 
 def scope_T(scope_id: str) -> int:
+    """Window length in bars for a scope id.
+
+    Fails CLOSED: an unknown non-research id raises a ValueError naming
+    the missing id and listing the known ids — never a bare KeyError
+    (issue #58: ``scope_T("free_1y_top1k")`` used to KeyError because the
+    engine's default production scope id was missing from SCOPE_T).
+    """
     if scope_id in SCOPE_T:
         return SCOPE_T[scope_id]
     # research_* scopes carry their window in the id (research_5y_top500 -> 5y);
@@ -176,4 +191,8 @@ def scope_T(scope_id: str) -> int:
     # while the research_ prefix keeps it clearly non-production.
     if scope_id.startswith("research_"):
         return SCOPE_T["research_5y_top1k"]
-    return SCOPE_T[scope_id]
+    raise ValueError(
+        f"unknown scope id {scope_id!r}: not in SCOPE_T and not a research_* id; "
+        f"known scope ids: {sorted(SCOPE_T)}. Register the scope in "
+        f"gauntlet.config.SCOPE_T (or use a research_-prefixed id) before running."
+    )
