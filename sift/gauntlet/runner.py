@@ -33,6 +33,9 @@ class StageResult:
     dsr: float | None = None
     q_bh: float | None = None
     seed: int | None = None
+    n_eff: float | None = None      # sift #59: A.3 independent N used for DSR
+    rho_bar: float | None = None    # average inter-trial correlation behind n_eff
+    epoch: int | None = None        # frozen evaluation epoch of the admission N
     detail: dict = field(default_factory=dict)
 
 
@@ -40,7 +43,9 @@ class GauntletRunner:
     """Runs stages S0-S4 against a Ledger. Pure orchestration; all statistics
     live in sift.gauntlet.stats."""
 
-    def __init__(self, ledger: Ledger, seed: int = 0, card_minter=None):
+    def __init__(self, ledger: Ledger, seed: int = 0, card_minter=None,
+                 admission_epoch: int | None = None,
+                 panel_corr: np.ndarray | None = None):
         self.ledger = ledger
         self.seed = seed
         # v4.1: optional CardMinter (sift.cards.minting). When set, a
@@ -48,6 +53,97 @@ class GauntletRunner:
         # passer mints at bronze+; killed trials (S0-S2 failures) mint
         # nothing. None keeps v3 behavior.
         self.card_minter = card_minter
+        # sift #59: the pre-registered evaluation epoch whose FROZEN stratum
+        # denominator (stratum_epoch) the S3/S5 admission bar uses. None =
+        # latest frozen epoch if any, else live raw N (raw_fallback).
+        self.admission_epoch = admission_epoch
+        # sift #59: panel asset return-correlation matrix (N x N) used to
+        # derive the A.3 average inter-trial correlation rho_bar for a pairs
+        # stratum (shared-asset legs correlate). None -> rho_bar from the
+        # frozen epoch row if present, else 0.0 (raw fallback).
+        self.panel_corr = None if panel_corr is None else np.asarray(panel_corr, float)
+
+    # -- sift #59: correlation-adjusted independent N (DSR Appendix A.3) -----
+
+    def _admission_n_eff(self, scope_id: str, n_stratum: int) -> tuple[float, float, int | None, str, dict]:
+        """Resolve the DSR admission denominator for `scope_id` (sift #59).
+
+        Order of preference:
+        1. the FROZEN stratum_epoch row for the runner's admission epoch
+           (latest frozen epoch when admission_epoch is None) — identical
+           trials face an identical bar within the epoch;
+        2. recompute from the runner's panel_corr (A.3 average inter-trial
+           correlation; for a pairs stratum the shared-asset legs make two
+           pair-trials correlated, approximated by the mean off-diagonal of
+           the panel correlation matrix) WITHOUT freezing — the live count
+           is only a fallback when no epoch was pre-registered;
+        3. raw fallback: n_eff = n_stratum, rho_bar = 0.0, method
+           'raw_fallback' (recorded, never silent).
+
+        Production engines pre-register the epoch explicitly with
+        set_admission_epoch BEFORE running trials (path 1); paths 2-3 are
+        recorded fallbacks so the admission denominator is always auditable.
+
+        Returns (n_eff, rho_bar, epoch, method, detail). The RAW
+        n_stratum is returned separately by callers for audit.
+        """
+        frozen = self.ledger.stratum_epoch_stats(
+            scope_id, self.admission_epoch)
+        if frozen is not None:
+            return (frozen["n_eff"], frozen["rho_bar"], frozen["epoch"],
+                    frozen["method"], frozen["detail"])
+        if self.panel_corr is not None and self.panel_corr.shape[0] >= 2:
+            rho = stats.mean_inter_trial_correlation(self.panel_corr)
+            n_eff = stats.implied_independent_n(max(n_stratum, 1), rho)
+            detail = {"panel_assets": int(self.panel_corr.shape[0]),
+                      "source": "panel_corr_a3", "frozen": False}
+            return (n_eff, rho, self.admission_epoch, "a3_avg_corr", detail)
+        return (float(max(n_stratum, 1)), 0.0, self.admission_epoch,
+                "raw_fallback", {"reason": "no frozen epoch and no panel_corr"})
+
+    def set_admission_epoch(self, scope_id: str, epoch: int, *,
+                            panel_corr: np.ndarray | None = None,
+                            n_eff: float | None = None,
+                            rho_bar: float | None = None,
+                            m_trials: int | None = None,
+                            method: str | None = None,
+                            detail: dict | None = None) -> dict:
+        """Pre-register (freeze) the evaluation epoch's admission denominator
+        for `scope_id` (sift #59): compute n_eff from the A.3 average
+        inter-trial correlation (panel_corr, or an explicitly supplied
+        rho_bar/n_eff) and freeze it in stratum_epoch. Returns the frozen
+        row. Re-freezing the same epoch with different values raises —
+        the epoch bar is immutable once pre-registered.
+
+        `m_trials` is the pre-registered total M of dependent trials the
+        epoch will contain (e.g. the candidate-pair count known before the
+        run loop starts); default is the stratum's CURRENT registration
+        count. Freezing with the epoch's final M is what makes identical
+        trials face an identical bar: the counter is not read per-trial at
+        evaluation time."""
+        n_stratum, _ = self.ledger.stratum_stats(scope_id)
+        m = int(m_trials) if m_trials is not None else max(n_stratum, 1)
+        if n_eff is not None and rho_bar is not None:
+            neff, rho = float(n_eff), float(rho_bar)
+            meth = method or "a3_avg_corr"
+            det = dict(detail or {})
+        else:
+            corr = panel_corr if panel_corr is not None else self.panel_corr
+            if corr is None:
+                raise ValueError(
+                    "set_admission_epoch needs panel_corr (or explicit "
+                    "n_eff/rho_bar) to compute the A.3 denominator")
+            rho = stats.mean_inter_trial_correlation(corr)
+            neff = stats.implied_independent_n(m, rho)
+            meth = method or "a3_avg_corr"
+            det = dict(detail or {})
+            det.setdefault("panel_assets", int(np.asarray(corr).shape[0]))
+        det.setdefault("m_trials_preregistered", m)
+        self.ledger.freeze_stratum_epoch(
+            scope_id, epoch, n_eff=neff, rho_bar=rho, method=meth, detail=det,
+            n_eff_raw=m)
+        self.admission_epoch = epoch
+        return self.ledger.stratum_epoch_stats(scope_id, epoch)
 
     # -- individual stages -------------------------------------------------
     def run_s0(self, trial_id: str, x: np.ndarray, y: np.ndarray,
@@ -137,15 +233,25 @@ class GauntletRunner:
         violate PRDS, switch to BY — do not weaken the gate.
 
         v4.2 §2-§3 (#170): S3's DSR is the MINT-TIME ADMISSION GATE only. The
-        stage row records dsr, sr_star, n_stratum, v_stratum, q_bh as
-        "admission evidence at mint-time N" context — the card tier never
-        re-deflates by a later N."""
+        stage row records dsr, sr_star, n_stratum, n_eff, rho_bar, epoch,
+        v_stratum, q_bh as "admission evidence at mint-time N" context —
+        the card tier never re-deflates by a later N.
+
+        sift #59: the DSR benchmark N is the correlation-adjusted
+        INDEPENDENT trial count (DSR Appendix A.3), NOT the raw stratum
+        registration count — raw N overstates E[max SR] when trials share
+        assets/overlap windows. The denominator is read from the FROZEN
+        stratum_epoch row for the pre-registered admission epoch (see
+        _admission_n_eff), so identical trials face an identical bar within
+        an epoch; the raw n_stratum stays recorded for audit."""
         n_stratum, v_stratum = self.ledger.stratum_stats(scope_id)
+        n_eff, rho_bar, epoch, neff_method, neff_detail = self._admission_n_eff(
+            scope_id, n_stratum)
         # the candidate's own S4 statistic enters the stratum variance
         returns = getattr(self, "_last_s4_returns", None)
         skew, kurt = stats.skew_kurt(returns) if returns is not None else (0.0, 3.0)
         d = stats.dsr(sr_hat_per_bar, T, max(n_stratum, 1), v_stratum,
-                      skew=skew, kurt=kurt)
+                      skew=skew, kurt=kurt, n_eff=n_eff)
         # BH-FDR over the stratum's S2 p-values (family level, same scope)
         rows = self.ledger.con.execute(
             "SELECT sr.p_value FROM stage_result sr JOIN trial t"
@@ -166,7 +272,12 @@ class GauntletRunner:
                            statistic=d["dsr"], threshold=cfg.S3_DSR_MIN,
                            p_value=p_value, n_stratum=n_stratum,
                            v_stratum=d["v_stratum"], dsr=d["dsr"], q_bh=q_bh,
+                           n_eff=d["n_eff"], rho_bar=rho_bar, epoch=epoch,
                            detail={"sr_star": d["sr_star"], "sr_hat": d["sr_hat"],
+                                   "n_eff": d["n_eff"], "rho_bar": rho_bar,
+                                   "neff_method": neff_method,
+                                   "neff_detail": neff_detail,
+                                   "admission_epoch": epoch,
                                    "skew": skew, "kurt": kurt,
                                    "admission_label": (
                                        "admission evidence at mint-time N "
@@ -301,15 +412,19 @@ class GauntletRunner:
         pbo_grid_digest = cfg.s5_variant_grid_digest()
         # S3 at registry_depth with the stratum denominator from the ledger
         # (UNITS #1: sr_bar is per-bar; the ledger V is per-bar SR^2 —
-        # stats.dsr guards the units at mint time)
+        # stats.dsr guards the units at mint time). sift #59: the DSR
+        # benchmark N is the FROZEN epoch's A.3 independent count, not the
+        # live raw registration count.
         sr_ann = stats.sharpe_ratio(net) if net.size >= 2 else 0.0
         t_net = stats.t_stat_sharpe(net) if net.size >= 2 else 0.0
         T = int(net.size)
         sr_bar = sr_ann / math.sqrt(cfg.BARS_PER_YEAR) if net.size >= 2 else 0.0
         n_stratum, v_stratum = self.ledger.stratum_stats(scope_id)
+        n_eff, rho_bar, epoch, neff_method, neff_detail = self._admission_n_eff(
+            scope_id, n_stratum)
         skew, kurt = stats.skew_kurt(net) if net.size >= 4 else (0.0, 3.0)
         d = stats.dsr(sr_bar, max(T, 2), max(n_stratum, 1), v_stratum,
-                      skew=skew, kurt=kurt)
+                      skew=skew, kurt=kurt, n_eff=n_eff)
         verdict = s5stats.s5_full_depth_verdict(
             net,
             t_hurdle=cfg.S4_T_NET_FULL,          # 3.0 full-depth (never 3.5-hurdle-waived)
@@ -328,7 +443,11 @@ class GauntletRunner:
             statistic=t_net, threshold=cfg.S4_T_NET_FULL,
             p_value=p_perm, n_stratum=n_stratum,
             v_stratum=d["v_stratum"], dsr=d["dsr"], seed=seed,
+            n_eff=d["n_eff"], rho_bar=rho_bar, epoch=epoch,
             detail={"t_net": t_net, "sr_ann": sr_ann, "T": T,
+                    "n_eff": d["n_eff"], "rho_bar": rho_bar,
+                    "neff_method": neff_method, "neff_detail": neff_detail,
+                    "admission_epoch": epoch,
                     "min_trl": verdict["min_trl"], "pbo": pbo,
                     "pbo_n_configs": pbo_n_configs,
                     "pbo_grid_digest": pbo_grid_digest,
@@ -349,7 +468,8 @@ class GauntletRunner:
             statistic=res.statistic, threshold=res.threshold,
             p_value=res.p_value, n_stratum=res.n_stratum,
             v_stratum=res.v_stratum, dsr=res.dsr, q_bh=res.q_bh,
-            seed=res.seed,
+            seed=res.seed, n_eff=res.n_eff, rho_bar=res.rho_bar,
+            epoch=res.epoch,
         )
 
     def run_gauntlet(

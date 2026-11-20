@@ -94,7 +94,12 @@ CREATE TABLE IF NOT EXISTS card (
     -- input to decay/re-evaluation; the tier is raw-stats only):
     mint_dsr           REAL,                      -- DSR at mint-time stratum N
     mint_sr_star       REAL,                      -- expected max Sharpe SR* at mint-time N
-    mint_n_stratum     INTEGER,                   -- stratum N at mint
+    mint_n_stratum     INTEGER,                   -- RAW stratum N at mint (audit)
+    -- sift #59: the admission bar's denominator was the A.3 INDEPENDENT N,
+    -- not the raw count (context columns, additive migration like above):
+    mint_n_eff         REAL,                      -- A.3 implied independent N at mint
+    mint_rho_bar       REAL,                      -- avg inter-trial correlation behind it
+    mint_epoch         INTEGER,                   -- frozen evaluation epoch of the admission N
     -- soundness #10 (hermes-tasks #181): the MINT-TIME HOLDOUT BASELINE,
     -- persisted per-card at mint (the frozen-holdout live-baseline). All
     -- three are NULL when the run had no holdout (holdout_bars=0) — a
@@ -171,6 +176,11 @@ class Card:
     mint_dsr: float | None = None
     mint_sr_star: float | None = None
     mint_n_stratum: int | None = None
+    # sift #59: A.3 independent-N admission context (CONTEXT only — never an
+    # input to decay/re-evaluation):
+    mint_n_eff: float | None = None
+    mint_rho_bar: float | None = None
+    mint_epoch: int | None = None
     # soundness #10: the mint-time holdout baseline (frozen-holdout t_net /
     # annualized Sharpe / holdout bars), persisted at mint. None when the
     # mint run had no holdout — never fabricated. Display/health only.
@@ -248,6 +258,12 @@ class CardRegistry:
                           ("mint_n_stratum", "INTEGER")):
             if col not in cols:
                 self.con.execute(f"ALTER TABLE card ADD COLUMN {col} {decl}")
+        # sift #59 migration: A.3 independent-N admission context columns
+        # (additive, idempotent — same pattern as the v4.2 columns above)
+        for col, decl in (("mint_n_eff", "REAL"), ("mint_rho_bar", "REAL"),
+                          ("mint_epoch", "INTEGER")):
+            if col not in cols:
+                self.con.execute(f"ALTER TABLE card ADD COLUMN {col} {decl}")
         # soundness #10 migration: mint-time holdout baseline columns
         # (additive, idempotent — same pattern as minted_bar above)
         for col, decl in (("baseline_t_net", "REAL"),
@@ -286,6 +302,9 @@ class CardRegistry:
              s5_pass: bool = False,
              sr_star: float | None = None,
              n_stratum: int | None = None,
+             n_eff: float | None = None,
+             rho_bar: float | None = None,
+             epoch: int | None = None,
              baseline_t_net: float | None = None,
              baseline_sr_ann: float | None = None,
              baseline_holdout_bars: int | None = None) -> Card:
@@ -355,13 +374,14 @@ class CardRegistry:
                 "INSERT INTO card (card_id, canonical_spec, spec_hash, trial_id,"
                 " family, scope_id, survivor_class, kind, ghost_no, tier,"
                 " tier_updated_at, minted_bar, owner_handle, minted_at,"
-                " mint_dsr, mint_sr_star, mint_n_stratum,"
+                " mint_dsr, mint_sr_star, mint_n_stratum, mint_n_eff,"
+                " mint_rho_bar, mint_epoch,"
                 " baseline_t_net, baseline_sr_ann, baseline_holdout_bars)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (card_id + f":g{no}", canonical_spec_json(spec), sh, trial_id,
                  family, scope_id, survivor_class, "ghost", no, tier,
                  now, int(minted_bar), owner_handle, now,
-                 dsr, sr_star, n_stratum,
+                 dsr, sr_star, n_stratum, n_eff, rho_bar, epoch,
                  baseline_t_net, baseline_sr_ann, baseline_holdout_bars),
             )
             self.con.commit()
@@ -371,13 +391,14 @@ class CardRegistry:
             "INSERT INTO card (card_id, canonical_spec, spec_hash, trial_id,"
             " family, scope_id, survivor_class, kind, ghost_no, tier,"
             " tier_updated_at, minted_bar, owner_handle, minted_at,"
-            " mint_dsr, mint_sr_star, mint_n_stratum,"
+            " mint_dsr, mint_sr_star, mint_n_stratum, mint_n_eff,"
+            " mint_rho_bar, mint_epoch,"
             " baseline_t_net, baseline_sr_ann, baseline_holdout_bars)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (card_id, canonical_spec_json(spec), sh, trial_id,
              family, scope_id, survivor_class, "regular", None, tier,
              now, int(minted_bar), owner_handle, now,
-             dsr, sr_star, n_stratum,
+             dsr, sr_star, n_stratum, n_eff, rho_bar, epoch,
              baseline_t_net, baseline_sr_ann, baseline_holdout_bars),
         )
         self.con.commit()
@@ -441,6 +462,9 @@ class CardRegistry:
             mint_dsr=row["mint_dsr"] if "mint_dsr" in keys else None,
             mint_sr_star=row["mint_sr_star"] if "mint_sr_star" in keys else None,
             mint_n_stratum=row["mint_n_stratum"] if "mint_n_stratum" in keys else None,
+            mint_n_eff=row["mint_n_eff"] if "mint_n_eff" in keys else None,
+            mint_rho_bar=row["mint_rho_bar"] if "mint_rho_bar" in keys else None,
+            mint_epoch=row["mint_epoch"] if "mint_epoch" in keys else None,
             baseline_t_net=row["baseline_t_net"] if "baseline_t_net" in keys else None,
             baseline_sr_ann=row["baseline_sr_ann"] if "baseline_sr_ann" in keys else None,
             baseline_holdout_bars=(row["baseline_holdout_bars"]
