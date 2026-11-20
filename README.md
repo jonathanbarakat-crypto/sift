@@ -43,7 +43,11 @@ S0 calibration → S1 discovery screen (|t|≥2.0) → S2 block-permutation null
 BH-FDR (both gate: the candidate must be in the BH rejection set at
 q=0.10 over the stratum's S2 p-values; BH assumes PRDS — stratum p-values
 are correlated via the shared universe/overlapping windows, Benjamini-
-Yekutieli is the conservative fallback under arbitrary dependence) → S4
+Yekutieli is the conservative fallback under arbitrary dependence). The DSR
+benchmark N is the **correlation-adjusted independent trial count**
+(DSR Appendix A.3, N̂ = ρ̄ + (1−ρ̄)·M), frozen per pre-registered evaluation
+epoch (`stratum_epoch`) so identical trials face an identical bar; the raw
+stratum count stays recorded for audit (issue #59) → S4
 cost-aware walk-forward (|t_net| ≥ tau_cal: 3.5 at the 5-yr free
 scope, 3.0 at full depth) → **S5 registry-depth validation**.
 
@@ -197,7 +201,9 @@ rules, §8 open-question statuses).
 4. No win rates, no P&L leaderboards, no picks.
 5. Registry-depth validation (S5) is automatic — never opt-in.
 6. Scope is a first-class field on every trial; DSR denominators stratify by
-   scope and are never pooled across scopes.
+   scope and are never pooled across scopes. The DSR N is the A.3
+   implied-independent count frozen per evaluation epoch, not the raw
+   registration count (issue #59).
 7. Public cards show survival facts only.
 
 ## Feature flags (v4.1)

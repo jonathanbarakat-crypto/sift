@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS stage_result (
     dsr         REAL,
     q_bh        REAL,
     seed        INTEGER,
+    n_eff       REAL,     -- sift #59: A.3 implied INDEPENDENT trials used for the
+                          -- s3/s5 DSR benchmark (raw n_stratum stays in n_stratum)
+    rho_bar     REAL,     -- average inter-trial correlation behind n_eff
+    epoch       INTEGER,  -- frozen evaluation epoch the admission N came from
     computed_at REAL NOT NULL,
     PRIMARY KEY (trial_id, stage)
 );
@@ -87,6 +91,26 @@ CREATE TABLE IF NOT EXISTS stratum_stats (
                                 -- stratum's s4 statistics converted to per-bar
                                 -- (statistic / sqrt(BARS_PER_YEAR)) BEFORE the variance
     updated_at  REAL NOT NULL
+);
+
+-- sift #59: epoch-frozen admission denominators. At the pre-registered
+-- evaluation epoch boundary the stratum's RAW N and the correlation-
+-- adjusted independent N_eff (DSR Appendix A.3) are frozen and cached
+-- here; run_s3/run_s5 read the FROZEN rows so identical trials face an
+-- identical bar within the epoch regardless of registration order.
+-- n_eff_raw counts registered trials; n_eff is the A.3-adjusted count
+-- (float); both are recorded for audit. A new epoch = new row (epoch is
+-- part of the key); strata never re-freeze retroactively.
+CREATE TABLE IF NOT EXISTS stratum_epoch (
+    scope_id    TEXT NOT NULL,
+    epoch       INTEGER NOT NULL,
+    n_eff_raw   INTEGER NOT NULL,   -- raw registered-trial count at freeze
+    n_eff       REAL NOT NULL,       -- A.3 implied independent trials (float)
+    rho_bar     REAL NOT NULL,       -- average inter-trial correlation used
+    method      TEXT NOT NULL,       -- 'a3_avg_corr' | 'asset_cluster_pairs' | 'raw_fallback'
+    detail_json TEXT NOT NULL,       -- canonical JSON: eigenspectrum / cluster detail
+    frozen_at   REAL NOT NULL,
+    PRIMARY KEY (scope_id, epoch)
 );
 
 CREATE INDEX IF NOT EXISTS idx_stage_stage ON stage_result(stage);
@@ -139,7 +163,21 @@ class Ledger:
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys = ON")
         self.con.executescript(SCHEMA_SQL)
+        self._migrate()
         self.con.commit()
+
+    def _migrate(self) -> None:
+        """Additive-only migrations for append-only ledgers (sift #59):
+        the s3/s5 stage rows gain the admission-N audit columns n_eff /
+        rho_bar / epoch. Existing DBs get the columns via ALTER TABLE;
+        CREATE TABLE IF NOT EXISTS above already has them for new DBs."""
+        existing = {r[1] for r in self.con.execute(
+            "PRAGMA table_info(stage_result)").fetchall()}
+        for col, decl in (("n_eff", "REAL"), ("rho_bar", "REAL"),
+                          ("epoch", "INTEGER")):
+            if col not in existing:
+                self.con.execute(
+                    f"ALTER TABLE stage_result ADD COLUMN {col} {decl}")
 
     def __enter__(self) -> "Ledger":
         return self
@@ -228,9 +266,16 @@ class Ledger:
         dsr: float | None = None,
         q_bh: float | None = None,
         seed: int | None = None,
+        n_eff: float | None = None,
+        rho_bar: float | None = None,
+        epoch: int | None = None,
     ) -> None:
         """Append the result of one gauntlet stage. A stage row may transition
-        pending -> pass|fail exactly once; a stage that is not run cannot pass."""
+        pending -> pass|fail exactly once; a stage that is not run cannot pass.
+
+        sift #59: n_eff / rho_bar / epoch record the admission denominator
+        actually used (A.3 independent N + the frozen epoch) alongside the
+        raw n_stratum for audit."""
         if stage not in STAGES:
             raise LedgerError(f"invalid stage {stage!r}")
         if status not in ("pass", "fail"):
@@ -248,10 +293,11 @@ class Ledger:
             )
         self.con.execute(
             "UPDATE stage_result SET status=?, statistic=?, threshold=?, p_value=?,"
-            " n_stratum=?, v_stratum=?, dsr=?, q_bh=?, seed=?, computed_at=?"
+            " n_stratum=?, v_stratum=?, dsr=?, q_bh=?, seed=?, n_eff=?, rho_bar=?,"
+            " epoch=?, computed_at=?"
             " WHERE trial_id=? AND stage=?",
             (status, statistic, threshold, p_value, n_stratum, v_stratum, dsr,
-             q_bh, seed, time.time(), trial_id, stage),
+             q_bh, seed, n_eff, rho_bar, epoch, time.time(), trial_id, stage),
         )
         self.con.commit()
 
@@ -368,6 +414,85 @@ class Ledger:
         if row is None:
             return (0, 0.0)
         return (row["n_trials"], row["var_stat"])
+
+    # -- sift #59: epoch-frozen correlation-adjusted independent N ------------
+
+    def freeze_stratum_epoch(self, scope_id: str, epoch: int, *,
+                             n_eff: float, rho_bar: float, method: str,
+                             detail: dict | None = None,
+                             n_eff_raw: int | None = None,
+                             now: float | None = None) -> None:
+        """Freeze the stratum's admission denominator at a pre-registered
+        evaluation epoch (sift #59): store the raw registration count AND
+        the DSR-A.3 implied independent N_eff, cached per (scope, epoch).
+
+        Idempotent per (scope_id, epoch): re-freezing the SAME epoch with
+        different values raises (the epoch is pre-registered; silently
+        moving the bar mid-epoch is exactly the defect #59 reports —
+        identical trials must face identical bars). Freezing a NEW epoch
+        appends a row; old epochs stay for audit.
+        """
+        now = time.time() if now is None else now
+        n_raw = (int(n_eff_raw) if n_eff_raw is not None else
+                 self.con.execute(
+                     "SELECT COUNT(*) FROM trial WHERE scope_id=?",
+                     (scope_id,)).fetchone()[0])
+        row = self.con.execute(
+            "SELECT n_eff_raw, n_eff, rho_bar, method FROM stratum_epoch"
+            " WHERE scope_id=? AND epoch=?", (scope_id, epoch),
+        ).fetchone()
+        if row is not None:
+            if (row["n_eff_raw"] != n_raw or
+                    abs(row["n_eff"] - float(n_eff)) > 1e-9 or
+                    abs(row["rho_bar"] - float(rho_bar)) > 1e-12 or
+                    row["method"] != method):
+                raise LedgerError(
+                    f"stratum epoch {scope_id}/e{epoch} already frozen with "
+                    f"different values (n_eff_raw={row['n_eff_raw']}, "
+                    f"n_eff={row['n_eff']}, rho_bar={row['rho_bar']}, "
+                    f"method={row['method']!r}) — epochs are immutable; "
+                    "open a new epoch instead (sift #59)")
+            return
+        self.con.execute(
+            "INSERT INTO stratum_epoch (scope_id, epoch, n_eff_raw, n_eff,"
+            " rho_bar, method, detail_json, frozen_at) VALUES (?,?,?,?,?,?,?,?)",
+            (scope_id, int(epoch), int(n_raw), float(n_eff), float(rho_bar),
+             method, canonical_json(detail or {}), now),
+        )
+        self.con.commit()
+
+    def stratum_epoch_stats(self, scope_id: str,
+                            epoch: int | None = None) -> dict | None:
+        """The frozen admission denominator for (scope, epoch). With
+        `epoch=None` the LATEST frozen epoch is returned. Returns
+        {"epoch", "n_eff_raw", "n_eff", "rho_bar", "method", "detail",
+        "frozen_at"} or None when the stratum has no frozen epoch (callers
+        then fall back to the live stratum_stats — raw N, rho_bar=0 — and
+        record method='raw_fallback')."""
+        if epoch is None:
+            row = self.con.execute(
+                "SELECT * FROM stratum_epoch WHERE scope_id=?"
+                " ORDER BY epoch DESC LIMIT 1", (scope_id,),
+            ).fetchone()
+        else:
+            row = self.con.execute(
+                "SELECT * FROM stratum_epoch WHERE scope_id=? AND epoch=?",
+                (scope_id, epoch),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"epoch": int(row["epoch"]), "n_eff_raw": int(row["n_eff_raw"]),
+                "n_eff": float(row["n_eff"]), "rho_bar": float(row["rho_bar"]),
+                "method": row["method"],
+                "detail": json.loads(row["detail_json"]),
+                "frozen_at": float(row["frozen_at"])}
+
+    def latest_epoch(self, scope_id: str) -> int | None:
+        row = self.con.execute(
+            "SELECT MAX(epoch) FROM stratum_epoch WHERE scope_id=?",
+            (scope_id,),
+        ).fetchone()
+        return None if row is None or row[0] is None else int(row[0])
 
     def trial_count(self) -> int:
         """Global registered-trial counter (read by multiplicity corrections)."""
