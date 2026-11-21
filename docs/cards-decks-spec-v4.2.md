@@ -20,8 +20,13 @@ Predecessors (repo / branch / path):
 - **v3** consolidated product scope — `sift-research` / `main` /
   `docs/SIFT-Product-Scope-v3-Research-Updated.md`.
 
-Supersedes: the v4.1 §3–§4 card mechanics framing (now the [v4.1] sections of v4).
-Inherits unchanged: v3 §12 hard rules; v4.1 §6 legal posture (see §5–§6 below).
+Supersedes: the v4.1 **§2** card mechanics — gauntlet-survivor minting + evidence
+tiers (folded into v4 as §6.4.1). The vault (v4.1 §3), anchored search (§3.1) and
+badges (§4) are NOT superseded; they remain current via v4 §6.4.2–§6.4.4.
+Note: this doc's H1 title carries stale "§3–§4" numbering — in the authoritative
+v4.1 draft (hermes-tasks #121) §3 = vault, §4 = badges; the card mechanics actually
+superseded are §2. Title correction is a separate base-doc follow-up.
+Inherits unchanged: v3 §12 hard rules; v4.1 §6 legal posture (see §5 below).
 For product scope outside cards/decks mechanics, v4 (`sift-research`) remains current.
 
 ## 1. Two layers, two questions
