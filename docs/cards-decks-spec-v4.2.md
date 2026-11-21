@@ -1,8 +1,8 @@
-# SIFT v4.2 — Cards & Decks spec (supersedes v4.1 §3–§4 mechanics framing)
+# SIFT v4.2 — Cards & Decks spec (supersedes v4.1 §2 card mechanics framing)
 
 Owner decisions 2026-11-18. This doc reframes the card layer as PORTFOLIO CANDIDATES
 and adds a separate DECK (portfolio) layer with its own gauntlet and ranking.
-All v3 §12 hard rules and v4.1 §6 legal posture are UNCHANGED (see §6 below).
+All v3 §12 hard rules and v4.1 §6 legal posture are UNCHANGED (see §5 below).
 
 ## 0. Canonical location & supersession map
 
@@ -23,9 +23,9 @@ Predecessors (repo / branch / path):
 Supersedes: the v4.1 **§2** card mechanics — gauntlet-survivor minting + evidence
 tiers (folded into v4 as §6.4.1). The vault (v4.1 §3), anchored search (§3.1) and
 badges (§4) are NOT superseded; they remain current via v4 §6.4.2–§6.4.4.
-Note: this doc's H1 title carries stale "§3–§4" numbering — in the authoritative
-v4.1 draft (hermes-tasks #121) §3 = vault, §4 = badges; the card mechanics actually
-superseded are §2. Title correction is a separate base-doc follow-up.
+Note: the H1 title previously carried stale "§3–§4" numbering (v4.1 §3 = vault,
+§4 = badges); corrected here to §2, the card mechanics actually superseded
+(authoritative v4.1 draft: hermes-tasks #121; folded as v4 §6.4.1).
 Inherits unchanged: v3 §12 hard rules; v4.1 §6 legal posture (see §5 below).
 For product scope outside cards/decks mechanics, v4 (`sift-research`) remains current.
 
