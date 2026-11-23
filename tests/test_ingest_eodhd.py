@@ -220,7 +220,7 @@ def test_ingest_end_to_end_and_resume(tmp_path, monkeypatch):
     aapl = wh.read_parquet(wh.eod_parquet_path(root, "US", "AAPL"))
     assert aapl is not None and len(aapl) == 30
     assert list(aapl.columns) == wh.EOD_COLUMNS
-    assert (aapl["dollar_volume"] == aapl["close"] * aapl["volume"]).all()
+    assert (aapl["dollar_volume"] == aapl["adjusted_close"] * aapl["volume"]).all()
     assert aapl["symbol"].iloc[0] == "AAPL.US"
     assert wh.read_vintage(root) is not None
     # delisted-list gap recorded explicitly
@@ -340,7 +340,7 @@ def test_universe_pit_no_survivorship_bias(tmp_path):
     _seed_bars(root)
     asof = "2026-11-15"
     bars = universe.load_all_bars(root)
-    ranked = universe.build_ranked_table(bars, asof)
+    ranked = universe.build_ranked_table(bars, asof)[0]
     assert list(ranked["symbol"]) == ["AAPL.US", "MSFT.US", "DEAD.US"]  # by avg dollar vol
     dead = ranked[ranked["symbol"] == "DEAD.US"].iloc[0]
     assert dead["ended_before_asof"] is True or bool(dead["ended_before_asof"]) is True
@@ -358,7 +358,7 @@ def test_universe_asof_excludes_future_bars(tmp_path):
     root = str(tmp_path / "wh")
     _seed_bars(root)
     # as of 2026-10-03 only 3 bars exist per name; DEAD still present, AAPL adv over 3 bars
-    ranked = universe.build_ranked_table(universe.load_all_bars(root), "2026-10-05")
+    ranked = universe.build_ranked_table(universe.load_all_bars(root), "2026-10-05")[0]
     aapl = ranked[ranked["symbol"] == "AAPL.US"].iloc[0]
     assert int(aapl["bars"]) == 3
     assert float(aapl["avg_dollar_volume"]) == pytest.approx(200.0 * 5_000_000)

@@ -77,6 +77,22 @@ def default_window(today: date | None = None) -> tuple[str, str]:
 
 
 def _bars_to_frame(rows: list, symbol: str, exchange: str) -> pd.DataFrame:
+    """Vendor rows -> canonical EOD frame (``warehouse.EOD_COLUMNS``).
+
+    Dollar volume uses a CONSISTENT price basis (hermes-tasks #234):
+    ``adjusted_close * volume``.
+
+    Verified convention: EODHD's ``volume`` is split-adjusted — restated to the
+    current share basis. Evidence: the volume series is continuous across
+    AAPL's 2014-06-09 7:1 and 2020-08-31 4:1 splits (no 7x/4x jump), and
+    AAPL's 2014-06-06 volume matches an independent vendor's split-adjusted
+    volume, while EODHD ``close`` (645.57) is the raw traded price. Therefore
+    ``close * volume`` mixes price bases and inflates historical dollar volume
+    by the cumulative split factor (AAPL: x7 pre-2014, x4 pre-2020), whereas
+    ``adjusted_close`` is on the same adjusted basis as ``volume`` and their
+    product is split-consistent. For recent bars with no splits in between,
+    ``close == adjusted_close`` and the product equals raw dollar volume.
+    """
     df = pd.DataFrame(rows)
     if df.empty:
         return pd.DataFrame(columns=wh.EOD_COLUMNS)
@@ -84,7 +100,7 @@ def _bars_to_frame(rows: list, symbol: str, exchange: str) -> pd.DataFrame:
     for c in ("open", "high", "low", "close", "adjusted_close", "volume"):
         df[c] = pd.to_numeric(df.get(c), errors="coerce")
     df["adjusted_close"] = df["adjusted_close"].fillna(df["close"])
-    df["dollar_volume"] = df["close"] * df["volume"]
+    df["dollar_volume"] = df["adjusted_close"] * df["volume"]
     df["symbol"] = symbol
     df["exchange"] = exchange
     return df[wh.EOD_COLUMNS].sort_values("date").reset_index(drop=True)
