@@ -75,7 +75,13 @@ class CardMinter:
         # (DSR, SR*, N at mint-time stratum) — recorded as CONTEXT on the
         # card ("admission evidence at mint-time N"), never re-deflated by a
         # current N. The tier itself comes from the raw stats only.
+        # sift #59: sr_star recomputed here is CONTEXT ONLY; the admission
+        # benchmark used at mint time was the A.3 independent n_eff (recorded
+        # on the s3 row), not this raw-n_stratum recomputation.
         n_stratum = s3["n_stratum"]
+        n_eff = s3["n_eff"] if "n_eff" in s3.keys() else None
+        rho_bar = s3["rho_bar"] if "rho_bar" in s3.keys() else None
+        epoch = s3["epoch"] if "epoch" in s3.keys() else None
         sr_star = None
         try:
             d = s3["dsr"]
@@ -84,10 +90,13 @@ class CardMinter:
         # sr_star is recorded on the s3 stage DETAIL, not a column; recompute
         # it from the recorded dsr inputs when the stratum row is available,
         # else read the ledger's stratum stats at mint scope (context only).
-        if n_stratum:
+        # Prefer the recorded A.3 n_eff so the context sr_star matches the
+        # mint-time admission bar (sift #59).
+        n_for_star = int(n_eff) if n_eff else (n_stratum or 0)
+        if n_for_star:
             _, v_stratum = self.ledger.stratum_stats(trial.scope_id)
             if v_stratum and v_stratum > 0:
-                sr_star = gstats.expected_max_sharpe(max(int(n_stratum), 1),
+                sr_star = gstats.expected_max_sharpe(max(int(n_for_star), 1),
                                                      float(v_stratum))
         card = self.cards.mint(
             trial_id=trial_id,
@@ -104,6 +113,9 @@ class CardMinter:
             s5_pass=s5_pass,
             sr_star=sr_star,
             n_stratum=n_stratum,
+            n_eff=(float(n_eff) if n_eff is not None else None),
+            rho_bar=rho_bar,
+            epoch=(int(epoch) if epoch is not None else None),
             baseline_t_net=(holdout_baseline or {}).get("t_net"),
             baseline_sr_ann=(holdout_baseline or {}).get("sr_ann"),
             baseline_holdout_bars=(holdout_baseline or {}).get("holdout_bars"),

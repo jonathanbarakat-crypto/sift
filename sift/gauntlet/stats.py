@@ -265,9 +265,12 @@ def block_permutation_null(
 def expected_max_sharpe(n_trials: int, var_sharpe: float) -> float:
     """E[max_N] under the null (Bailey & Lopez de Prado 2014):
     SR* = sqrt(V) * [ (1-gamma) Phi^{-1}(1 - 1/N) + gamma Phi^{-1}(1 - 1/(N e)) ].
-    Per-bar units. N = trials in the same scope stratum (incl. kills);
-    V = empirical variance of the stratum's Sharpe estimates (PER-BAR —
-    soundness #1: callers must pass V in the same units as sr_hat)."""
+    Per-bar units. N = number of INDEPENDENT trials in the same scope stratum
+    (DSR Appendix A.3; sift #59 — pass the A.3 implied-independent N, e.g.
+    stats.implied_independent_n(M, rho_bar), NOT the raw registration count,
+    which overstates E[max SR] when trials are correlated); V = empirical
+    variance of the stratum's Sharpe estimates (PER-BAR — soundness #1:
+    callers must pass V in the same units as sr_hat)."""
     if n_trials < 1:
         raise ValueError("N must be >= 1")
     g = EULER_GAMMA
@@ -276,6 +279,85 @@ def expected_max_sharpe(n_trials: int, var_sharpe: float) -> float:
         (1 - g) * _norm_ppf(1 - 1.0 / n_eff)
         + g * _norm_ppf(1 - 1.0 / (n_eff * math.e))
     )
+
+
+def implied_independent_n(n_trials: int, avg_correlation: float) -> float:
+    """DSR Appendix A.3 (Bailey & Lopez de Prado 2014): implied number of
+    INDEPENDENT trials from M dependent ones with average inter-trial
+    correlation rho_bar:
+
+        N_hat = rho_bar + (1 - rho_bar) * M
+
+    (paper Exhibit 4; e.g. M=100 at rho_bar=0.5 -> N_hat = 50.5). N_hat = M
+    at rho_bar = 0 (all independent) and -> 1 as rho_bar -> 1 (all identical).
+    The DSR reference (references/quant-formulas.md §4) stipulates N = number
+    of INDEPENDENT trials; feeding the raw registration count M overstates
+    E[max SR] and deflates DSR (sift issue #59).
+
+    `avg_correlation` is clipped to [0, 1): negative average correlation is
+    treated as 0 (the A.3 estimator is defined for positively correlated
+    trials; a negative rho_bar would inflate N_hat above M, which the DSR
+    theory does not support — fail toward the conservative raw count).
+    Returns a float in [1, M]; callers floor at 1 (and expected_max_sharpe
+    floors at 2 internally for the normal-quantile numerics).
+    """
+    m = int(n_trials)
+    if m < 1:
+        raise ValueError("M must be >= 1")
+    rho = min(max(float(avg_correlation), 0.0), 1.0 - 1e-12)
+    return rho + (1.0 - rho) * m
+
+
+def mean_inter_trial_correlation(corr: np.ndarray) -> float:
+    """Average OFF-DIAGONAL Pearson correlation of a trial x trial (or
+    asset x asset) correlation matrix — the rho_bar input to
+    ``implied_independent_n`` (A.3). The diagonal (self-correlation = 1) is
+    excluded; NaN entries are dropped (incomplete windows).
+
+    For a PAIRS stratum over an N-name panel the trials are pairs (i, j);
+    the A.3 correlation between two pair-trials is approximated by the
+    correlation of the SHARED ASSET legs, so callers pass either the
+    trial-trial correlation matrix directly or (preferred, available
+    server-side without trial returns) the panel asset-correlation matrix
+    and use ``effective_independent_pairs`` below.
+    """
+    c = np.asarray(corr, float)
+    if c.ndim != 2 or c.shape[0] != c.shape[1] or c.shape[0] < 2:
+        return 0.0
+    off = c[~np.eye(c.shape[0], dtype=bool)]
+    off = off[np.isfinite(off)]
+    if off.size == 0:
+        return 0.0
+    return float(np.mean(off))
+
+
+def effective_independent_pairs(corr: np.ndarray) -> dict:
+    """Asset-cluster counting of effective independent PAIRS in a stratum
+    whose trials are the C(N, 2) pairs of an N-asset panel (the pairs
+    family): two pair-trials are (approximately) independent iff they share
+    no asset. With k = number of panel assets whose return-correlation
+    eigenvalues exceed 1 (the 'effective number of independent assets' —
+    eigenvalues > 1 are the Marchenko-Pastur noise-edge survivors), the
+    independent pairs are the C(k, 2) pairs within the k surviving factors.
+
+    Returns {"n_assets": N, "n_eff_assets": k, "n_pairs_raw": C(N,2),
+    "n_eff_pairs": C(k,2), "top_eigenvalue_share": lambda_1 / trace,
+    "n_eigen_gt_1": k}. Falls back to n_eff_pairs = n_pairs_raw when the
+    spectrum is full-rank (k = N)."""
+    c = np.asarray(corr, float)
+    n = c.shape[0]
+    raw = n * (n - 1) // 2
+    if n < 2 or not np.all(np.isfinite(c)):
+        return {"n_assets": n, "n_eff_assets": n, "n_pairs_raw": raw,
+                "n_eff_pairs": raw, "top_eigenvalue_share": None,
+                "n_eigen_gt_1": n}
+    eig = np.linalg.eigvalsh(c)
+    k = int(np.sum(eig > 1.0))
+    k = max(k, 2)  # at least the market factor + one residual
+    share = float(eig[-1] / np.sum(eig)) if np.sum(eig) > 0 else None
+    return {"n_assets": n, "n_eff_assets": k, "n_pairs_raw": raw,
+            "n_eff_pairs": k * (k - 1) // 2,
+            "top_eigenvalue_share": share, "n_eigen_gt_1": int(np.sum(eig > 1.0))}
 
 
 def assert_sr_units_consistent(sr_star: float, sr_hat: float,
@@ -333,6 +415,7 @@ def dsr(
     kurt: float = 3.0,
     var_floor: float | None = None,
     t_eff: float | None = None,
+    n_eff: float | None = None,
 ) -> dict:
     """Deflated Sharpe Ratio at the candidate's registered scope.
 
@@ -343,6 +426,15 @@ def dsr(
     to per-bar before the variance, exactly like the deck path
     (decks/service.py::_deck_stratum_variance). A mint-time guard
     (assert_sr_units_consistent) is applied to sr_star before returning.
+
+    ``n_eff`` (sift #59, DSR Appendix A.3): the number of INDEPENDENT trials
+    feeding ``expected_max_sharpe``. The DSR reference stipulates N =
+    independent trials, not configurations; when the stratum's trials are
+    correlated (pairs over a shared asset panel, overlapping windows) the
+    raw count n_stratum OVERSTATES E[max SR] and deflates DSR. Pass the
+    A.3 implied-independent N here (stats.implied_independent_n); the RAW
+    n_stratum stays in the returned dict for audit. Default None keeps the
+    raw count (legacy behavior; run_s3/run_s5 always pass n_eff).
 
     var_floor (#16): default is the normal-theory variance of a Sharpe
     estimate, (1 + sr_hat^2/2)/T — the PSR denominator convention — NOT
@@ -357,13 +449,14 @@ def dsr(
     floor = ((1.0 + sr_hat ** 2 / 2.0) / T) if var_floor is None else var_floor
     if v < floor:
         v = floor
-    sr_star = expected_max_sharpe(n_stratum, v)
+    n_used = max(float(n_eff), 1.0) if n_eff is not None else float(n_stratum)
+    sr_star = expected_max_sharpe(n_used, v)
     # mint-time units guard (#1): sr_hat is per-bar, so sr_star must be too
     assert_sr_units_consistent(sr_star, sr_hat)
     d = psr(sr_hat, sr_star, T, skew, kurt, t_eff=t_eff)
     return {"dsr": d, "sr_star": sr_star, "sr_hat": sr_hat, "T": T,
-            "n_stratum": n_stratum, "v_stratum": v, "skew": skew, "kurt": kurt,
-            "t_eff": t_eff}
+            "n_stratum": n_stratum, "n_eff": n_used, "v_stratum": v,
+            "skew": skew, "kurt": kurt, "t_eff": t_eff}
 
 
 def bh_fdr(p_values: np.ndarray, q: float = 0.10) -> dict:

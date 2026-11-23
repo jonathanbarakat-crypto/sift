@@ -311,7 +311,21 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
     # live-baseline computed below is persisted on the minted card.
     cards_reg = CardRegistry(cards_path) if cards_path else None
     card_minter = CardMinter(ledger, cards_reg) if cards_reg is not None else None
-    runner = GauntletRunner(ledger, seed=20261115, card_minter=card_minter)
+    runner = GauntletRunner(ledger, seed=20261115, card_minter=card_minter,
+                            panel_corr=corr)
+    # sift #59: pre-register (freeze) the evaluation epoch's admission
+    # denominator BEFORE any trial runs. The pairs stratum's trials share
+    # the panel's assets, so they are correlated; the DSR benchmark must use
+    # the A.3 implied independent N, not the raw candidate count. M is the
+    # pre-registered candidate-pair count (len(cand)), so every trial in the
+    # epoch faces the SAME frozen bar regardless of run order (previously N
+    # was read at evaluation time: 17k/118k/135k/166k for the 4 survivors).
+    ep = runner.set_admission_epoch(scope_id, epoch=1, m_trials=len(cand),
+                                    detail={"vintage": vintage[:16],
+                                            "n_candidate_pairs": len(cand)})
+    log(f"sift #59: admission epoch frozen: scope={scope_id} epoch=1 "
+        f"M={ep['n_eff_raw']} rho_bar={ep['rho_bar']:.6f} "
+        f"n_eff={ep['n_eff']:.1f} method={ep['method']}")
     calls_before = 0
     calls_state = os.path.join(warehouse_root, "state", "calls.json")
     if os.path.exists(calls_state):
@@ -458,6 +472,7 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
         "eodhd_calls_per_cached_trial": 0.0,
         "corr_matrix_bytes": int(corr_bytes), "corr_matrix_mb": corr_bytes / 1e6,
         "corr_matrix_n": int(n),
+        "admission_epoch": ep,   # sift #59: frozen A.3 denominator (M, rho_bar, n_eff)
         "peak_rss_bytes": peak_rss_bytes(), "peak_rss_gb": peak_rss_bytes() / 1e9,
         "ledger": summary,
         "rows": rows,
