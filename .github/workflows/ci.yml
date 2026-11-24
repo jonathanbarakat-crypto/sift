@@ -32,6 +32,8 @@ jobs:
         env:
           SIFT_ENV: test
         run: python -m pytest tests/ -q
+      - name: Waitlist endpoint tests (web/api)
+        run: python -m unittest discover -s web/api -p "test_*.py" -v
 
   sim-smoke:
     # SIMULATED — infrastructure validation, not user-behavior evidence.

@@ -23,6 +23,7 @@ from sift.cards.decay import (
     GOLD_DSR,
     GOLD_T_NET,
     GOLD_P_PERM,
+    MINT_T_FULL,
     PLATINUM_P_PERM,
     PLATINUM_T_NET,
     SILVER_DSR,
@@ -30,6 +31,7 @@ from sift.cards.decay import (
     SILVER_T_NET,
     WindowStats,
     meets_tier_bar,
+    window_t_hurdle,
 )
 from sift.cards.minting import CardMinter
 from sift.gauntlet import stats
@@ -143,11 +145,11 @@ def test_s4_detail_always_carries_score(ledger):
 
 
 def test_s4_fail_with_strong_score_mints_bronze_card(ledger, cards):
-    """THE load-bearing v4.2 test: a candidate that passes S0-S3 but fails the
-    S4 bar (net SR 1.18 > 0, strong score, but t_net 2.63 < tau_cal 3.5) is
-    NOT killed — it is a survivor at the s4-evidence class and mints a
-    BRONZE card."""
-    prices, s, phi = _pair_prices(1260, seed=11, phi=0.7, sig_in=4.0)
+    """THE load-bearing v4.2 test: a candidate that passes S0-S2 with a strong
+    positive S4 score (net SR ~1.28 > 0) but misses the S4 bar (t_net ~2.86 <
+    tau_cal 3.5 under anchored walk-forward + two-leg costs) is NOT killed —
+    it is a survivor at the s4-evidence class and mints a BRONZE card."""
+    prices, s, phi = _pair_prices(1260, seed=11, phi=0.7, sig_in=2.5)
     verdict, trial = _run(ledger, cards, prices_scope=prices, seed=11)
     assert verdict["verdict"] == "survivor", verdict
     assert verdict["survivor_class"] == v42.SURVIVOR_CLASS_S4_EVIDENCE
@@ -248,7 +250,7 @@ def test_flag_off_s4_fail_passer_mints_nothing(ledger, cards):
     """Kill-switch fail-closed: with cards_v4_1 off, an S0-S2 passer that
     fails S4 is still a survivor (gauntlet unaffected) but mints NO card."""
     flags.set_flag("cards_v4_1", False)
-    prices, s, phi = _pair_prices(1260, seed=11, phi=0.7, sig_in=4.0)
+    prices, s, phi = _pair_prices(1260, seed=11, phi=0.7, sig_in=2.5)
     verdict, trial = _run(ledger, cards, prices_scope=prices, seed=11)
     assert verdict["verdict"] == "survivor"
     assert verdict["survivor_class"] == v42.SURVIVOR_CLASS_S4_EVIDENCE
@@ -259,7 +261,7 @@ def test_flag_off_s4_fail_passer_mints_nothing(ledger, cards):
 def test_research_scope_stays_amber(ledger, cards):
     """A research_ scope S0-S2 passer (S4 bar not met on the research window)
     is on-watch-amber — amber on research data, never a production class."""
-    prices, s, phi = _pair_prices(1260, seed=11, phi=0.7, sig_in=4.0)
+    prices, s, phi = _pair_prices(1260, seed=11, phi=0.7, sig_in=2.5)
     verdict, trial = _run(ledger, cards, prices_scope=prices,
                           handle="rex", seed=11, scope_id="research_5y_top1k")
     assert verdict["verdict"] == "survivor"
@@ -345,17 +347,27 @@ def test_survivor_class_for_mapping():
 # ---------------------------------------------------------------------------
 
 def test_meets_tier_bar_platinum():
-    # v4.2 §3 (#170): RAW bars only — the dsr field is ignored on purpose.
-    assert meets_tier_bar(WindowStats(0, 252, None, 4.0, 0.01), "platinum")
+    # v4.2 §3 (#170) + soundness #5 (PR #50): RAW, N-independent bars (dsr is
+    # ignored on purpose) compared in WINDOW-LENGTH-INVARIANT terms via
+    # window_t_hurdle (252-bar hurdle = 4.0*sqrt(252/4032) = 1.0 for platinum,
+    # 0.75 for silver; full-depth MINT_T_FULL uses raw 4.0 / 3.0 verbatim).
+    assert window_t_hurdle(PLATINUM_T_NET, 252) == pytest.approx(1.0)
+    assert meets_tier_bar(WindowStats(0, 252, None, 1.0, 0.01), "platinum")
     assert meets_tier_bar(WindowStats(0, 252, 0.0, 4.0, 0.01), "platinum")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 3.99, 0.01), "platinum")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 4.0, 0.011), "platinum")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 0.99, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 1.0, 0.011), "platinum")
+    assert meets_tier_bar(WindowStats(0, MINT_T_FULL, None, 4.0, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.999, 3.99, 0.01), "platinum")
+    assert not meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.999, 4.0, 0.011), "platinum")
     # gold bar (raw): p_perm <= 0.01 — same numbers as pull/31 minus DSR
     assert meets_tier_bar(WindowStats(0, 252, None, 9.0, 0.01), "gold")
     assert not meets_tier_bar(WindowStats(0, 252, 0.999, 9.0, 0.02), "gold")
-    # silver bar (raw): |t| >= 3.0 AND p <= 0.05
-    assert meets_tier_bar(WindowStats(0, 252, None, 3.0, 0.05), "silver")
-    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 2.99, 0.05), "silver")
+    # silver bar (raw): 252-bar hurdle 0.75 / full-depth 3.0 AND p <= 0.05
+    assert window_t_hurdle(SILVER_T_NET, 252) == pytest.approx(0.75)
+    assert meets_tier_bar(WindowStats(0, 252, None, 0.75, 0.05), "silver")
+    assert not meets_tier_bar(WindowStats(0, 252, 0.999, 0.74, 0.05), "silver")
+    assert meets_tier_bar(WindowStats(0, MINT_T_FULL, None, 3.0, 0.05), "silver")
+    assert not meets_tier_bar(WindowStats(0, MINT_T_FULL, 0.999, 2.99, 0.05), "silver")
 
 
 def test_platinum_constants_match_pull31_gold_bar():
