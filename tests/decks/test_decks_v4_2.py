@@ -29,15 +29,14 @@ from sift import flags
 from sift.cards import CARD_TIERS, CardRegistry
 from sift.decks import (
     DECK_RANKS,
+    GICS_SECTORS,
     DeckError,
     DeckRegistry,
-    GICS_SECTORS,
     bucket_config,
     deck_rank_from_stats,
     enumerate_buckets,
 )
 from sift.decks.copy import (
-    DECK_GLOSSARY,
     DeckCopyError,
     assert_deck_copy_clean,
     deck_custom_warning,
@@ -300,7 +299,7 @@ def _planted_basket(T=1260, K=10, seed=11, a=0.35, sig=0.01, drift=0.0004):
 
 
 def test_s6_pass_on_planted_edge_and_fail_on_null(svc, cards, decks):
-    cs = _mint_cards(cards, n=10)
+    _mint_cards(cards, n=10)
     bucket = bucket_config(size=10, sector="all", family_mix=("pairs",))
     d = svc.register_ranked(scope_id=SCOPE, bucket=bucket, owner_handle="alice",
                             data_vintage_hash=VINTAGE, now=1.0)
@@ -337,8 +336,8 @@ def test_s6_pass_on_planted_edge_and_fail_on_null(svc, cards, decks):
 def test_multiplicity_correction_over_deck_stratum_kills_included(svc, cards, decks):
     """N = all registered deck trials in scope across ALL users, kills
     included; p_corr = min(1, p_raw * N)."""
-    cs = _mint_cards(cards, n=10)
-    bucket = bucket_config(size=10, sector="all", family_mix=("pairs",))
+    _mint_cards(cards, n=10)
+    bucket_config(size=10, sector="all", family_mix=("pairs",))
     deck_ids = []
     for i, sector in enumerate(["all", "energy", "financials"]):
         b = bucket_config(size=10, sector=sector, family_mix=("pairs",))
@@ -482,7 +481,7 @@ def test_half_spread_2d_nonfinite_handled_per_column():
     good = s6stats.estimate_half_spread_bps(panel[:, 0][np.isfinite(panel[:, 0])])["median_bps"]
     assert est["per_name_bps"][0] == pytest.approx(good, rel=1e-12)
     assert est["per_name_bps"][3] == gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE
-    finite_per_name = [est["per_name_bps"][j] for j in range(K) if j != 3]
+    [est["per_name_bps"][j] for j in range(K) if j != 3]
     assert est["median_bps"] == pytest.approx(
         float(np.median([est["per_name_bps"][0], est["per_name_bps"][1],
                          est["per_name_bps"][2], gcfg.S6_HALF_SPREAD_BPS_CONSERVATIVE])),
@@ -611,7 +610,6 @@ def test_deck_events_append_only_with_readback(svc, cards, decks):
 def test_decks_non_transferable(decks):
     with pytest.raises(DeckError):
         decks.assert_owned("deck-nonexistent", "alice")
-    d = decks  # register directly to test ownership guard
     # (use service for a real deck in other tests; here just the guard path)
 
 

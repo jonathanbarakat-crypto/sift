@@ -81,8 +81,7 @@ class SimWorld:
         self.rng = SimRng(self.seed)
         self.clock = SimClock(t0 if t0 is not None else 1_800_000_000.0)
         self.ledger = Ledger(self.db_dir / "ledger.db")
-        self.layer = CardLayer(self.ledger, self.db_dir / "cards",
-                               card_secret=b"sim-hmac-secret-test-only")
+        self.layer = CardLayer(self.ledger, card_secret=b"sim-hmac-secret-test-only")
         self.universe = [synth_symbol(i) for i in range(universe_n)]
         self._prices = self._make_synth_panel(universe_n)
         self.users: list[SimUser] = []

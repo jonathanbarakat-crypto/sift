@@ -21,23 +21,20 @@ Covers (per the task):
 """
 
 import json
-import time
 
 import pytest
 
 from sift import flags
 from sift.cards import CardError, CardRegistry
 from sift.cards.events import (
-    CHANNELS,
     CHANNEL_API,
     CHANNEL_EMAIL,
     CHANNEL_RSS,
+    CHANNELS,
     FORBIDDEN_PAYLOAD_KEYS,
     HIT_EVENT_TYPE,
     MINT_BASELINE_EVENT,
     PAYLOAD_SCHEMA_VERSION,
-    TRAILING_12M_S,
-    ChannelPref,
     SignalEventService,
     build_event_payload,
     cards_fired_today,
@@ -75,9 +72,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()
@@ -473,7 +470,7 @@ def test_api_channel_manifest_carries_signed_webhooks(svc, cards, ledger):
                           entitlement=LIVE_ENTITLEMENT)
     w = svc.register_webhook("alice", "https://hooks.example.com/sift", now=T0)
     svc.set_channel(card_id, "alice", CHANNEL_API, now=T0)
-    n = svc.emit_hit(card_id, "alice", statistic=2.0, threshold=2.0,
+    svc.emit_hit(card_id, "alice", statistic=2.0, threshold=2.0,
                      entitlement=LIVE_ENTITLEMENT, now=T0)
     m = svc.deliver_due_channels("alice", now=T0 + 1)
     assert len(m) == 1

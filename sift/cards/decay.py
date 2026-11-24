@@ -92,7 +92,7 @@ import numpy as np
 
 from sift import flags
 from sift.cards import CARD_TIERS, Card, CardError, CardRegistry, decay_tier, tier_from_stats
-from sift.cards.notify import BANNED_PHRASES, Notifier, contains_banned
+from sift.cards.notify import Notifier, contains_banned
 from sift.gauntlet import config as gcfg
 from sift.gauntlet import stats as gstats
 from sift.registry import Ledger
@@ -295,7 +295,6 @@ def _window_stats(returns: np.ndarray, *, start: int, end: int,
     T = int(r.size)
     if T < 2:
         return WindowStats(start, end, None, None, None)
-    obs = gstats.mean_reversion_stat(r)
     s2 = gstats.block_permutation_null(r, gstats.mean_reversion_stat,
                                        B=s2_B, seed=seed)
     p_perm = s2["p_perm"]

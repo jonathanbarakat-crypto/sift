@@ -13,7 +13,10 @@ import pytest
 from sift import flags
 from sift.cards import CardRegistry
 from sift.cards.anchored import (
-    AnchoredRunError, plan_anchored_run, run_anchored, sample_partners,
+    AnchoredRunError,
+    plan_anchored_run,
+    run_anchored,
+    sample_partners,
 )
 from sift.cards.minting import CardMinter
 from sift.gauntlet import stats
@@ -32,9 +35,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()

@@ -14,19 +14,23 @@ DSR denominators are scope-stratified; public cards show survival facts only.
 
 ## Layout
 
+- `sift/db.py` — shared SQLite connection/transaction helper (WAL mode,
+  `foreign_keys=ON`, busy timeout) used by `Ledger` and `CardLayer`
 - `sift/registry/` — append-only trial ledger (SQLite now, Postgres-compatible
   schema)
-- `sift/gauntlet/` — stages S0–S5: `stats.py` (pure stat functions),
+- `sift/gauntlet/` — stages S0–S6: `stats.py` (pure stat functions),
   `s5.py` (registry-depth validation + delist-safe panel helpers),
-  `config.py` (pre-registered thresholds), `runner.py` (stage wiring + ledger)
+  `s6.py` (portfolio gauntlet), `config.py` (pre-registered thresholds),
+  `runner.py` (stage wiring + ledger)
 - `sift/cards/` — the whole v4.1 card layer behind `cards_v4_1` (registry,
   minting, vault, faces, anchored, share, notify, decay, metrics,
   `service.py` composition root) — see "Feature flags (v4.1)" below
+- `sift/decks/` — the v4.2 deck layer behind `decks_v4_2` (bucket registry,
+  S6 portfolio runner, canonical deck copy + artifact guards)
 - `sift/engine/` — server-side mining engine (first trial run)
-- `sift/data/`, `sift/web/` — scaffolded packages (ingest/landing live at
-  repo-root `data/` and `web/`)
 - `data/` — server-side EODHD ingest layer + versioned warehouse (gate 1)
 - `web/` — static landing page + email-only beta waitlist (gate 1)
+- `scripts/` — standalone diagnostic/probe scripts
 
 ## Setup
 

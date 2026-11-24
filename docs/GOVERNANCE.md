@@ -30,8 +30,8 @@ family:
 
 | Spec family | Authoritative location | Current state |
 |---|---|---|
-| Product scope | `jonathanbarakat-crypto/sift-research` (default branch `main`) | v3 merged on `main` (`docs/SIFT-Product-Scope-v3-Research-Updated.md`); v4 Cards-Vault-Folded pending as pull/7 in sift-research |
-| Engineering specs | `jonathanbarakat-crypto/sift` `docs/` (default branch `main`) | cards-decks-spec-v4.2.md pending as pull/35 in sift |
+| Product scope & vendor amendment | `jonathanbarakat-crypto/sift-research` (default branch `main`) | v4 merged on `main` (`docs/SIFT-Product-Scope-v4-Cards-Vault-Folded.md`, superseding v3; v3 §12 hard rules still bind); v4.3 EODHD sole-vendor amendment merged on `main` (`docs/SIFT-Data-Vendor-Amendment-v4.3.md`, pull/13); canonical cross-repo map at `docs/SPEC-INDEX.md` |
+| Engineering specs | `jonathanbarakat-crypto/sift` `docs/` (default branch `main`) | `docs/cards-decks-spec-v4.2.md` merged on `main` (pull/35; supersession header updated in pull/63) |
 
 Rule: within a family, the default branch of the owning repo is the only
 authoritative copy. Open PRs are drafts, not authority (see §1).

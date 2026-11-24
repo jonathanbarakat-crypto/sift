@@ -34,25 +34,22 @@ import numpy as np
 import pytest
 
 from sift import flags
-from sift.cards import CARD_TIERS, CardRegistry
+from sift.cards import CardRegistry
 from sift.cards.decay import (
     DECAY_EVENT,
     UPGRADE_EVENT,
     DecayError,
     RegistryDecayJob,
-    WindowStats,
     live_window_evaluator,
     meets_tier_bar,
 )
 from sift.cards.minting import CardMinter
 from sift.cards.notify import Notifier
 from sift.cards.service import CardLayer
-from sift.engine import first_run as fr
 from sift.gauntlet import stats
 from sift.gauntlet.runner import GauntletRunner
 from sift.registry import Ledger
 from tests.cards.test_minting import SECRET, _run_validated_green
-from tests.test_first_run import _make_warehouse
 
 DAY_S = 86400.0
 
@@ -66,9 +63,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()
@@ -215,6 +212,7 @@ def test_runner_passes_holdout_baseline_to_minter(ledger, cards):
 
     # now with a holdout baseline: re-run a distinct config with the arg
     import numpy as np
+
     from tests.fixtures.planted import T_5Y, T_FULL
     rng = np.random.Generator(np.random.PCG64(8))
     T = T_FULL
@@ -287,7 +285,7 @@ def test_live_re_evaluator_downgrade_fires_with_event_and_notify(ledger, cards, 
     def live_re(card, ledger):
         # fresh-evidence re-evaluator: tier from the CURRENT live window, not
         # the static mint-time rows (soundness #10: default was inert)
-        from sift.cards.decay import _window_stats, meets_tier_bar
+        from sift.cards.decay import _window_stats
         n, v = ledger.stratum_stats(card.scope_id)
         ws = _window_stats(live, start=len(live) - 252, end=len(live),
                            n_stratum=n, v_stratum=v, seed=1, s2_B=100)
@@ -312,7 +310,7 @@ def test_upgrade_still_refused_without_eligible_live_evidence(ledger, cards, not
     loudly — never applied by payment or chance (invariant kept)."""
     card, t = _mint(cards, ledger)   # silver
     job = RegistryDecayJob(cards, ledger, notifier=notifier,
-                           re_evaluator=lambda c, l: "gold")   # no live_evaluator
+                           re_evaluator=lambda c, led: "gold")   # no live_evaluator
     with pytest.raises(DecayError) as ei:
         job.evaluate_card(card, now=2_000_000.0)
     assert "no pre-registered live-window evidence" in str(ei.value) or "live-window" in str(ei.value)
@@ -327,7 +325,7 @@ def test_upgrade_refused_when_live_window_ineligible(ledger, cards, notifier):
     rets = _strong_live_returns()
     job = RegistryDecayJob(
         cards, ledger, notifier=notifier,
-        re_evaluator=lambda c, l: "gold",
+        re_evaluator=lambda c, led: "gold",
         live_evaluator=lambda c: live_window_evaluator(
             c, live_returns=rets, now_bar=252, n_stratum=50, v_stratum=0.01,
             seed=1, s2_B=100),
@@ -360,7 +358,7 @@ def test_card_layer_wires_live_evaluators_fail_closed(ledger, tmp_path):
         # upgrade proposal is refused, no tier change (rules not relaxed)
         lay.set_live_returns(lambda card: _strong_live_returns(n=100))
         job2 = RegistryDecayJob(lay.cards, ledger,
-                                re_evaluator=lambda c, l: "gold",
+                                re_evaluator=lambda c, led: "gold",
                                 live_evaluator=lay.decay.live_evaluator)
         with pytest.raises(DecayError):
             job2.evaluate_card(card, now=3_000_000.0 + 300 * DAY_S)

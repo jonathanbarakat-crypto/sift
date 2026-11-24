@@ -16,8 +16,7 @@ import numpy as np
 
 from sift.gauntlet import config as cfg
 from sift.gauntlet import s5 as s5stats
-from sift.gauntlet import stats
-from sift.gauntlet import v42
+from sift.gauntlet import stats, v42
 from sift.registry import Ledger
 
 
@@ -505,7 +504,7 @@ class GauntletRunner:
         the engine on the locked holdout) is passed to the card minter so it
         is persisted on the minted card; it is also surfaced on the verdict
         dict as `holdout_baseline`. None when the run had no holdout."""
-        trial = self.ledger.get(trial_id)
+        self.ledger.get(trial_id)
         if fixture_x is None or fixture_y is None:
             raise ValueError("S0 requires fixture_x/fixture_y")
         if excess_returns is None:
@@ -518,17 +517,20 @@ class GauntletRunner:
 
         s0 = self.run_s0(trial_id, fixture_x, fixture_y, beta_true,
                          half_life_true, spread=fixture_spread)
-        self.record(trial_id, s0); results.append(s0)
+        self.record(trial_id, s0)
+        results.append(s0)
         if s0.status == "fail":
             return self._verdict(trial_id, results, killed_at="s0")
 
         s1 = self.run_s1(trial_id, excess_returns)
-        self.record(trial_id, s1); results.append(s1)
+        self.record(trial_id, s1)
+        results.append(s1)
         if s1.status == "fail":
             return self._verdict(trial_id, results, killed_at="s1")
 
         s2 = self.run_s2(trial_id, perm_series, perm_statistic_fn, B=s2_B)
-        self.record(trial_id, s2); results.append(s2)
+        self.record(trial_id, s2)
+        results.append(s2)
         if s2.status == "fail":
             return self._verdict(trial_id, results, killed_at="s2")
 
@@ -537,13 +539,15 @@ class GauntletRunner:
         wf = stats.walk_forward_returns(prices)
         net = wf["net"]
         s4 = self.run_s4(trial_id, net, scope_id, p_perm=s2.p_value)
-        self.record(trial_id, s4); results.append(s4)
+        self.record(trial_id, s4)
+        results.append(s4)
         self.ledger.update_var_stat(scope_id)  # refresh N and V from ledger
         s4_bar_met = v42.s4_passed(s4.detail, scope_id)
 
         sr_bar = (s4.detail["sr_ann"] / np.sqrt(cfg.BARS_PER_YEAR))
         s3 = self.run_s3(trial_id, sr_bar, s4.detail["T"], s2.p_value, scope_id)
-        self.record(trial_id, s3); results.append(s3)
+        self.record(trial_id, s3)
+        results.append(s3)
         s3_pass = s3.status == "pass"
         # v4.2 §2-§3: an S0-S2 passer that misses the S4 or S3 bar is NOT
         # killed — it is a survivor at the bronze evidence tier.
@@ -568,7 +572,6 @@ class GauntletRunner:
         # fail -> on-watch-amber (v3 §8.4). Without full-window data the trial
         # stays on-watch-amber with the s5 row pending (a stage not run cannot
         # pass).
-        s5_pass: bool | None = None
         if full_prices is not None and full_spread_returns is not None:
             s5 = self.run_s5(
                 trial_id,
@@ -579,9 +582,9 @@ class GauntletRunner:
                 s2_B=s2_B,
                 seed=self.seed,
             )
-            self.record(trial_id, s5); results.append(s5)
+            self.record(trial_id, s5)
+            results.append(s5)
             self.ledger.update_var_stat("registry_depth")
-            s5_pass = s5.status == "pass"
             cls = s5.detail["survivor_class"]
             self.ledger.decide(trial_id, "survivor", cls)
             card_id = self._maybe_mint_card(trial_id, "survivor", cls,

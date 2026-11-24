@@ -47,7 +47,7 @@ from sift.cards.copy import (
     tos_acceptance_text,
 )
 from sift.cards.face import CardFaceRenderer, FaceError, _guard_face_artifact
-from sift.cards.render import CardImageRenderer, render_face_png
+from sift.cards.render import CardImageRenderer
 from sift.registry import Ledger
 from tests.cards.test_minting import SECRET, _run_validated_green
 
@@ -61,9 +61,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()
@@ -270,7 +270,6 @@ def test_face_share_carries_same_newcomer_blocks(ledger, cards, renderer):
 
 
 def test_face_png_draws_explainer_gauge_health(ledger, cards, renderer):
-    import numpy as np
     verdict, _ = _run_validated_green(ledger, cards, handle="alice")
     face = renderer.render(verdict["card_id"], viewer_handle="alice",
                            now=1700000000.0, current_abs_z=2.31,

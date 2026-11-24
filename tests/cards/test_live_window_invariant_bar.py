@@ -98,11 +98,11 @@ def ledger_cards(tmp_path):
     from sift.cards import CardRegistry
     from sift.registry import Ledger
     from tests.cards.test_minting import SECRET
-    l = Ledger(tmp_path / "ledger.db")
+    led = Ledger(tmp_path / "ledger.db")
     c = CardRegistry(tmp_path / "cards.db", secret=SECRET)
-    yield c, l
+    yield c, led
     c.close()
-    l.close()
+    led.close()
 
 
 # ---------------------------------------------------------------------------

@@ -51,9 +51,7 @@ Fixtures (TDD — written before the fix; they FAIL on main 8c1a1b0):
 import numpy as np
 import pytest
 
-from sift.gauntlet import config as cfg
 from sift.gauntlet import stats
-
 
 # ---------------------------------------------------------------------------
 # Known-answer arithmetic helpers
@@ -147,7 +145,9 @@ def test_slippage_fields_change_net():
     changed net by EXACTLY 0. Now they must change it."""
     gross = np.zeros(50)
     pos = np.zeros(50)
-    pos[10] = 1.0; pos[30] = -1.0; pos[45] = 0.0   # turnover 1 + 2 + 1 = 4
+    pos[10] = 1.0
+    pos[30] = -1.0
+    pos[45] = 0.0   # turnover 1 + 2 + 1 = 4
     hedge = np.ones(50)
     cm_plain = stats.CostModel(half_spread_bps=100.0)
     cm_slip = stats.CostModel(half_spread_bps=100.0,
@@ -204,8 +204,10 @@ def test_cost_charged_at_fill_bar_not_decision_bar():
     assert net[6] == pytest.approx(-2 * 100.0 / 1e4, abs=1e-12)   # fill bar
     assert net[14] == pytest.approx(-2 * 100.0 / 1e4, abs=1e-12)
     # and it must align with the return timing: gross[t] = pos[t-1]*rs[t]
-    rs = np.zeros(T); rs[6:] = 0.001
-    earned = np.zeros(T); earned[1:] = pos[:-1] * rs[1:]
+    rs = np.zeros(T)
+    rs[6:] = 0.001
+    earned = np.zeros(T)
+    earned[1:] = pos[:-1] * rs[1:]
     assert earned[6] != 0 and earned[5] == 0
 
 
@@ -213,7 +215,8 @@ def test_zero_turnover_bars_cost_nothing():
     """Holding (or flat) bars cost exactly nothing, even with slippage on."""
     T = 30
     gross = np.zeros(T)
-    pos = np.zeros(T); pos[5:20] = 1.0    # one entry, one exit
+    pos = np.zeros(T)
+    pos[5:20] = 1.0    # one entry, one exit
     hedge = np.full(T, 2.0)
     cm = stats.CostModel(half_spread_bps=100.0,
                          slippage_participation_threshold=0.0,
@@ -224,7 +227,8 @@ def test_zero_turnover_bars_cost_nothing():
     assert cost[0:6].sum() == 0.0 or cost[5] == 0.0     # no cost before/at entry decision... entry decided at 4? pos[5]=1 -> change at index 5, cost at 6
     # precisely: changes at index 5 (0->1) and 20 (1->0); costs at bars 6 and 21
     assert cost[6] > 0 and cost[21] > 0
-    mask = np.ones(T, bool); mask[[6, 21]] = False
+    mask = np.ones(T, bool)
+    mask[[6, 21]] = False
     assert cost[mask].sum() == pytest.approx(0.0, abs=1e-15)
 
 
@@ -297,18 +301,20 @@ def test_gauntlet_still_runs_after_cost_fix(ledger=None):
     """End-to-end smoke through the runner: F-PAIR gauntlet completes, S4
     recorded, net SR finite. (Full acceptance stays in test_s5/test_fixtures;
     thresholds are NOT weakened — costs only got more honest.)"""
+    import pathlib
+    import tempfile
+
     from sift.gauntlet.runner import GauntletRunner
     from sift.registry import Ledger
-    import tempfile, pathlib
     from tests.fixtures.planted import f_pair
     fx = f_pair()
     prices = fx["prices"]
     x, y = prices[:, 0], prices[:, 1]
     excess = stats.pairs_strategy_returns(prices)["gross"][60:]
     with tempfile.TemporaryDirectory() as d:
-        l = Ledger(pathlib.Path(d) / "l.db")
-        trial = l.register("pairs", "free_5y_top1k", {"fixture": "F-PAIR"}, "v1")
-        runner = GauntletRunner(l, seed=fx["seed"])
+        led = Ledger(pathlib.Path(d) / "l.db")
+        trial = led.register("pairs", "free_5y_top1k", {"fixture": "F-PAIR"}, "v1")
+        runner = GauntletRunner(led, seed=fx["seed"])
         spread = np.diff(np.log(y)) - np.diff(np.log(x))
         verdict = runner.run_gauntlet(
             trial.trial_id,
@@ -322,7 +328,7 @@ def test_gauntlet_still_runs_after_cost_fix(ledger=None):
             scope_id="free_5y_top1k",
             s2_B=200,
         )
-        l.close()
+        led.close()
     assert verdict["verdict"] in ("survivor", "killed")
     stages = {s.stage: s.status for s in verdict["stages"]}
     assert "s4" in stages

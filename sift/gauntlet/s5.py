@@ -98,7 +98,6 @@ def valid_returns(prices: np.ndarray, delist_idx: np.ndarray | None = None,
     P = np.asarray(prices, float)
     if P.ndim == 1:
         P = P[:, None]
-    T = P.shape[0]
     r = np.full(P.shape, np.nan)
     r[1:] = np.log(P[1:]) - np.log(P[:-1])
     if mask is None:

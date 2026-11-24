@@ -65,7 +65,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sift import flags
+from sift import db, flags
 from sift.cards import CardRegistry
 from sift.cards.vault import Vault
 
@@ -182,17 +182,32 @@ class ShareGrantRecord:
 class ShareService:
     """Grant/verification logic for share-for-capacity. Server-side only."""
 
-    def __init__(self, cards: CardRegistry, vault: Vault, db_path: str | Path):
+    def __init__(
+        self,
+        cards: CardRegistry,
+        vault: Vault,
+        db_path: str | Path | None = None,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
         self.cards = cards
         self.vault = vault
-        self.db_path = Path(db_path)
-        if str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
+        if con is not None or db_path is None:
+            shared = con if con is not None else cards.con
+            self.con = shared
+            self._owns_con = False
+            self.db_path = (
+                Path(db_path) if db_path is not None else (db.db_path_of(shared) or cards.db_path)
+            )
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA foreign_keys = ON")
+        else:
+            self.db_path = Path(db_path)
+            self.con = db.connect(self.db_path)
+            self._owns_con = True
         self.con.executescript(_SCHEMA_SQL)
         self.con.executescript(_APPEND_ONLY_SQL)
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def __enter__(self) -> "ShareService":
         return self
@@ -201,7 +216,8 @@ class ShareService:
         self.close()
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     # -- account state (prerequisites) ---------------------------------------
 
@@ -230,7 +246,7 @@ class ShareService:
             (handle, int(email_verified), int(phone_otp_verified), int(kyc_lite),
              created_at, int(completed_runs), now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def set_completed_runs(self, handle: str, n: int, now: float | None = None) -> None:
         now = time.time() if now is None else now
@@ -238,7 +254,7 @@ class ShareService:
             "UPDATE account_state SET completed_runs=?, updated_at=? WHERE handle=?",
             (int(n), now, handle),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def _account(self, handle: str) -> sqlite3.Row:
         row = self.con.execute(
@@ -257,7 +273,7 @@ class ShareService:
             "INSERT OR REPLACE INTO honeypot (handle, note, planted_at) VALUES (?,?,?)",
             (handle, note, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def is_honeypot(self, handle: str) -> bool:
         return self.con.execute(
@@ -278,7 +294,7 @@ class ShareService:
             (owner, card_id, outcome, reason, device_id, ip, asn, post_url,
              verified, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         seq = cur.lastrowid
         assert seq is not None
         return seq
@@ -392,7 +408,7 @@ class ShareService:
                 " asn=COALESCE(excluded.asn, device_fingerprint.asn)",
                 (handle, device_id, ip, asn, now),
             )
-            self.con.commit()
+            db.maybe_commit(self.con)
             # velocity/pattern caps: >=5 accounts from one device/IP -> all
             # FLAGGED (fraud queue), not auto-granted
             cluster = self._cluster_size(device_id=device_id, ip=ip)
@@ -427,14 +443,16 @@ class ShareService:
             return {"granted": False, "reason": "unverifiable_post",
                     "seq": seq, "slots": self.vault.share_slots(handle)}
 
-        # GRANT: one permanent +1 vault slot (cap +5 enforced in the vault)
-        self.con.execute(
-            "INSERT INTO share_unique (owner, card_id, granted_at) VALUES (?,?,?)",
-            (handle, card_id, now),
-        )
-        new_slots = self.vault.add_permanent_slots(handle, 1)   # vault caps at +5
-        seq = self._audit(handle, card_id, "granted", None,
-                          device_id, ip, asn, post_url, verified, now)
+        # GRANT: one permanent +1 vault slot (cap +5 enforced in the vault).
+        # Atomic across share_unique + vault + share_grant when sharing a DB.
+        with db.transaction(self.con):
+            self.con.execute(
+                "INSERT INTO share_unique (owner, card_id, granted_at) VALUES (?,?,?)",
+                (handle, card_id, now),
+            )
+            self.vault.add_permanent_slots(handle, 1)   # vault caps at +5
+            seq = self._audit(handle, card_id, "granted", None,
+                              device_id, ip, asn, post_url, verified, now)
         # read-back: uniqueness row + vault slot count, both re-read from DB
         rb_unique = self.con.execute(
             "SELECT granted_at FROM share_unique WHERE owner=? AND card_id=?",
@@ -478,7 +496,7 @@ class ShareService:
             " sla_deadline, resolved, resolution) VALUES (?,?,?,?,?,0,NULL)",
             (handle, card_id, signal, now, now + FRAUD_QUEUE_SLA_S),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     # -- abuse: revoke + flag + disable ------------------------------------------
 
@@ -493,22 +511,22 @@ class ShareService:
         now = time.time() if now is None else now
         acct = self._account(handle)
         prev_slots = self.vault.share_slots(handle)
-        self.vault.revoke_permanent_slots(handle)              # revoke slots
         new_offenses = acct["offense_count"] + 1
         disable = 1 if new_offenses >= 2 else 0                 # repeat -> disabled
-        self.con.execute(
-            "UPDATE account_state SET offense_count=?, share_disabled=?, updated_at=?"
-            " WHERE handle=?",
-            (new_offenses, disable, now, handle),
-        )
-        if card_id:
-            self._audit(handle, card_id, "revoked", reason, None, None, None,
-                        None, 0, now)
+        with db.transaction(self.con):
+            self.vault.revoke_permanent_slots(handle)           # revoke slots
             self.con.execute(
-                "DELETE FROM share_unique WHERE owner=? AND card_id=?",
-                (handle, card_id),
+                "UPDATE account_state SET offense_count=?, share_disabled=?, updated_at=?"
+                " WHERE handle=?",
+                (new_offenses, disable, now, handle),
             )
-        self.con.commit()
+            if card_id:
+                self._audit(handle, card_id, "revoked", reason, None, None, None,
+                            None, 0, now)
+                self.con.execute(
+                    "DELETE FROM share_unique WHERE owner=? AND card_id=?",
+                    (handle, card_id),
+                )
         # read-back
         rb_acct = self._account(handle)
         rb_slots = self.vault.share_slots(handle)

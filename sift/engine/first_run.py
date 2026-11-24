@@ -40,7 +40,7 @@ import os
 import resource
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -50,21 +50,21 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + "/..")
     import importlib
     wh = importlib.import_module("data.warehouse")
+    from sift.cards import CardRegistry
+    from sift.cards.minting import CardMinter
     from sift.gauntlet import config as cfg
     from sift.gauntlet import stats
     from sift.gauntlet.runner import GauntletRunner
     from sift.registry import Ledger
-    from sift.cards import CardRegistry
-    from sift.cards.minting import CardMinter
 else:
     import importlib
     wh = importlib.import_module("data.warehouse")
+    from ..cards import CardRegistry  # type: ignore
+    from ..cards.minting import CardMinter  # type: ignore
     from ..gauntlet import config as cfg  # type: ignore
     from ..gauntlet import stats  # type: ignore
     from ..gauntlet.runner import GauntletRunner  # type: ignore
     from ..registry import Ledger  # type: ignore
-    from ..cards import CardRegistry  # type: ignore
-    from ..cards.minting import CardMinter  # type: ignore
 
 SCOPE_ID = "free_1y_top1k"
 FAMILY = "pairs"

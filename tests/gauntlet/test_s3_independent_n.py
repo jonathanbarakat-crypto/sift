@@ -45,9 +45,9 @@ RHO_BAR = (N_EFF - N_RAW) / (1.0 - N_RAW)
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 def _register_s2_rows(ledger, scope_id, p_values, family="pairs"):
