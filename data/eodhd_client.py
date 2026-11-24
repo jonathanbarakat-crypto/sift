@@ -84,7 +84,7 @@ def resolve_token(token: Optional[str] = None) -> str:
         return out.stdout.strip()
     raise EodhdError(
         "no EODHD API token available: pass --api-token, set $EODHD_TOKEN, or "
-        "store the free-tier key at `pass insert eodhd/api-token` "
+        "store the API key at `pass insert eodhd/api-token` "
         + (f"(pass error: {err})" if out is None else "(pass eodhd/api-token: not in the password store)")
     )
 
@@ -194,10 +194,18 @@ class EodhdClient:
                     "plan — see v3 scope doc section 4.4. Not retried, not bypassed.",
                     status=r.status_code, url=r.url,
                 )
+            if self.plan == "free":
+                hint = (
+                    "On the free tier this usually means the endpoint is not included "
+                    "(deep history, delisted lists, bulk) — not retried."
+                )
+            else:
+                hint = (
+                    f"On the {self.plan} plan this usually means the API key lacks entitlement "
+                    "for this endpoint or the daily limit was reached — not retried."
+                )
             raise EodhdError(
-                f"EODHD HTTP {r.status_code} for {path} (limit/entitlement). "
-                "On the free tier this usually means the endpoint is not included "
-                "(deep history, delisted lists, bulk) — not retried.",
+                f"EODHD HTTP {r.status_code} for {path} (limit/entitlement). {hint}",
                 status=r.status_code, url=r.url,
             )
         if r.status_code != 200:

@@ -172,6 +172,78 @@ def test_default_window_paid_starts_2000(tmp_path):
     assert d_from == "2025-11-20" and d_to == "2026-11-20"
 
 
+def test_ingest_paid_plan_ingests_delisted_and_lifts_cap(tmp_path, monkeypatch):
+    root = str(tmp_path / "wh")
+    delisted_list = [
+        {"Code": "LEHMQ", "Name": "Lehman", "Type": "Common Stock", "Exchange": "NYSE"},
+        {"Code": "SOMEETF", "Name": "Dead ETF", "Type": "ETF", "Exchange": "NYSE"},
+    ]
+    rows_map = {
+        "AAPL.US": make_eod_rows("2026-10-01", 30, base_close=200.0, vol=5_000_000),
+        "MSFT.US": make_eod_rows("2026-10-01", 30, base_close=400.0, vol=2_000_000),
+        "DEAD.US": make_eod_rows("2026-10-01", 5, base_close=3.0, vol=10_000),
+        "LEHMQ.US": make_eod_rows("2026-10-01", 5, base_close=1.5, vol=500_000),
+    }
+    routes = std_routes(rows_map, delisted_403=False)
+    routes[2] = (lambda u, p: u.endswith("/exchange-symbol-list/US") and p.get("delisted") == "1",
+                 FakeResponse(200, delisted_list))
+    sess = FakeSession(routes=routes)
+    _patch_client(monkeypatch, sess)
+    rc = ingest_eodhd.main(["--warehouse", root, "--plan", "paid", "--max-calls", "50000",
+                            "--from", "2026-10-01", "--to", "2026-11-11"])
+    assert rc == 0
+    assert wh.read_parquet(wh.eod_parquet_path(root, "US", "LEHMQ")) is not None
+    assert wh.read_parquet(wh.eod_parquet_path(root, "US", "SOMEETF")) is None
+    vrec = wh.read_json(os.path.join(root, "vintage.json"))
+    assert vrec["plan"] == "paid"
+
+
+def test_ingest_paid_plan_ignores_prior_free_tier_delisted_gap(tmp_path, monkeypatch):
+    root = str(tmp_path / "wh")
+    # First run on free tier records US-delisted.json with available_on_free_tier=False
+    sess_free = FakeSession(routes=std_routes({
+        "AAPL.US": make_eod_rows("2026-10-01", 30),
+        "MSFT.US": make_eod_rows("2026-10-01", 30),
+        "DEAD.US": make_eod_rows("2026-10-01", 5),
+    }, delisted_403=True))
+    _patch_client(monkeypatch, sess_free)
+    assert ingest_eodhd.main(["--warehouse", root, "--plan", "free", "--max-calls", "19",
+                              "--from", "2026-10-01", "--to", "2026-11-11"]) == 0
+    gap = wh.read_json(os.path.join(root, "meta", "symbol-list", "US-delisted.json"))
+    assert gap["available_on_free_tier"] is False
+
+    # Upgrading to --plan paid must re-fetch delisted=1 without needing --force
+    delisted_list = [{"Code": "LEHMQ", "Name": "Lehman", "Type": "Common Stock"}]
+    routes_paid = std_routes({
+        "LEHMQ.US": make_eod_rows("2026-10-01", 5),
+    }, delisted_403=False)
+    routes_paid[2] = (lambda u, p: u.endswith("/exchange-symbol-list/US") and p.get("delisted") == "1",
+                      FakeResponse(200, delisted_list))
+    sess_paid = FakeSession(routes=routes_paid)
+    _patch_client(monkeypatch, sess_paid)
+    assert ingest_eodhd.main(["--warehouse", root, "--plan", "paid", "--max-calls", "1000",
+                              "--from", "2026-10-01", "--to", "2026-11-11"]) == 0
+    assert wh.read_parquet(wh.eod_parquet_path(root, "US", "LEHMQ")) is not None
+    cached_delisted = wh.read_json(os.path.join(root, "meta", "symbol-list", "US-delisted.json"))
+    assert isinstance(cached_delisted, list) and cached_delisted[0]["Code"] == "LEHMQ"
+
+
+def test_ingest_paid_plan_delisted_403_fails_closed(tmp_path, monkeypatch):
+    root = str(tmp_path / "wh")
+    sess = FakeSession(routes=std_routes(delisted_403=True))
+    _patch_client(monkeypatch, sess)
+    rc = ingest_eodhd.main(["--warehouse", root, "--plan", "paid", "--max-calls", "1000",
+                            "--from", "2026-10-01", "--to", "2026-11-11"])
+    assert rc == 1  # fail closed on paid plan if delisted=1 is refused
+
+
+def test_ingest_cli_rejects_max_calls_above_free_cap(tmp_path, monkeypatch):
+    root = str(tmp_path / "wh")
+    _patch_client(monkeypatch, FakeSession())
+    rc = ingest_eodhd.main(["--warehouse", root, "--plan", "free", "--max-calls", "100"])
+    assert rc == 2
+
+
 def test_budget_exceeded_raises_before_http(tmp_path):
     sess = FakeSession(routes=std_routes())
     c = make_client(tmp_path, sess, max_calls=2)

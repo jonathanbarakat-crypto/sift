@@ -80,8 +80,10 @@ other users — even anonymized, aggregated, free, or invite-only (help/commerci
 
 ## Other vendors
 
-- **yfinance / Yahoo scraping**: not authorized by Yahoo ToS. Research/pre-validation
-  use only, never the production feed; no delisted lists (survivorship-bias risk,
-  v3 §4.5/§12.8), no SLA. If used for beta research, label data vintage as
-  research-grade in the warehouse.
+- **yfinance / Yahoo scraping (RETIRED)**: not authorized by Yahoo ToS; no
+  delisted lists (survivorship-bias risk, v3 §4.5/§12.8), no SLA. The
+  research-only `data/yf_client.py` / `data/ingest_yf.py` modules and
+  `yfinance` dependency have been removed; fail-closed `research_grade`
+  guards remain in `data/universe.py` and `sift/engine/first_run.py` for any
+  legacy warehouses.
 - Any new vendor: record its terms here before wiring its client.
