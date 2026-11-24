@@ -21,7 +21,6 @@ Tests:
 
 import json
 
-import numpy as np
 import pytest
 
 from sift import flags

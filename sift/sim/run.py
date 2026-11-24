@@ -26,7 +26,7 @@ from .antiabuse import run_antiabuse_sims
 from .clock import DEFAULT_SEED
 from .header import SIM_HEADER, header_lines
 from .lifecycle import run_lifecycle_sim
-from .report import dump_json, render_text
+from .report import render_text
 from .soak import DEFAULT_N_USERS, run_soak
 
 

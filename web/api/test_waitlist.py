@@ -1,9 +1,8 @@
 """Stdlib unittest suite for web/api/waitlist.py (importable module)."""
 import importlib.util
-import json
-import sys
 import tempfile
 import threading
+import unittest
 from pathlib import Path
 
 SPEC = importlib.util.spec_from_file_location(
@@ -11,8 +10,6 @@ SPEC = importlib.util.spec_from_file_location(
 )
 wl = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(wl)
-
-import unittest
 
 
 class SaveEmailTests(unittest.TestCase):
@@ -57,12 +54,14 @@ class SaveEmailTests(unittest.TestCase):
         def worker():
             results.append(wl.save_email("race@test.io"))
         threads = [threading.Thread(target=worker) for _ in range(20)]
-        for t in threads: t.start()
-        for t in threads: t.join()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
         self.assertEqual(results.count(True), 1, f"expected exactly one True, got {results}")
         lines = wl.WAITLIST_CSV.read_text().strip().splitlines()
         self.assertEqual(len(lines), 2)
-        self.assertEqual(sum(1 for l in lines if l.startswith("email,")), 1)
+        self.assertEqual(sum(1 for line in lines if line.startswith("email,")), 1)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,11 @@
 """Unit tests for the pure gauntlet stat functions (S0-S4)."""
 
-import math
 
 import numpy as np
 import pytest
 
 from sift.gauntlet import config as cfg
 from sift.gauntlet import stats
-
 
 # -- normal helpers ---------------------------------------------------------
 
@@ -72,7 +70,8 @@ def test_s2_detects_signal_and_passes_null():
     fx = f_pair()
     prices = fx["prices"]
     x, y = prices[:, 0], prices[:, 1]
-    rx = np.diff(np.log(x)); ry = np.diff(np.log(y))
+    rx = np.diff(np.log(x))
+    ry = np.diff(np.log(y))
     rs = ry - rx
     # mean-reversion content: -corr(spread level t, next-bar spread return)
     stat = stats.mean_reversion_stat

@@ -21,7 +21,7 @@ import re
 import time
 
 from sift import flags
-from sift.cards import Card, CardError, CardRegistry
+from sift.cards import Card, CardRegistry
 from sift.registry import Ledger
 
 # Ticker-like tokens (US equities): 2-5 UPPERCASE letters, optionally a

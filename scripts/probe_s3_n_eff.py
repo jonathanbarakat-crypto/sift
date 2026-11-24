@@ -2,13 +2,14 @@
 """Probe for sift issue #59: raw vs A.3 correlation-adjusted independent N
 in the S3 DSR admission bar, using the 2026-11-20 EODHD eval numbers.
 
-Run: python3 scripts_probe_s3_n_eff.py  (from the repo root)
+Run: python3 scripts/probe_s3_n_eff.py  (from the repo root)
 """
 import math
 import sys
+from pathlib import Path
 from statistics import NormalDist
 
-sys.path.insert(0, ".")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sift.gauntlet import stats  # noqa: E402
 
 nd = NormalDist()

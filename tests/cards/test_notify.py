@@ -18,7 +18,6 @@ Fixtures:
 - signals-only: payload carries survival facts, no execution/betting fields.
 """
 
-import time
 
 import pytest
 
@@ -239,7 +238,7 @@ def test_deliver_due_marks_exactly_once(notifier, cards):
 # -- ghost parity ------------------------------------------------------------------------
 
 def test_ghost_cards_get_full_notification_utility(notifier, cards):
-    regular = _mint(cards, handle="alice", trial="t1")
+    _mint(cards, handle="alice", trial="t1")
     # same canonical spec again -> ghost
     ghost = cards.mint(
         trial_id="t1", family="pairs", scope_id="free_5y_top1k",

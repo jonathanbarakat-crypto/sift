@@ -8,17 +8,22 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 import pytest
 
+from data import ingest_eodhd, universe
 from data import warehouse as wh
 from data.eodhd_client import (
-    FREE_TIER_DAILY_CALLS, PAID_EOD_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
-    EodhdClient, EodhdError, resolve_token,
+    FREE_TIER_DAILY_CALLS,
+    PAID_EOD_DAILY_CALLS,
+    CallBudgetExceeded,
+    DeepHistoryBlocked,
+    EodhdClient,
+    EodhdError,
+    resolve_token,
 )
-from data import ingest_eodhd, universe
 
 
 # --------------------------------------------------------------------------
@@ -62,7 +67,7 @@ def bars(symbol_rows):
 
 def make_eod_rows(start: str, n: int, base_close: float = 100.0, vol: int = 1_000_000):
     """Business-day bars only (real exchanges don't trade weekends)."""
-    d0 = pd.bdate_range(start, periods=n)[0].date()
+    pd.bdate_range(start, periods=n)[0].date()
     days = pd.bdate_range(start, periods=n)
     return [
         {"date": days[i].date().isoformat(), "open": base_close, "high": base_close + 1,
@@ -411,7 +416,8 @@ def test_vintage_hash_changes_with_data_not_state(tmp_path):
     v2 = wh.write_vintage(root)["vintage"]
     assert v1 == v2
     # data change must move the vintage
-    df2 = df.copy(); df2["close"] = 2.0
+    df2 = df.copy()
+    df2["close"] = 2.0
     wh.write_parquet_atomic(df2, os.path.join(root, "eod", "US", "X.parquet"))
     v3 = wh.write_vintage(root)["vintage"]
     assert v3 != v1
@@ -432,7 +438,8 @@ def _seed_bars(root):
     for sym, rows in frames.items():
         df = pd.DataFrame(rows)
         df["dollar_volume"] = df["close"] * df["volume"]
-        df["symbol"] = f"{sym}.US"; df["exchange"] = "US"
+        df["symbol"] = f"{sym}.US"
+        df["exchange"] = "US"
         wh.write_parquet_atomic(df[wh.EOD_COLUMNS], os.path.join(eod, f"{sym}.parquet"))
 
 

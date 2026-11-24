@@ -31,10 +31,8 @@ data — aggregates only (v3 §12).
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from sift import flags
 from sift.cards import CardRegistry

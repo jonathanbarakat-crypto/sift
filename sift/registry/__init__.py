@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from sift import db
+
 STAGES = ("s0", "s1", "s2", "s3", "s4", "s5")
 VERDICTS = ("pending", "killed", "survivor")
 # v4.2 §3: S0-S2 passers that miss the S4/S3 bar are survivors at the bronze
@@ -155,16 +157,29 @@ class Trial:
 class Ledger:
     """Append-only trial registry. The only writer is the server-side engine."""
 
-    def __init__(self, db_path: str | Path):
-        self.db_path = Path(db_path)
-        if self.db_path.parent and str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
-        self.con.execute("PRAGMA foreign_keys = ON")
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
+        if con is not None:
+            self.con = con
+            self._owns_con = False
+            self.db_path = (
+                Path(db_path) if db_path is not None else (db.db_path_of(con) or Path(":memory:"))
+            )
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA foreign_keys = ON")
+        else:
+            if db_path is None:
+                raise ValueError("Ledger requires db_path or con")
+            self.db_path = Path(db_path)
+            self.con = db.connect(self.db_path)
+            self._owns_con = True
         self.con.executescript(SCHEMA_SQL)
         self._migrate()
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def _migrate(self) -> None:
         """Additive-only migrations for append-only ledgers (sift #59):
@@ -181,13 +196,15 @@ class Ledger:
 
     def __enter__(self) -> "Ledger":
         return self
+
     def __exit__(self, *exc) -> None:
         self.close()
 
     # -- registration ------------------------------------------------------
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     # -- registration -----------------------------------------------------
     def register(
@@ -232,7 +249,7 @@ class Ledger:
                 (trial_id, s, now),
             )
         self._bump_stratum(scope_id, now)
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get(trial_id)
 
     def get(self, trial_id: str) -> Trial:
@@ -299,7 +316,7 @@ class Ledger:
             (status, statistic, threshold, p_value, n_stratum, v_stratum, dsr,
              q_bh, seed, n_eff, rho_bar, epoch, time.time(), trial_id, stage),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def stages(self, trial_id: str) -> list[sqlite3.Row]:
         return self.con.execute(
@@ -340,7 +357,7 @@ class Ledger:
             "UPDATE trial SET verdict=?, survivor_class=? WHERE trial_id=?",
             (verdict, survivor_class, trial_id),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     # -- scope-stratified denominators -------------------------------------
     def _bump_stratum(self, scope_id: str, now: float) -> None:
@@ -394,7 +411,7 @@ class Ledger:
             "SELECT COUNT(*) FROM trial WHERE scope_id=?", (scope_id,)
         ).fetchone()[0]
         self._write_stratum(scope_id, n, v, time.time())
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def _write_stratum(self, scope_id: str, n: int, v: float, now: float) -> None:
         self.con.execute(
@@ -459,7 +476,7 @@ class Ledger:
             (scope_id, int(epoch), int(n_raw), float(n_eff), float(rho_bar),
              method, canonical_json(detail or {}), now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def stratum_epoch_stats(self, scope_id: str,
                             epoch: int | None = None) -> dict | None:
@@ -510,7 +527,7 @@ class Ledger:
             " VALUES (?,?,?,?)",
             (trial_id, event_type, canonical_json(payload), now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         assert cur.lastrowid is not None
         return int(cur.lastrowid)
 

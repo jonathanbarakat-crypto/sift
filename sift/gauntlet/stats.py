@@ -817,8 +817,10 @@ def pairs_strategy_returns(
     prices = np.asarray(prices, float)
     T = prices.shape[0]
     x, y = prices[:, 0], prices[:, 1]
-    rx = np.zeros(T); rx[1:] = np.diff(np.log(x))
-    ry = np.zeros(T); ry[1:] = np.diff(np.log(y))
+    rx = np.zeros(T)
+    rx[1:] = np.diff(np.log(x))
+    ry = np.zeros(T)
+    ry[1:] = np.diff(np.log(y))
     hedge = np.full(T, np.nan)
     for t in range(formation, T):
         w = slice(t - formation, t)
@@ -912,13 +914,17 @@ def walk_forward_returns(
         end = min(t + step, T)
         w = slice(max(0, t - formation), t)
         x, y = prices[w, 0], prices[w, 1]
-        rx = np.zeros(len(x)); rx[1:] = np.diff(np.log(x))
-        ry = np.zeros(len(y)); ry[1:] = np.diff(np.log(y))
+        rx = np.zeros(len(x))
+        rx[1:] = np.diff(np.log(x))
+        ry = np.zeros(len(y))
+        ry[1:] = np.diff(np.log(y))
         vx = rx.var(ddof=1)
         h = float(np.cov(rx, ry, ddof=1)[0, 1] / vx) if vx > 0 else 0.0
         block = prices[t:end]
-        bx = np.zeros(len(block)); bx[1:] = np.diff(np.log(block[:, 0]))
-        by = np.zeros(len(block)); by[1:] = np.diff(np.log(block[:, 1]))
+        bx = np.zeros(len(block))
+        bx[1:] = np.diff(np.log(block[:, 0]))
+        by = np.zeros(len(block))
+        by[1:] = np.diff(np.log(block[:, 1]))
         rs = by - h * bx
         train_spread = np.cumsum(ry - h * rx)
         mu = float(train_spread.mean()) if len(train_spread) else 0.0

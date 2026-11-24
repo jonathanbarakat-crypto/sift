@@ -49,17 +49,23 @@ import pandas as pd
 # allow running both as a module (python3 -m data.ingest_eodhd) and as a script
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from data.eodhd_client import (  # type: ignore
-        BASE_URL, PLAN_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
-        EodhdClient, EodhdError,
-    )
     from data import warehouse as wh  # type: ignore
-else:
-    from .eodhd_client import (
-        BASE_URL, PLAN_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
-        EodhdClient, EodhdError,
+    from data.eodhd_client import (  # type: ignore
+        PLAN_DAILY_CALLS,
+        CallBudgetExceeded,
+        DeepHistoryBlocked,
+        EodhdClient,
+        EodhdError,
     )
+else:
     from . import warehouse as wh
+    from .eodhd_client import (
+        PLAN_DAILY_CALLS,
+        CallBudgetExceeded,
+        DeepHistoryBlocked,
+        EodhdClient,
+        EodhdError,
+    )
 
 DEFAULT_WAREHOUSE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "data", "warehouse")

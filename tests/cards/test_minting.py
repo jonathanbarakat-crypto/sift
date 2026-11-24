@@ -34,9 +34,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()
@@ -152,7 +152,7 @@ def test_card_id_is_hmac_commitment_of_canonical_spec(ledger, cards):
 def test_duplicate_spec_mints_ghost_fifo(ledger, cards):
     v1, t1 = _run_validated_green(ledger, cards, fixture="F-PAIR-FULL")
     # mint the SAME canonical spec again directly (skip-list re-survive path)
-    minter = CardMinter(ledger, cards)
+    CardMinter(ledger, cards)
     trial = ledger.get(t1.trial_id)
     s2 = ledger.stage(t1.trial_id, "s2")
     s3 = ledger.stage(t1.trial_id, "s3")

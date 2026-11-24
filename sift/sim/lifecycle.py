@@ -27,7 +27,7 @@ from sift.cards import CARD_TIERS
 from sift.cards.decay import DECAY_EVENT
 
 from .clock import DEFAULT_SEED
-from .report import build_report, dump_json
+from .report import build_report
 from .world import SIM_SCOPE_ID, SIM_VINTAGE, SimWorld
 
 

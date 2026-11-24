@@ -61,22 +61,38 @@ class LayerError(Exception):
 
 
 class CardLayer:
-    """Composition root for the v4.1 card layer. Server-side only."""
+    """Composition root for the v4.1 card layer. Server-side only.
 
-    def __init__(self, ledger: Ledger, db_dir: str | Path,
-                 card_secret: bytes | None = None,
-                 live_returns_fn=None):
-        db_dir = Path(db_dir)
-        db_dir.mkdir(parents=True, exist_ok=True)
+    Shares `ledger.con` (single WAL-mode SQLite file) across all 7 stores
+    (trial ledger, cards, vault, shares, notify, signal events, decks) by
+    default so cross-store mutations can participate in one atomic
+    `layer.transaction()`.
+    """
+
+    def __init__(
+        self,
+        ledger: Ledger,
+        db_dir: str | Path | None = None,
+        card_secret: bytes | None = None,
+        live_returns_fn=None,
+        *,
+        _owns_ledger: bool = False,
+    ):
+        # `db_dir` is retained as an optional legacy parameter so existing
+        # callers (`CardLayer(ledger, tmp_path / "cards", ...)`) keep working
+        # while all 7 stores consolidate into `ledger.con`.
+        _ = db_dir
         self.ledger = ledger
-        self.cards = CardRegistry(db_dir / "cards.db", secret=card_secret)
+        self._owns_ledger = _owns_ledger
+        self.con = ledger.con
+        self.db_path = ledger.db_path
+        self.cards = CardRegistry(secret=card_secret, con=self.con)
         self.minter = CardMinter(ledger, self.cards)
-        self.vault = Vault(self.cards, db_dir / "vault.db")
+        self.vault = Vault(self.cards, con=self.con)
         self.face = CardFaceRenderer(ledger, self.cards)
-        self.shares = ShareService(self.cards, self.vault, db_dir / "shares.db")
-        self.notify = Notifier(self.cards, db_dir / "notify.db")
-        self.events = SignalEventService(self.notify, ledger,
-                                         db_dir / "signal.db")
+        self.shares = ShareService(self.cards, self.vault, con=self.con)
+        self.notify = Notifier(self.cards, con=self.con)
+        self.events = SignalEventService(self.notify, ledger, con=self.con)
         # soundness #10: wire LIVE decay evaluators, not the inert static
         # default. `live_returns_fn(card) -> np.ndarray | None` is the
         # server-supplied post-mint live net-return series per card. With it
@@ -100,8 +116,37 @@ class CardLayer:
         self.metrics = Metrics(ledger, self.cards, self.vault, self.shares)
         # v4.2 deck layer (hermes-tasks #166): its own registry + service,
         # gated by decks_v4_2 (which also requires cards_v4_1).
-        self.decks = DeckRegistry(db_dir / "decks.db", secret=card_secret)
+        self.decks = DeckRegistry(secret=card_secret, con=self.con)
         self.deck_service = DeckService(self.cards, self.decks)
+
+    @classmethod
+    def open(
+        cls,
+        db_path: str | Path,
+        *,
+        card_secret: bytes | None = None,
+        live_returns_fn=None,
+    ) -> "CardLayer":
+        """Open a single consolidated SQLite DB owning both `Ledger` and
+        `CardLayer`. Closing the returned layer also closes `ledger`."""
+        ledger = Ledger(db_path)
+        try:
+            return cls(
+                ledger,
+                card_secret=card_secret,
+                live_returns_fn=live_returns_fn,
+                _owns_ledger=True,
+            )
+        except Exception:
+            ledger.close()
+            raise
+
+    def transaction(self):
+        """Atomic cross-store transaction context manager over the shared
+        SQLite connection."""
+        from sift import db as _db
+
+        return _db.transaction(self.con)
 
     def set_live_returns(self, live_returns_fn) -> None:
         """Inject (or replace) the server-side live post-mint return-series
@@ -130,6 +175,8 @@ class CardLayer:
         for c in (self.events, self.notify, self.shares,
                   self.vault, self.cards, self.decks):
             c.close()
+        if self._owns_ledger:
+            self.ledger.close()
 
     # -- the one flag guard ---------------------------------------------------------
 

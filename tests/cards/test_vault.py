@@ -12,7 +12,8 @@ from sift.cards import CardRegistry
 from sift.cards.vault import Vault, VaultError
 from sift.registry import Ledger
 from tests.cards.test_minting import (
-    SECRET, _run_validated_green,
+    SECRET,
+    _run_validated_green,
 )
 
 
@@ -25,9 +26,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()

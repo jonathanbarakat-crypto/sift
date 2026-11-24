@@ -19,7 +19,6 @@ from sift.gauntlet import config as cfg
 from sift.gauntlet import s5 as s5stats
 from sift.gauntlet import stats
 
-
 S_CSCV = 16
 
 
@@ -226,18 +225,20 @@ def test_run_s5_computes_real_pbo_over_variant_grid(ledger=None):
     record a computed pbo (not a hardcoded 0.0). Uses the F-DELIST-style
     small panel so the test is fast; the pbo recorded in the stage detail
     equals stats.cscv_pbo on the same matrix (deterministic given seed)."""
+    import pathlib
+    import tempfile
+
     from sift.registry import Ledger
-    import tempfile, pathlib
     tmp = pathlib.Path(tempfile.mkdtemp())
-    l = Ledger(tmp / "l.db")
+    led = Ledger(tmp / "l.db")
     try:
         from sift.gauntlet.runner import GauntletRunner
-        from tests.fixtures.planted import f_pair, T_FULL
+        from tests.fixtures.planted import f_pair
         fx = f_pair(T=1024, seed=3)
         prices = fx["prices"]
         spread = np.diff(np.log(prices[:, 1])) - np.diff(np.log(prices[:, 0]))
-        trial = l.register("pairs", "free_5y_top1k", {"fixture": "F-PAIR"}, "v1")
-        runner = GauntletRunner(l, seed=11)
+        trial = led.register("pairs", "free_5y_top1k", {"fixture": "F-PAIR"}, "v1")
+        runner = GauntletRunner(led, seed=11)
         s5 = runner.run_s5(trial.trial_id, full_prices=prices,
                            full_spread_returns=spread,
                            statistic_fn=stats.mean_reversion_stat,
@@ -256,4 +257,4 @@ def test_run_s5_computes_real_pbo_over_variant_grid(ledger=None):
         # and the checks dict carries the pbo check result (fail-closed wired)
         assert "pbo" in s5.detail["checks"]
     finally:
-        l.close()
+        led.close()

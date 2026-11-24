@@ -41,11 +41,11 @@ def test_antiabuse_deterministic_same_seed(sim_env, tmp_path):
 
 
 def test_append_only_triggers_block_direct_sql(sim_env, tmp_path):
-    """Direct SQL probe on the sim's shares.db: UPDATE and DELETE on
-    share_grant must raise (triggers), and the row count is unchanged."""
+    """Direct SQL probe on the sim's consolidated SQLite DB: UPDATE and
+    DELETE on share_grant must raise (triggers), and row count is unchanged."""
     res = run_antiabuse_sims(tmp_path / "ab", seed=99)
     assert res.checks["share_grant_append_only_triggers_block"]
-    db = tmp_path / "ab" / "cards" / "shares.db"
+    db = tmp_path / "ab" / "ledger.db"
     con = sqlite3.connect(str(db))
     try:
         n_before = con.execute("SELECT COUNT(*) FROM share_grant").fetchone()[0]

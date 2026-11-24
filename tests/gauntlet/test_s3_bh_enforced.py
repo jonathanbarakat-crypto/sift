@@ -20,9 +20,9 @@ from sift.registry import Ledger
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 # sr_hat=0.20 per bar clears DSR >= 0.95 for any stratum size used here
