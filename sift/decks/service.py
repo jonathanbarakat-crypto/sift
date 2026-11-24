@@ -35,15 +35,16 @@ import time
 import numpy as np
 
 from sift import flags
-from sift.cards import Card, CardRegistry
+from sift.cards import CARD_TIERS, Card, CardRegistry
 from sift.decks import Deck, DeckError, DeckRegistry
 from sift.gauntlet import config as gcfg
 from sift.gauntlet import s6 as s6stats
 from sift.gauntlet import stats
 
-# Card-tier strength order for top-K membership (cards use bronze/silver/gold;
-# higher index = stronger). Deck ranks F-S are separate (see decks/__init__).
-_CARD_TIER_ORDER = {"bronze": 0, "silver": 1, "gold": 2}
+# Card-tier strength order for top-K membership, derived from CARD_TIERS
+# (bronze < silver < gold < platinum; higher index = stronger). Deck ranks
+# F-S are separate (see decks/__init__).
+_CARD_TIER_ORDER = {tier: idx for idx, tier in enumerate(CARD_TIERS)}
 
 
 def _require_flag(handle: str | None = None) -> None:

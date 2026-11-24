@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 from sift import flags
-from sift.cards import CardRegistry
+from sift.cards import CARD_TIERS, CardRegistry
 from sift.decks import (
     DECK_RANKS,
     DeckError,
@@ -84,16 +84,22 @@ def svc(cards, decks):
 def _mint_cards(cards, n=12, owner="alice", family="pairs"):
     """Mint n regular cards with distinct specs and mixed tiers."""
     out = []
-    tiers = [("gold", 0.995, 4.5, 0.001), ("silver", 0.96, 3.2, 0.01),
-             ("bronze", 0.90, 2.5, 0.04)]
+    # (expected_tier, dsr, t_net_full, p_perm, s4_pass, s5_pass)
+    tiers = [
+        ("gold", 0.995, 4.5, 0.001, True, False),
+        ("silver", 0.96, 3.2, 0.01, False, False),
+        ("bronze", 0.90, 2.5, 0.04, False, False),
+    ]
     for i in range(n):
-        t = tiers[i % len(tiers)]
+        expected, dsr, t_net, p_perm, s4_pass, s5_pass = tiers[i % len(tiers)]
         card = cards.mint(
             trial_id=f"trial-x{i}", family=family, scope_id=SCOPE,
             config_hash=f"cfg{i}", data_vintage_hash=VINTAGE,
             survivor_class="validated-green", owner_handle=owner,
-            dsr=t[1], t_net_full=t[2], p_perm=t[3], now=1000.0 + i,
+            dsr=dsr, t_net_full=t_net, p_perm=p_perm,
+            s4_pass=s4_pass, s5_pass=s5_pass, now=1000.0 + i,
         )
+        assert card.tier == expected, f"fixture tier drift: got {card.tier}, expected {expected}"
         out.append(card)
     return out
 
@@ -142,13 +148,31 @@ def test_ranked_membership_topk_by_tier_deterministic(cards):
     assert [by_id[c] for c in m1] == ["gold", "gold", "gold", "gold", "silver"]
 
 
+def test_ranked_membership_ranks_platinum_above_gold(cards):
+    cs = _mint_cards(cards, n=6)  # 2 gold, 2 silver, 2 bronze
+    plat = cards.mint(
+        trial_id="trial-plat", family="pairs", scope_id=SCOPE,
+        config_hash="cfg-plat", data_vintage_hash=VINTAGE,
+        survivor_class="validated-green", owner_handle="alice",
+        dsr=0.995, t_net_full=4.5, p_perm=0.001,
+        s4_pass=True, s5_pass=True, now=2000.0,
+    )
+    assert plat.tier == "platinum"
+    pool = cs + [plat]
+    bucket = bucket_config(size=5, sector="all", family_mix=("pairs",))
+    got = ranked_membership(pool, bucket)
+    by_id = {c.card_id: c.tier for c in pool}
+    assert [by_id[c] for c in got] == ["platinum", "gold", "gold", "silver", "silver"]
+
+
 def test_ranked_membership_family_mix_and_sector(cards):
     pairs = _mint_cards(cards, n=6, family="pairs")
     ll = _mint_cards(cards, n=6, owner="bob", family="lead_lag")
     pool = pairs + ll
     b_pairs = bucket_config(size=5, sector="all", family_mix=("pairs",))
     got = ranked_membership(pool, b_pairs)
-    assert got == sorted(got, key=lambda c: (-{"gold": 2, "silver": 1, "bronze": 0}[
+    tier_rank = {t: i for i, t in enumerate(CARD_TIERS)}
+    assert got == sorted(got, key=lambda c: (-tier_rank[
         {c.card_id: c.tier for c in pairs}[c]], c))  # top-5 by tier among pairs
     assert set(got) <= {c.card_id for c in pairs}
     b_mixed = bucket_config(size=10, sector="all", family_mix=("pairs", "lead_lag"))
