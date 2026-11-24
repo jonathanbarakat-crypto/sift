@@ -1,13 +1,19 @@
 # Research feeds — yfinance (Yahoo) vs EODHD (production)
 
-**EODHD is the production vendor.** The yfinance/Yahoo feed added by
-`data/yf_client.py` + `data/ingest_yf.py` is **RESEARCH-ONLY** and must never
-become the production data path.
+> **Status: RETIRED.** `data/yf_client.py`, `data/ingest_yf.py`, and the
+> `yfinance` dependency in `requirements.txt` have been removed now that EODHD
+> paid-plan ingestion (`data/ingest_eodhd.py --plan paid`) is active. Fail-closed
+> `research_grade` / `research_*` guards in `data/universe.py` and
+> `sift/engine/first_run.py` remain in place for any legacy research warehouses
+> on disk.
+
+**EODHD is the production vendor.** The historical yfinance/Yahoo feed was
+**RESEARCH-ONLY** and was never permitted as the production data path.
 
 Source of the constraint: `docs/vendor-licensing.md` (pull/26), which records
-the EODHD Terms & Conditions fetched and read 2026-11-17. Yahoo's own terms do
-**not** authorize redistribution of Yahoo data in a commercial product, and
-the yfinance scraping path has **no SLA**.
+the EODHD Terms & Conditions fetched and read 2026-11-17 (re-verified
+2026-11-20). Yahoo's own terms do **not** authorize redistribution of Yahoo
+data in a commercial product, and the yfinance scraping path has **no SLA**.
 
 | | EODHD (production) | yfinance / Yahoo (research-only) |
 |---|---|---|

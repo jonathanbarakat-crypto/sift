@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""SIFT gate-1 EODHD ingestion (free tier, server-side only).
+"""SIFT EODHD ingestion (plan-aware: free or paid, server-side only).
 
 Fetches the exchanges list once (cached), then per-ticker daily EOD for US
 stocks, writing one parquet file per ticker under ``data/warehouse/eod/US/``
 plus a data-vintage content hash (``data/warehouse/VINTAGE``).
 
-HARD LIMIT — EODHD free tier: 20 API calls/day, past-1-year EOD only, live
-quotes included. Design for that:
+Plans (selected via ``--plan``):
+  * ``free`` (default): 20 API calls/day, past-1-year EOD only, live quotes
+    included, no delisted=1 symbol lists.
+  * ``paid`` (EOD Historical Data — All World): 100,000 API calls/day,
+    default window ``2000-01-01``..today (delisted coverage floor), active +
+    delisted symbol lists.
 
+Design:
   * resumable — already-ingested tickers whose parquet covers the requested
     window are skipped without spending a call;
   * cached on disk — exchanges-list and symbol lists are cached under
     ``data/warehouse/meta/`` and reused across runs;
-  * one call per ticker per run at most — ``--max-calls`` (default 19, under
-    the hard 20/day) is a hard guard enforced BEFORE each HTTP request, and
-    the per-day call count is persisted in ``state/calls.json`` so a rerun
-    after a crash does not re-spend calls;
+  * one call per ticker per run at most — ``--max-calls`` (default: plan
+    limit - 1) is a hard guard enforced BEFORE each HTTP request, and the
+    per-day call count is persisted in ``state/calls.json`` so a rerun after
+    a crash does not re-spend calls;
   * deep-history (pre-1-year) probes raise ``DeepHistoryBlocked`` with a clear
     message — expected on the free tier, never retried, never bypassed.
 
@@ -27,8 +32,9 @@ infrastructure only; raw data is never served to clients; SIFT does not
 trade.
 
 Usage:
-    python3 -m data.ingest_eodhd --warehouse data/warehouse --max-calls 19
-    python3 -m data.ingest_eodhd --tickers AAPL.US MSFT.US --refresh-live
+    python3 -m data.ingest_eodhd --warehouse data/warehouse --plan paid --max-calls 50000
+    python3 -m data.ingest_eodhd --warehouse data/warehouse --plan free --max-calls 19
+    python3 -m data.ingest_eodhd --tickers AAPL MSFT --refresh-live
     python3 -m data.ingest_eodhd --exchanges-list-only
 """
 from __future__ import annotations
@@ -44,13 +50,13 @@ import pandas as pd
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from data.eodhd_client import (  # type: ignore
-        BASE_URL, FREE_TIER_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
+        BASE_URL, PLAN_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
         EodhdClient, EodhdError,
     )
     from data import warehouse as wh  # type: ignore
 else:
     from .eodhd_client import (
-        BASE_URL, FREE_TIER_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
+        BASE_URL, PLAN_DAILY_CALLS, CallBudgetExceeded, DeepHistoryBlocked,
         EodhdClient, EodhdError,
     )
     from . import warehouse as wh
@@ -70,9 +76,14 @@ def log(msg: str) -> None:
     print(f"[ingest_eodhd {datetime.now(timezone.utc).strftime('%H:%M:%S')}Z] {msg}", flush=True)
 
 
-def default_window(today: date | None = None) -> tuple[str, str]:
-    """Free-tier window: (today - 365d, today). Deep history is not available."""
+def default_window(today: date | None = None, plan: str = "free") -> tuple[str, str]:
+    """Default ingest window. Free plan: (today - 365d, today) — deep history
+    is not available there. Paid plan: (2000-01-01, today) — the delisted
+    ticker list only covers names from January 2000, so earlier windows are
+    survivorship-biased by construction (S5 exists to kill exactly that)."""
     today = today or date.today()
+    if plan == "paid":
+        return ("2000-01-01", today.isoformat())
     return ((today - timedelta(days=FREE_TIER_HISTORY_DAYS)).isoformat(), today.isoformat())
 
 
@@ -136,9 +147,12 @@ def fetch_symbol_list(client: EodhdClient, root: str, exchange: str,
         cached = wh.read_json(path)
         if cached is not None:
             if delisted and isinstance(cached, dict) and cached.get("available_on_free_tier") is False:
-                log(f"symbol-list {exchange} (delisted): free-tier gap already recorded "
-                    f"(HTTP {cached.get('http_status')}) — not re-probed, 0 calls")
-                return []
+                if client.plan == "free":
+                    log(f"symbol-list {exchange} (delisted): free-tier gap already recorded "
+                        f"(HTTP {cached.get('http_status')}) — not re-probed, 0 calls")
+                    return []
+                log(f"symbol-list {exchange} (delisted): ignoring prior free-tier gap marker "
+                    f"under plan={client.plan!r}; fetching delisted list")
             if isinstance(cached, list):
                 log(f"symbol-list {exchange} ({kind}): using cached ({len(cached)} names, 0 calls)")
                 return cached
@@ -147,7 +161,7 @@ def fetch_symbol_list(client: EodhdClient, root: str, exchange: str,
     except DeepHistoryBlocked:
         raise
     except EodhdError as e:
-        if delisted and e.status in (403, 429):
+        if delisted and e.status in (403, 429) and client.plan == "free":
             # EXPECTED on the free tier: delisted lists are not included.
             # Record the gap explicitly and fall back to the active list.
             log(f"symbol-list {exchange} (delisted): HTTP {e.status} — not available on the "
@@ -225,13 +239,19 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--exchange", default="US", help="exchange code for stocks (default US)")
     ap.add_argument("--tickers", nargs="*", default=None,
                     help="specific symbols (without .US suffix), e.g. AAPL MSFT; "
-                         "default: all active common stocks from the cached/fetched symbol list")
+                         "default: all active (and, on paid plan, delisted) common stocks "
+                         "from the cached/fetched symbol lists")
+    ap.add_argument("--plan", choices=["free", "paid"], default="free",
+                    help="EODHD plan the key is entitled to: 'free' = 20 calls/day, past-1y EOD "
+                         "only; 'paid' = EOD Historical Data — All World (100k calls/day, 30+ "
+                         "yrs, delisted lists, bulk). The call-budget hard cap follows the plan "
+                         "(default: paid -> 99999, free -> 19)")
+    ap.add_argument("--max-calls", type=int, default=None,
+                    help="hard API-call guard for this run (default: plan limit - 1)")
     ap.add_argument("--from", dest="from_date", default=None,
-                    help="window start YYYY-MM-DD (default: today-365d, the free-tier max)")
+                    help="window start YYYY-MM-DD (default: today-365d on free plan, "
+                         "2000-01-01 on paid plan — delisted coverage starts 2000)")
     ap.add_argument("--to", dest="to_date", default=None, help="window end (default: today)")
-    ap.add_argument("--max-calls", type=int, default=FREE_TIER_DAILY_CALLS - 1,
-                    help=f"hard API-call guard for this run (default {FREE_TIER_DAILY_CALLS - 1}, "
-                         f"under the free-tier limit of {FREE_TIER_DAILY_CALLS}/day)")
     ap.add_argument("--refresh-live", action="store_true",
                     help="also fetch the live real-time quote per ticker (1 extra call each)")
     ap.add_argument("--exchanges-list-only", action="store_true",
@@ -248,7 +268,7 @@ def main(argv: list | None = None) -> int:
     os.makedirs(root, exist_ok=True)
     from_date, to_date = args.from_date, args.to_date
     if not from_date or not to_date:
-        d_from, d_to = default_window()
+        d_from, d_to = default_window(plan=args.plan)
         from_date = from_date or d_from
         to_date = to_date or d_to
 
@@ -258,13 +278,15 @@ def main(argv: list | None = None) -> int:
             max_calls=args.max_calls,
             state_file=os.path.join(root, "state", "calls.json"),
             session=_SESSION,  # tests inject a FakeSession here
+            plan=args.plan,
         )
-    except EodhdError as e:
+    except (EodhdError, ValueError) as e:
         log(f"ERROR: {e}")
         return 2
 
     log(f"budget: {client.calls_made} already used today, max {client.max_calls} "
-        f"(free-tier hard limit {FREE_TIER_DAILY_CALLS}/day)")
+        f"({args.plan}-plan hard limit {PLAN_DAILY_CALLS[args.plan]}/day); "
+        f"window {from_date}..{to_date}")
 
     if args.probe_deep_history:
         # deliberate, single, explicit deep-history probe — expected to fail on free tier
@@ -285,6 +307,7 @@ def main(argv: list | None = None) -> int:
         fetch_exchanges_list(client, root, force=args.force)
         if args.exchanges_list_only:
             rec = wh.write_vintage(root, extra={"built_by": "ingest_eodhd --exchanges-list-only",
+                                               "plan": args.plan,
                                                "window": [from_date, to_date]})
             log(f"vintage: {rec['vintage'][:16]}…")
             return 0
@@ -296,6 +319,8 @@ def main(argv: list | None = None) -> int:
                 delisted = fetch_symbol_list(client, root, args.exchange, delisted=True,
                                              force=args.force)
             except CallBudgetExceeded:
+                if args.plan != "free":
+                    raise
                 # budget ran out before the delisted probe — it 403s on the free
                 # tier anyway; record the gap without spending more calls
                 log("symbol-list (delisted): skipped, call budget exhausted")
@@ -309,9 +334,11 @@ def main(argv: list | None = None) -> int:
                 delisted = []
             common = {r.get("Code") for r in active
                       if r.get("Type") in (None, "Common Stock", "Stock") and r.get("Code")}
-            symbols = sorted(common)
-            log(f"universe candidates: {len(symbols)} active common stocks on {args.exchange} "
-                f"(+{len(delisted)} delisted names recorded)")
+            delisted_common = {r.get("Code") for r in delisted
+                               if r.get("Type") in (None, "Common Stock", "Stock") and r.get("Code")}
+            symbols = sorted(common | delisted_common)
+            log(f"universe candidates: {len(common)} active + {len(delisted_common)} delisted "
+                f"({len(symbols)} unique) common stocks on {args.exchange}")
         else:
             symbols = list(symbols)
 
@@ -334,6 +361,7 @@ def main(argv: list | None = None) -> int:
 
         rec = wh.write_vintage(root, extra={
             "built_by": "ingest_eodhd",
+            "plan": args.plan,
             "window": [from_date, to_date],
             "exchange": args.exchange.upper(),
             "tickers_requested": len(symbols),
