@@ -101,18 +101,35 @@
           <button type="button" class="tab-btn" data-app-tab="vault">Vault &amp; Card Faces</button>
         </div>
 
-        <!-- ---- TAB 1: GUIDED FIRST RUN / MINING ---- -->
+        <!-- ---- TAB 1: UNIFIED SLOT BUILDER & MINING ---- -->
         <div id="tab-mine">
           <div class="dash-grid">
             <div class="panel-box">
-              <p class="eyebrow">Server-side pairs gauntlet · S5 automatic (never opt-in)</p>
-              <h2 style="margin-top: 6px;">Guided First Run</h2>
+              <p class="eyebrow">Server-side pairs gauntlet · S5 full-depth check runs automatically</p>
+              <h2 style="margin-top: 6px;">Pair Builder &amp; Mining</h2>
               <p class="serif" style="color: var(--ink-dim); font-size: 0.95rem;" id="mine-candidates-line"></p>
 
-              <div class="field-group">
-                <label class="field-label" for="cand-select">Pre-registered server-side candidate (no raw tickers)</label>
-                <select class="input" id="cand-select"></select>
-                <p class="fine-print serif" id="cand-desc"></p>
+              <div class="slot-grid">
+                <div class="slot-card">
+                  <label class="field-label" for="slot-a-mode">Slot A</label>
+                  <select class="input" id="slot-a-mode"></select>
+                  <input class="input mono hidden" id="slot-a-symbol" placeholder="Ticker (e.g. XOM)" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Slot A ticker symbol">
+                </div>
+                <div class="slot-card">
+                  <label class="field-label" for="slot-b-mode">Slot B</label>
+                  <select class="input" id="slot-b-mode"></select>
+                  <input class="input mono hidden" id="slot-b-symbol" placeholder="Ticker (e.g. CVX)" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Slot B ticker symbol">
+                </div>
+              </div>
+
+              <div class="mode-readout" id="slot-mode-readout">
+                <div class="mode-readout-head">
+                  <span class="pill inf" id="slot-mode-pill">Uniform Random (? ↔ ?)</span>
+                  <span class="mono fine-print" style="margin: 0;" id="slot-subspace-meta"></span>
+                </div>
+                <p class="fine-print serif" style="margin: 0;" id="slot-mode-summary">
+                  Mode derives automatically from Slot A and Slot B with zero hidden pre-screening. S5 full-depth check runs automatically.
+                </p>
               </div>
 
               <div class="config-grid">
@@ -136,7 +153,7 @@
 
               <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px;">
                 <button type="button" class="btn btn-primary" id="run-gauntlet-btn">Run server-side gauntlet</button>
-                <button type="button" class="btn btn-brass" id="run-example-btn">One-click guided example</button>
+                <button type="button" class="btn btn-brass" id="run-example-btn">One-click guided example (synthetic)</button>
               </div>
               <p class="form-msg" id="mine-msg" role="status" aria-live="polite"></p>
             </div>
@@ -169,6 +186,7 @@
                 <p class="serif" id="live-verdict-copy" style="margin: 0 0 12px;"></p>
                 <div id="live-verdict-actions" style="display: flex; gap: 8px; flex-wrap: wrap;"></div>
               </div>
+              <div id="live-private-spec-panel"></div>
             </div>
           </div>
         </div>
@@ -178,12 +196,13 @@
           <div class="panel-box">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 14px;">
               <div>
-                <p class="eyebrow">Append-only ledger · Scope-stratified</p>
+                <p class="eyebrow">Append-only ledger · Scope-stratified · Zero tickers in trial list</p>
                 <h2 style="margin: 4px 0 0;">Your Trial History</h2>
               </div>
               <button type="button" class="btn btn-ghost btn-sm" id="refresh-trials-btn">Refresh</button>
             </div>
             <div class="rows" id="trials-list"></div>
+            <div id="trial-private-spec-panel"></div>
           </div>
         </div>
 
@@ -216,7 +235,7 @@
                 <p class="eyebrow">Server-rendered anonymized face</p>
                 <h3 style="margin-top: 6px;">Select a card to inspect</h3>
                 <p class="serif" style="color: var(--ink-dim); font-size: 0.92rem;">
-                  Every card face is rendered server-side from ledger stage rows only — never raw tickers, never direction, never P&amp;L.
+                  Every shareable card face is rendered server-side from ledger stage rows only — never raw tickers, never direction, never P&amp;L. Your private owner-only spec is revealed separately on demand.
                 </p>
               </div>
             </div>

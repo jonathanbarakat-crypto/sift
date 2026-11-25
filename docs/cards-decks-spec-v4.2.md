@@ -166,6 +166,42 @@ questions, so they treat the pool size (stratum N) differently on purpose.
 - Raw market data server-side only; shared artifacts = anonymized aggregates +
   watermark.
 
+### 5.1 Private owner spec & unified slot mining contract (owner decisions 2026-11-25)
+
+Aligns v4 §12 row 3 ("owner-visible page naming tickers; the stricter anonymized card
+face is what leaves the platform") with `sift-research/docs/mining-modes-policy.md`:
+
+- **Public / general / shareable surfaces remain 100% zero-ticker fail-closed:**
+  `guard_api_payload` stays unchanged on every catalog, run, SSE, trial-list, card-face,
+  PNG, vault, connection, telemetry, email, RSS, and webhook payload. Off-platform hit
+  notifications (`sift/cards/events.py`) remain strictly ticker-free (`card_id` +
+  magnitude `|z|` + cue to check the authenticated Private Owner Spec in-app).
+- **Dedicated Private Owner Spec (`/api/private/cards/{card_id}/spec` and
+  `/api/private/trials/{trial_id}/spec`):** strictly authenticated, ownership-verified,
+  rate-limited, non-cacheable (`Cache-Control: no-store, private`, `X-Robots-Tag:
+  noindex, nofollow`), watermarked non-shareable, and guarded fail-closed by a separate
+  `guard_owner_private_payload` enforcing:
+  - **Allowed allowlist:** structured `instruments` (`[{"role": ..., "symbol": ...}]`,
+    confined strictly to that single owned trial/card's exact symbols, never bulk dumps),
+    user-declared statistical parameters (`family`, `mining_mode`, `subspace_filter`,
+    `subspace_size`, `scope_id`, `formation`, `open_z`, `close_z`, `holdout_bars`),
+    survival facts (`gauntlet_stats` with S0 `beta_hat` stripped), magnitude-only live
+    signal (`current_abs_z`, `gauge.band`), durability/health facts, and `hit_loop_hint`.
+  - **Hard exclusions (forbidden even in the private view):** raw market data/OHLCV/bars,
+    raw `params_json` passthrough, vendor-fitted `slope` / `beta` / `beta_hat` /
+    `beta_levels` / `hedge_ratio`, sign/direction (`+z`/`-z`, rich/cheap leg,
+    buy/sell/long/short), P&L/returns/profit/"value" language, banned phrases, email PII.
+  - **Eligibility:** owned cards are always eligible; trials are eligible iff
+    `mining_mode == "direct"` OR `verdict == "survivor"`. Killed `anchored` and
+    `uniform_random` trials never reveal server-drawn unknown legs.
+- **Unified Slot A / Slot B mining modes (zero hidden pre-screening):** user-facing runs
+  derive `mining_mode` deterministically from Slot A and Slot B with zero data-peeking
+  server shortlists: `direct` (specific + specific), `anchored` (specific + `Random(All)`
+  or `Random(<Sector>)`, seeded `PCG64` uniform draw, recording `anchor_id_hmac` +
+  `subspace_filter` + `subspace_size`), and `uniform_random` (`Random` + `Random`,
+  seeded `PCG64` uniform draw). S5 full-depth validation runs automatically (never opt-in,
+  never auto-pass) across all three modes.
+
 ## 6. Data & caveats
 
 - yfinance 5y = research feed (research_grade, active-only; S5 amber; never conflated
@@ -179,6 +215,8 @@ questions, so they treat the pool size (stratum N) differently on purpose.
 
 ## 7. Flag & kill-switch
 
-All of the above behind `cards_v4_1` flag (deck layer may add `SIFT_DECKS_V4_2`),
-fail-closed when off, kill-switch env `SIFT_CARDS_V4_1=0`.
+All of the above behind `cards_v4_1` flag (deck layer adds `SIFT_DECKS_V4_2`; private
+owner spec adds `SIFT_OWNER_PRIVATE_SPEC`), fail-closed when off, kill-switch envs
+`SIFT_CARDS_V4_1=0`, `SIFT_DECKS_V4_2=0`, `SIFT_OWNER_PRIVATE_SPEC=0`.
+
 

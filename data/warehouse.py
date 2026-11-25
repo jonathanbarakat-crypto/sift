@@ -85,6 +85,10 @@ def live_parquet_path(root: str, symbol: str) -> str:
     return os.path.join(root, "live", f"{safe}.parquet")
 
 
+def sectors_parquet_path(root: str, exchange: str = "US") -> str:
+    return os.path.join(root, "meta", "sectors", f"{exchange.upper()}.parquet")
+
+
 def warehouse_vintage_hash(root: str) -> str:
     """sha256 over (relpath, sha256(bytes)) of every data file under root.
 

@@ -237,7 +237,11 @@ def test_production_requires_non_research_pit_manifest_and_exposes_clean_catalog
         r_cat = tc.get("/api/mining/catalog", headers=headers)
         assert r_cat.status_code == 200
         body = r_cat.json()
-        assert len(body["candidates"]) >= 1
+        assert body["warehouse_ready"] is True
+        assert body["candidates"] == []
+        assert body["subspaces"] == [
+            {"id": "all", "label": "Random (All eligible)", "eligible_count": 4}
+        ]
         assert body["universe"] == {
             "mode": "pit_manifest",
             "asof": asof,

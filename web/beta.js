@@ -9,6 +9,8 @@
     user: null,
     onboarding: null,
     catalog: [],
+    subspaces: [],
+    warehouseReady: false,
     activeSource: null,
     pollTimer: null,
     selectedCardId: null
@@ -59,6 +61,13 @@
     return el;
   }
 
+  function clearAllPrivatePanels() {
+    clearEl($("live-private-spec-panel"));
+    clearEl($("trial-private-spec-panel"));
+    var cp = $("card-private-spec-slot");
+    if (cp) clearEl(cp);
+  }
+
   // ---- onboarding copy (server-rendered only) ----
   function loadOnboarding() {
     return api("/api/onboarding").then(function (r) {
@@ -90,7 +99,9 @@
 
   function showAuth() {
     state.user = null;
+    state.selectedCardId = null;
     stopStream();
+    clearAllPrivatePanels();
     $("app-view").classList.add("hidden");
     $("auth-view").classList.remove("hidden");
     $("logout-btn").classList.add("hidden");
@@ -121,6 +132,7 @@
       document.querySelectorAll("[data-app-tab]").forEach(function (b) {
         b.classList.toggle("active", b === btn);
       });
+      clearAllPrivatePanels();
       $("tab-mine").classList.toggle("hidden", tab !== "mine");
       $("tab-trials").classList.toggle("hidden", tab !== "trials");
       $("tab-vault").classList.toggle("hidden", tab !== "vault");
@@ -201,7 +213,7 @@
     });
   });
 
-  // ---- catalog & mining ----
+  // ---- catalog, unified Slot A / Slot B builder & mining ----
   function fillSelect(el, values, defVal) {
     clearEl(el);
     values.forEach(function (v) {
@@ -211,32 +223,210 @@
     });
   }
 
-  function updateCandDesc() {
-    var sel = $("cand-select").value;
-    var found = state.catalog.find(function (c) { return c.candidate_id === sel; });
-    $("cand-desc").textContent = found ? found.description : "";
+  function populateSlotSelect(selectEl) {
+    var prev = selectEl.value;
+    clearEl(selectEl);
+    var subs = state.subspaces.length
+      ? state.subspaces
+      : [{ id: "all", label: "Random (All eligible)", eligible_count: 0 }];
+    subs.forEach(function (s) {
+      var lbl = s.eligible_count ? (s.label + " · " + s.eligible_count) : s.label;
+      selectEl.appendChild(mk("option", { value: "random:" + s.id }, lbl));
+    });
+    selectEl.appendChild(mk("option", { value: "symbol" }, "Specific stock…"));
+    if (prev && Array.prototype.some.call(selectEl.options, function (o) { return o.value === prev; })) {
+      selectEl.value = prev;
+    } else {
+      selectEl.value = "random:all";
+    }
+  }
+
+  function subspaceById(id) {
+    return state.subspaces.find(function (s) { return s.id === id; }) || null;
+  }
+
+  function readSlot(modeId, symId) {
+    var v = $(modeId).value || "random:all";
+    if (v === "symbol") {
+      var raw = ($(symId).value || "").trim().toUpperCase();
+      return { kind: "symbol", value: raw };
+    }
+    var sub = v.indexOf("random:") === 0 ? v.slice(7) : "all";
+    return { kind: "random", subspace: sub };
+  }
+
+  function updateSlotUI() {
+    var aIsSym = $("slot-a-mode").value === "symbol";
+    var bIsSym = $("slot-b-mode").value === "symbol";
+    $("slot-a-symbol").classList.toggle("hidden", !aIsSym);
+    $("slot-b-symbol").classList.toggle("hidden", !bIsSym);
+
+    var pill = $("slot-mode-pill");
+    var meta = $("slot-subspace-meta");
+    var summary = $("slot-mode-summary");
+
+    if (!state.warehouseReady) {
+      pill.className = "pill warn";
+      pill.textContent = "Synthetic onboarding mode";
+      meta.textContent = "PIT warehouse not mounted";
+      summary.textContent = "Use the guided synthetic example below to walk through S0–S4 and automatic S5 validation.";
+      $("run-gauntlet-btn").disabled = true;
+      return;
+    }
+    $("run-gauntlet-btn").disabled = false;
+
+    var sa = readSlot("slot-a-mode", "slot-a-symbol");
+    var sb = readSlot("slot-b-mode", "slot-b-symbol");
+    if (sa.kind === "symbol" && sb.kind === "symbol") {
+      pill.className = "pill ok";
+      pill.textContent = "Direct Hypothesis (A ↔ B)";
+      meta.textContent = "Subspace: 1 exact hypothesis";
+      summary.textContent = "Tests your exact two-stock hypothesis directly on PIT history. S5 full-depth check runs automatically.";
+    } else if (sa.kind === "symbol" || sb.kind === "symbol") {
+      var subId = sa.kind === "random" ? sa.subspace : sb.subspace;
+      var subInfo = subspaceById(subId);
+      var cnt = subInfo ? Math.max(subInfo.eligible_count - 1, 0) : "?";
+      pill.className = "pill inf";
+      pill.textContent = "Anchored Search (A ↔ ?)";
+      meta.textContent = "Anchor locked · " + (subInfo ? subInfo.label : subId) + " (~" + cnt + " partners)";
+      summary.textContent = "Locks your anchor and draws a partner uniformly via PCG64 with zero hidden pre-screening. S5 full-depth check runs automatically.";
+    } else {
+      var infoA = subspaceById(sa.subspace);
+      var infoB = subspaceById(sb.subspace);
+      var pairEstimate = "?";
+      if (infoA && infoB) {
+        if (sa.subspace === sb.subspace) {
+          pairEstimate = String(Math.floor(infoA.eligible_count * (infoA.eligible_count - 1) / 2));
+        } else {
+          pairEstimate = String(infoA.eligible_count * infoB.eligible_count);
+        }
+      }
+      pill.className = "pill warn";
+      pill.textContent = "Uniform Random (? ↔ ?)";
+      meta.textContent = "Zero pre-screen · ~" + pairEstimate + " eligible pairs";
+      summary.textContent = "Draws a pair uniformly via PCG64 across your chosen PIT subspace with zero data-peeking pre-screen (low hit rate on pure noise is expected). S5 full-depth check runs automatically.";
+    }
   }
 
   function loadCatalog() {
     api("/api/mining/catalog").then(function (r) {
       if (!r.ok || !r.data) return;
       state.catalog = r.data.candidates || [];
-      var sel = $("cand-select");
-      clearEl(sel);
-      state.catalog.forEach(function (c) {
-        var opt = mk("option", { value: c.candidate_id }, c.label);
-        if (c.is_example) opt.selected = true;
-        sel.appendChild(opt);
-      });
+      state.subspaces = r.data.subspaces || [];
+      state.warehouseReady = !!r.data.warehouse_ready;
+
+      populateSlotSelect($("slot-a-mode"));
+      populateSlotSelect($("slot-b-mode"));
       fillSelect($("scope-select"), r.data.allowed_scopes || ["free_5y_top1k"], "free_5y_top1k");
       fillSelect($("form-select"), r.data.allowed_formations || [60], 60);
       fillSelect($("openz-select"), r.data.allowed_open_z || [2.0], 2.0);
       fillSelect($("closez-select"), r.data.allowed_close_z || [0.5], 0.5);
-      updateCandDesc();
+
+      var hasExample = state.catalog.some(function (c) { return c.synthetic_example; });
+      $("run-example-btn").classList.toggle("hidden", !hasExample);
+      updateSlotUI();
     });
   }
 
-  $("cand-select").addEventListener("change", updateCandDesc);
+  ["slot-a-mode", "slot-b-mode"].forEach(function (id) {
+    $(id).addEventListener("change", updateSlotUI);
+  });
+  ["slot-a-symbol", "slot-b-symbol"].forEach(function (id) {
+    $(id).addEventListener("blur", function () {
+      $(id).value = ($(id).value || "").trim().toUpperCase();
+    });
+  });
+
+  // ---- Private Owner-Only Spec renderer (strictly separate from shareable card face) ----
+  function renderPrivateSpecInto(container, url) {
+    if (!container) return;
+    clearEl(container);
+    var loading = mk("div", { className: "private-spec-box" });
+    loading.appendChild(mk("p", { className: "fine-print mono", style: "margin:0" }, "Loading authenticated owner-only private spec…"));
+    container.appendChild(loading);
+
+    api(url).then(function (r) {
+      clearEl(container);
+      var box = mk("div", { className: "private-spec-box" });
+      if (!r.ok || !r.data || !r.data.private_spec) {
+        box.appendChild(mk("p", { className: "form-msg err", style: "margin:0" }, (r.data && r.data.error) || "Private spec unavailable."));
+        container.appendChild(box);
+        return;
+      }
+      var ps = r.data.private_spec;
+      var banner = mk("div", { className: "private-banner" });
+      banner.appendChild(mk("span", { className: "pill warn" }, "PRIVATE · OWNER ONLY · DO NOT SHARE"));
+      var closeBtn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Hide");
+      closeBtn.addEventListener("click", function () { clearEl(container); });
+      banner.appendChild(closeBtn);
+      box.appendChild(banner);
+
+      // Instrument identifiers + copy helper
+      var insts = ps.instruments || [];
+      if (insts.length) {
+        var symList = insts.map(function (it) { return it.symbol; });
+        var chips = mk("div", { className: "instrument-chips" });
+        symList.forEach(function (sym, idx) {
+          if (idx > 0) chips.appendChild(mk("span", { className: "mono", style: "color:var(--ink-dim)" }, "↔"));
+          chips.appendChild(mk("span", { className: "instrument-chip" }, sym));
+        });
+        var copyBtn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Copy symbols");
+        copyBtn.addEventListener("click", function () {
+          var txt = symList.join(" / ");
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(txt).then(function () {
+              copyBtn.textContent = "Copied (" + txt + ")";
+            });
+          } else {
+            copyBtn.textContent = txt;
+          }
+        });
+        chips.appendChild(copyBtn);
+        box.appendChild(chips);
+      } else {
+        box.appendChild(mk("p", { className: "fine-print mono" }, "Synthetic guided example — no live equity symbols."));
+      }
+
+      // Parameters (mode, subspace, formation, thresholds — zero prices/slopes)
+      var p = ps.parameters || {};
+      box.appendChild(mk(
+        "p",
+        { className: "mono fine-print", style: "margin:6px 0" },
+        "mode=" + (p.mining_mode || "direct") +
+        " · subspace=" + (p.subspace_filter || "all") +
+        " (N=" + (p.subspace_size || 1) + ")" +
+        " · scope=" + (p.scope_id || "") +
+        " · formation=" + (p.formation || 60) +
+        " · entry |z|=" + (p.open_z || 2.0) +
+        " · exit |z|=" + (p.close_z || 0.5)
+      ));
+
+      // Live magnitude-only signal
+      var ls = ps.live_signal || {};
+      var zTxt = (ls.magnitude_z !== null && ls.magnitude_z !== undefined) ? ("|z| = " + ls.magnitude_z) : "|z| unavailable";
+      box.appendChild(mk(
+        "p",
+        { className: "mono", style: "margin:8px 0 4px;font-size:0.86rem;color:var(--ink)" },
+        "Live magnitude: " + zTxt + " (" + (ls.band || "normal") + " — " + (ls.label || "") + ")"
+      ));
+
+      // Durability & health
+      var dh = ps.durability_and_health || {};
+      box.appendChild(mk(
+        "p",
+        { className: "fine-print", style: "margin:4px 0" },
+        "Health: " + (dh.health_phrase || "holding near its mint baseline") +
+        (dh.hits_trailing_12m !== null && dh.hits_trailing_12m !== undefined ? (" · trailing-12m hits: " + dh.hits_trailing_12m) : "") +
+        (dh.half_life_days !== null && dh.half_life_days !== undefined ? (" · half-life: " + dh.half_life_days + "d") : "")
+      ));
+
+      if (ps.guidance) {
+        box.appendChild(mk("p", { className: "serif", style: "margin:10px 0 6px;font-size:0.9rem;color:var(--ink)" }, ps.guidance));
+      }
+      box.appendChild(mk("p", { className: "fine-print", style: "margin:6px 0 0" }, ps.disclaimer || ""));
+      container.appendChild(box);
+    });
+  }
 
   function stopStream() {
     if (state.activeSource) {
@@ -255,6 +445,7 @@
     });
     renderStages([]);
     $("live-verdict").classList.add("hidden");
+    clearEl($("live-private-spec-panel"));
   }
 
   function renderStages(stageList) {
@@ -305,7 +496,7 @@
       pill.className = "pill warn";
       pill.textContent = String(v.survivor_class || "on-watch-amber").toUpperCase();
     }
-    $("live-trial-id").textContent = v.trial_id + (v.cached ? " · skip-list cached" : "");
+    $("live-trial-id").textContent = v.trial_id + (v.mining_mode ? (" · " + v.mining_mode) : "") + (v.cached ? " · skip-list cached" : "");
     $("live-verdict-copy").textContent = v.verdict_copy || "";
 
     var actions = $("live-verdict-actions");
@@ -323,35 +514,64 @@
       actions.appendChild(inspectBtn);
       actions.appendChild(saveBtn);
     }
+    if (v.private_spec_eligible && (v.card_id || v.trial_id)) {
+      var privUrl = v.card_id
+        ? ("/api/private/cards/" + encodeURIComponent(v.card_id) + "/spec")
+        : ("/api/private/trials/" + encodeURIComponent(v.trial_id) + "/spec");
+      var privBtn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Reveal private spec");
+      privBtn.addEventListener("click", function () {
+        renderPrivateSpecInto($("live-private-spec-panel"), privUrl);
+      });
+      actions.appendChild(privBtn);
+    }
   }
 
   function startMining(isExample) {
     stopStream();
     resetCeremony();
     var msg = $("mine-msg");
+    var payload;
+
+    if (isExample) {
+      payload = { example: true, scope_id: "free_5y_top1k", formation: 60, open_z: 2.0, close_z: 0.5 };
+    } else {
+      var sa = readSlot("slot-a-mode", "slot-a-symbol");
+      var sb = readSlot("slot-b-mode", "slot-b-symbol");
+      if (sa.kind === "symbol" && !sa.value) {
+        setMsg(msg, "Enter a ticker symbol in Slot A or choose a Random subspace.", "err");
+        return;
+      }
+      if (sb.kind === "symbol" && !sb.value) {
+        setMsg(msg, "Enter a ticker symbol in Slot B or choose a Random subspace.", "err");
+        return;
+      }
+      payload = {
+        slot_a: sa,
+        slot_b: sb,
+        scope_id: $("scope-select").value,
+        formation: parseInt($("form-select").value, 10),
+        open_z: parseFloat($("openz-select").value),
+        close_z: parseFloat($("closez-select").value)
+      };
+    }
+
     setMsg(msg, "Pre-registering trial in ledger…", "");
     $("run-gauntlet-btn").disabled = true;
     $("run-example-btn").disabled = true;
 
-    var payload = isExample
-      ? { example: true, scope_id: "free_5y_top1k", formation: 60, open_z: 2.0, close_z: 0.5 }
-      : {
-          candidate_id: $("cand-select").value,
-          scope_id: $("scope-select").value,
-          formation: parseInt($("form-select").value, 10),
-          open_z: parseFloat($("openz-select").value),
-          close_z: parseFloat($("closez-select").value)
-        };
-
     api("/api/mining/runs", { method: "POST", body: payload }).then(function (r) {
       if (!r.ok || !r.data || !r.data.run) {
         setMsg(msg, (r.data && r.data.error) || "Could not start mining run.", "err");
-        $("run-gauntlet-btn").disabled = false;
+        $("run-gauntlet-btn").disabled = !state.warehouseReady;
         $("run-example-btn").disabled = false;
         return;
       }
       var run = r.data.run;
-      $("run-meta-line").textContent = "run=" + run.run_id + " · trial=" + run.trial_id + " · scope=" + run.scope_id;
+      $("run-meta-line").textContent =
+        "run=" + run.run_id +
+        " · trial=" + run.trial_id +
+        " · mode=" + (run.mining_mode || "example") +
+        " · scope=" + run.scope_id;
       setMsg(msg, "Streaming server-side gauntlet ceremony…", "");
       streamRun(run);
     });
@@ -374,7 +594,7 @@
       es.addEventListener("done", function () {
         stopStream();
         setMsg($("mine-msg"), "Run completed and recorded in the trial ledger.", "ok");
-        $("run-gauntlet-btn").disabled = false;
+        $("run-gauntlet-btn").disabled = !state.warehouseReady;
         $("run-example-btn").disabled = false;
         loadTrials();
         loadVault();
@@ -398,7 +618,7 @@
           stopStream();
           renderVerdict(run);
           setMsg($("mine-msg"), "Run completed and recorded in the trial ledger.", "ok");
-          $("run-gauntlet-btn").disabled = false;
+          $("run-gauntlet-btn").disabled = !state.warehouseReady;
           $("run-example-btn").disabled = false;
           loadTrials();
           loadVault();
@@ -427,17 +647,33 @@
       clearEl(list);
       var trials = r.data.trials || [];
       if (!trials.length) {
-        list.appendChild(mk("p", { className: "fine-print serif" }, "No registered trials yet. Run your guided first run to record your first trial."));
+        list.appendChild(mk("p", { className: "fine-print serif" }, "No registered trials yet. Configure Slot A and Slot B or run the guided example."));
         return;
       }
       trials.forEach(function (t) {
         var row = mk("div", { className: "row" });
         var left = mk("div", {});
-        left.appendChild(mk("div", { className: "mono" }, t.trial_id + " · " + t.scope_id + (t.cached ? " (cached)" : "")));
+        left.appendChild(mk(
+          "div",
+          { className: "mono" },
+          t.trial_id + " · " + t.scope_id + " · " + (t.mining_mode || "example") +
+          (t.subspace_size > 1 ? (" (N=" + t.subspace_size + ")") : "") +
+          (t.cached ? " (cached)" : "")
+        ));
         left.appendChild(mk("div", { className: "fine-print serif", style: "margin:4px 0 0" }, t.verdict_copy || ""));
         var right = mk("div", { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap" });
         var cls = t.verdict === "killed" ? "err" : (t.survivor_class === "validated-green" ? "ok" : "warn");
         right.appendChild(mk("span", { className: "pill " + cls }, t.verdict === "killed" ? ("killed@" + (t.killed_at || "screen")) : t.survivor_class));
+        if (t.private_spec_eligible) {
+          var pBtn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Private spec");
+          pBtn.addEventListener("click", function () {
+            renderPrivateSpecInto(
+              $("trial-private-spec-panel"),
+              "/api/private/trials/" + encodeURIComponent(t.trial_id) + "/spec"
+            );
+          });
+          right.appendChild(pBtn);
+        }
         if (t.card_id) {
           var btn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Card face");
           btn.addEventListener("click", function () {
@@ -657,6 +893,20 @@
       body.appendChild(mk("p", { className: "fine-print" }, f.disclaimer || ""));
       card.appendChild(body);
       panel.appendChild(card);
+
+      // Strictly separate owner-only Private Spec trigger (never inside the shareable face)
+      var privWrap = mk("div", { style: "margin-top:14px" });
+      var revealBtn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Reveal private owner spec (symbols & parameters)");
+      var privSlot = mk("div", { id: "card-private-spec-slot" });
+      revealBtn.addEventListener("click", function () {
+        renderPrivateSpecInto(
+          privSlot,
+          "/api/private/cards/" + encodeURIComponent(f.card_id) + "/spec"
+        );
+      });
+      privWrap.appendChild(revealBtn);
+      privWrap.appendChild(privSlot);
+      panel.appendChild(privWrap);
     });
   }
 

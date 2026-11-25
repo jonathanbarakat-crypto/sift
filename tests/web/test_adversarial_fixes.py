@@ -383,11 +383,14 @@ def test_gauntlet_integrity_s5_depth_frozen_epoch_holdout_and_delisted(tmp_path:
         assert rt.catalog._wh_m_screened == 4 * 3 // 2  # all 6 pairs screened
 
         _, h = _signup(tc, "quant-int@fund.io")
-        cat = tc.get("/api/mining/catalog", headers=h).json()["candidates"]
         r = tc.post(
             "/api/mining/runs",
             headers=h,
-            json={"candidate_id": cat[0]["candidate_id"], "scope_id": "free_5y_top1k"},
+            json={
+                "slot_a": {"kind": "symbol", "value": "AAPL"},
+                "slot_b": {"kind": "symbol", "value": "MSFT"},
+                "scope_id": "free_5y_top1k",
+            },
         )
         assert r.status_code == 202
         run_id = r.json()["run"]["run_id"]
@@ -424,11 +427,14 @@ def test_warehouse_refuses_silent_scope_shrink(tmp_path: Path):
     )
     with TestClient(app) as tc:
         _, h = _signup(tc, "shrink@fund.io")
-        cat = tc.get("/api/mining/catalog", headers=h).json()["candidates"]
         r_5y = tc.post(
             "/api/mining/runs",
             headers=h,
-            json={"candidate_id": cat[0]["candidate_id"], "scope_id": "free_5y_top1k"},
+            json={
+                "slot_a": {"kind": "random", "subspace": "all"},
+                "slot_b": {"kind": "random", "subspace": "all"},
+                "scope_id": "free_5y_top1k",
+            },
         )
         assert r_5y.status_code == 400
         assert REGISTRY_DEPTH_BARS == 4032

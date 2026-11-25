@@ -44,14 +44,16 @@ import time
 
 FLAG_CARDS_V4_1 = "cards_v4_1"
 FLAG_DECKS_V4_2 = "decks_v4_2"
+FLAG_OWNER_PRIVATE_SPEC = "owner_private_spec"
 
-_KNOWN_FLAGS = (FLAG_CARDS_V4_1, FLAG_DECKS_V4_2)
+_KNOWN_FLAGS = (FLAG_CARDS_V4_1, FLAG_DECKS_V4_2, FLAG_OWNER_PRIVATE_SPEC)
 
 # Beta cohort: ON by default. Override globally with SIFT_CARDS_V4_1=0 /
-# SIFT_DECKS_V4_2=0.
+# SIFT_DECKS_V4_2=0 / SIFT_OWNER_PRIVATE_SPEC=0.
 _DEFAULTS = {
     FLAG_CARDS_V4_1: os.environ.get("SIFT_CARDS_V4_1", "1") not in ("0", "false", "False", "off", "OFF"),
     FLAG_DECKS_V4_2: os.environ.get("SIFT_DECKS_V4_2", "1") not in ("0", "false", "False", "off", "OFF"),
+    FLAG_OWNER_PRIVATE_SPEC: os.environ.get("SIFT_OWNER_PRIVATE_SPEC", "1") not in ("0", "false", "False", "off", "OFF"),
 }
 
 _lock = threading.Lock()
@@ -116,6 +118,15 @@ def decks_v4_2_enabled(handle: str | None = None) -> bool:
     return is_enabled(FLAG_DECKS_V4_2, handle) and is_enabled(FLAG_CARDS_V4_1, handle)
 
 
+def owner_private_spec_enabled(handle: str | None = None) -> bool:
+    """The single read gating `/api/private/.../spec` endpoints (v4.2 §5.1).
+
+    Kill-switch: `SIFT_OWNER_PRIVATE_SPEC=0` (or `set_flag("owner_private_spec", False)`).
+    Always fail-closed when off; never weakens public/shared guards.
+    """
+    return is_enabled(FLAG_OWNER_PRIVATE_SPEC, handle)
+
+
 def reset() -> None:
     """Test helper: restore defaults and clear overrides."""
     with _lock:
@@ -127,17 +138,23 @@ def reset() -> None:
         _DEFAULTS[FLAG_DECKS_V4_2] = (
             os.environ.get("SIFT_DECKS_V4_2", "1") not in ("0", "false", "False", "off", "OFF")
         )
+        _DEFAULTS[FLAG_OWNER_PRIVATE_SPEC] = (
+            os.environ.get("SIFT_OWNER_PRIVATE_SPEC", "1")
+            not in ("0", "false", "False", "off", "OFF")
+        )
 
 
 __all__ = [
     "FLAG_CARDS_V4_1",
     "FLAG_DECKS_V4_2",
+    "FLAG_OWNER_PRIVATE_SPEC",
     "cards_v4_1_enabled",
     "decks_v4_2_enabled",
     "disable_for_user",
     "enable_for_user",
     "is_enabled",
     "known_flags",
+    "owner_private_spec_enabled",
     "reset",
     "set_flag",
 ]

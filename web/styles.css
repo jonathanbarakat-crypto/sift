@@ -311,6 +311,36 @@ code, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums;
 
 .card-png { width: 100%; max-width: 360px; border-radius: 10px; border: 1px solid var(--line); margin-top: 12px; display: block; }
 
+/* unified Slot A / Slot B builder & Private Owner Spec (v4.2 §5.1) */
+.slot-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 14px 0; }
+.slot-card {
+  background: var(--bg-alt); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.slot-card .input, .slot-card select.input { min-width: 0; }
+.mode-readout {
+  background: rgba(127, 180, 201, 0.06); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent); border-radius: 10px;
+  padding: 10px 14px; margin: 12px 0;
+}
+.mode-readout-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+
+.private-spec-box {
+  margin-top: 16px; padding: 16px 18px; border-radius: 12px;
+  border: 1.5px dashed rgba(224, 177, 94, 0.65);
+  background: rgba(224, 177, 94, 0.06);
+}
+.private-banner {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.instrument-chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+.instrument-chip {
+  font-family: var(--font-mono); font-size: 0.96rem; font-weight: 600; letter-spacing: 0.04em;
+  padding: 6px 12px; border-radius: 8px; border: 1px solid rgba(224, 177, 94, 0.55);
+  background: var(--bg-alt); color: var(--ink);
+}
+
 /* ---------- footer ---------- */
 .site-footer { border-top: 1px solid var(--line); padding: 32px 0 44px; color: var(--ink-dim); font-size: 0.88rem; }
 .footer-row p { max-width: 58em; }
@@ -320,4 +350,5 @@ code, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums;
   .nav-links a:not(.nav-cta):not(.nav-keep) { display: none; }
   .hero { padding: 64px 0 56px; }
   .ceremony-bar { grid-template-columns: 1fr; }
+  .slot-grid { grid-template-columns: 1fr; }
 }
