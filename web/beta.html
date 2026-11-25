@@ -105,18 +105,26 @@
         <div id="tab-mine">
           <div class="dash-grid">
             <div class="panel-box">
-              <p class="eyebrow">Server-side pairs gauntlet · S5 full-depth check runs automatically</p>
-              <h2 style="margin-top: 6px;">Pair Builder &amp; Mining</h2>
+              <p class="eyebrow">Server-side gauntlet · S5 full-depth check runs automatically</p>
+              <h2 style="margin-top: 6px;">Hypothesis &amp; Mining Builder</h2>
               <p class="serif" style="color: var(--ink-dim); font-size: 0.95rem;" id="mine-candidates-line"></p>
+
+              <div style="margin-bottom: 12px;">
+                <label class="field-label" for="family-select">Strategy Family</label>
+                <select class="input" id="family-select">
+                  <option value="pairs">Pairs (A ↔ B · mean-reversion)</option>
+                  <option value="lead_lag">Lead–Lag (Leader A → Follower B · directed)</option>
+                </select>
+              </div>
 
               <div class="slot-grid">
                 <div class="slot-card">
-                  <label class="field-label" for="slot-a-mode">Slot A</label>
+                  <label class="field-label" for="slot-a-mode" id="slot-a-label">Slot A</label>
                   <select class="input" id="slot-a-mode"></select>
                   <input class="input mono hidden" id="slot-a-symbol" placeholder="Ticker (e.g. XOM)" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Slot A ticker symbol">
                 </div>
                 <div class="slot-card">
-                  <label class="field-label" for="slot-b-mode">Slot B</label>
+                  <label class="field-label" for="slot-b-mode" id="slot-b-label">Slot B</label>
                   <select class="input" id="slot-b-mode"></select>
                   <input class="input mono hidden" id="slot-b-symbol" placeholder="Ticker (e.g. CVX)" maxlength="12" autocomplete="off" spellcheck="false" aria-label="Slot B ticker symbol">
                 </div>
@@ -145,9 +153,13 @@
                   <label class="field-label" for="openz-select">Entry |z|</label>
                   <select class="input mono" id="openz-select"></select>
                 </div>
-                <div>
+                <div id="closez-wrap">
                   <label class="field-label" for="closez-select">Exit |z|</label>
                   <select class="input mono" id="closez-select"></select>
+                </div>
+                <div id="lag-wrap" class="hidden">
+                  <label class="field-label" for="lag-select">Lag / Hold (bars)</label>
+                  <select class="input mono" id="lag-select"></select>
                 </div>
               </div>
 

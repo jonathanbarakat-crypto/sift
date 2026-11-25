@@ -89,7 +89,9 @@ class CardMinter:
         # mint-time admission bar (sift #59).
         n_for_star = int(n_eff) if n_eff else (n_stratum or 0)
         if n_for_star:
-            _, v_stratum = self.ledger.stratum_stats(trial.scope_id)
+            _, v_stratum = self.ledger.stratum_stats(
+                trial.scope_id, family=trial.family
+            )
             if v_stratum and v_stratum > 0:
                 sr_star = gstats.expected_max_sharpe(max(int(n_for_star), 1),
                                                      float(v_stratum))

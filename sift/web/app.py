@@ -54,6 +54,7 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
+from sift import flags
 from sift.cards import CardError
 from sift.cards import copy as card_copy
 from sift.cards.face import FaceError
@@ -86,6 +87,9 @@ from sift.web.mining import (
     ALLOWED_FORMATIONS,
     ALLOWED_OPEN_Z,
     ALLOWED_SCOPES,
+    LEAD_LAG_ALLOWED_FORMATIONS,
+    LEAD_LAG_ALLOWED_LAGS,
+    LEAD_LAG_ALLOWED_OPEN_Z,
     MINING_MODES,
     MiningError,
     MiningManager,
@@ -142,6 +146,8 @@ _FORBIDDEN_RUN_INPUT_KEYS = frozenset({
     "ohlcv",
     "beta",
     "slope",
+    "gamma",
+    "gamma_hat",
     "direction",
     "legs",
 })
@@ -868,14 +874,27 @@ def create_app(
 
     @app.get("/api/mining/catalog")
     async def api_mining_catalog(request: Request) -> JSONResponse:
-        await _require_user(request)
-        items = runtime.catalog.list_public()
+        user = await _require_user(request)
+        ll_on = flags.family_lead_lag_enabled(user.user_id)
+        items = [
+            c
+            for c in runtime.catalog.list_public()
+            if c["family"] != "lead_lag" or ll_on
+        ]
+        allowed_families = ["pairs", "lead_lag"] if ll_on else ["pairs"]
         return _json({
             "ok": True,
             "candidates": items,
             "subspaces": runtime.catalog.subspaces_public(),
             "warehouse_ready": runtime.catalog.has_warehouse,
             "mining_modes": list(MINING_MODES),
+            "allowed_families": allowed_families,
+            "lead_lag_config": {
+                "allowed_lags": list(LEAD_LAG_ALLOWED_LAGS),
+                "allowed_formations": list(LEAD_LAG_ALLOWED_FORMATIONS),
+                "allowed_open_z": list(LEAD_LAG_ALLOWED_OPEN_Z),
+                "step": cfg.LEAD_LAG_STEP,
+            },
             "universe": runtime.catalog.universe_summary(),
             "allowed_scopes": list(ALLOWED_SCOPES),
             "allowed_formations": list(ALLOWED_FORMATIONS),
@@ -943,33 +962,34 @@ def create_app(
                     )
 
         def _prepare():
-            (
-                cid,
-                slot_a,
-                slot_b,
-                scope_id,
-                formation,
-                open_z,
-                close_z,
-            ) = runtime.mining.validate_config(
+            raw_form = body.get("formation")
+            raw_open_z = body.get("open_z")
+            raw_close_z = body.get("close_z")
+            raw_lag = body.get("lag_bars")
+            vc = runtime.mining.validate_config(
+                family=str(body.get("family", "pairs")),
                 candidate_id=body.get("candidate_id"),
                 example=raw_example,
                 slot_a=raw_slot_a,
                 slot_b=raw_slot_b,
                 scope_id=str(body.get("scope_id", "free_5y_top1k")),
-                formation=int(body.get("formation", 60)),
-                open_z=float(body.get("open_z", 2.0)),
-                close_z=float(body.get("close_z", 0.5)),
+                formation=None if raw_form is None else int(raw_form),
+                open_z=None if raw_open_z is None else float(raw_open_z),
+                close_z=None if raw_close_z is None else float(raw_close_z),
+                lag_bars=None if raw_lag is None else int(raw_lag),
+                user_id=user.user_id,
             )
             return runtime.mining.prepare_run(
                 user_id=user.user_id,
-                candidate_id=cid,
-                slot_a=slot_a,
-                slot_b=slot_b,
-                scope_id=scope_id,
-                formation=formation,
-                open_z=open_z,
-                close_z=close_z,
+                family=vc["family"],
+                candidate_id=vc["candidate_id"],
+                slot_a=vc["slot_a"],
+                slot_b=vc["slot_b"],
+                scope_id=vc["scope_id"],
+                formation=vc["formation"],
+                open_z=vc["open_z"],
+                close_z=vc["close_z"],
+                lag_bars=vc["lag_bars"],
             )
 
         try:
@@ -1089,6 +1109,7 @@ def create_app(
                 stages = runtime.read_stages_fast(tid)
                 verdict = str(r["verdict"])
                 cols = set(r.keys())
+                family = str(r["family"]) if "family" in cols else "pairs"
                 mining_mode = str(r["mining_mode"]) if "mining_mode" in cols else "example"
                 subspace_filter = (
                     str(r["subspace_filter"]) if "subspace_filter" in cols else "all"
@@ -1102,7 +1123,7 @@ def create_app(
                     "run_id": str(r["run_id"]),
                     "trial_id": tid,
                     "candidate_id": str(r["candidate_id"]),
-                    "family": "pairs",
+                    "family": family,
                     "scope_id": str(r["scope_id"]),
                     "mining_mode": mining_mode,
                     "subspace_filter": subspace_filter,
@@ -1238,7 +1259,20 @@ def create_app(
                     )
                     for k in range(64)
                 ]
-                diagram = {"family": card.family, "series": series, "entry_z": 2.0}
+                if card.family == "lead_lag":
+                    s0 = runtime.ledger.stage(card.trial_id, "s0")
+                    lag_v = (
+                        int(round(float(s0["statistic"])))
+                        if s0["statistic"] is not None
+                        else 1
+                    )
+                    diagram = {
+                        "family": "lead_lag",
+                        "leader": series,
+                        "lag": max(1, min(lag_v, 10)),
+                    }
+                else:
+                    diagram = {"family": card.family, "series": series, "entry_z": 2.0}
             return runtime.card_layer.face.render(
                 card_id,
                 viewer_handle=user.user_id,

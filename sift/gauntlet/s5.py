@@ -141,13 +141,14 @@ def s5_full_depth_verdict(
     pbo: float | None = None,
     pbo_max: float = 0.5,
     mask: np.ndarray | None = None,
+    use_hac: bool = False,
 ) -> dict:
     """S5 verdict at registry_depth scope (full window), full-strength
     thresholds (design doc §2 S5 / §3.2 rule 2 — never weakened, never opt-in):
 
       * net SR > 0 after costs
       * |t_net| >= t_hurdle (3.0 full-depth vs 3.5 free-scope tau_cal)
-      * MinTRL <= T_full (4032)
+      * MinTRL <= T_full (4032), and when `use_hac=True`, MinTRL <= T_eff
       * p_perm <= 0.05 (block permutation at full depth, b=ceil(T^(1/3))=16)
       * DSR >= 0.95 with the registry_depth stratum denominator
       * PBO <= 0.5 (CSCV, S=16, over the pre-registered variant grid)
@@ -173,19 +174,29 @@ def s5_full_depth_verdict(
     T = r.size
     sr_ann = 0.0
     t_net = 0.0
+    t_eff = float(T)
     skew, kurt = 0.0, 3.0
     min_trl = math.inf
     if T >= 2 and r.std(ddof=1) > 0:
         from sift.gauntlet import stats as _stats  # local import to stay pure-ish
         sr_ann = _stats.sharpe_ratio(r)
-        t_net = _stats.t_stat_sharpe(r)
+        if use_hac:
+            hac = _stats.t_stat_sharpe_hac(r)
+            t_net = float(hac["t"])
+            t_eff = float(hac["t_eff"])
+        else:
+            t_net = _stats.t_stat_sharpe(r)
+            t_eff = float(T)
         skew, kurt = _stats.skew_kurt(r)
         sr_bar = sr_ann / math.sqrt(252.0)
         min_trl = _stats.min_trl(sr_bar, skew, kurt, alpha=0.05)
+    min_trl_ok = (min_trl_max is None) or (min_trl <= min_trl_max)
+    if use_hac:
+        min_trl_ok = min_trl_ok and (min_trl <= t_eff)
     checks = {
         "net_sr_positive": sr_ann > net_sr_min,
         "t_full_depth": abs(t_net) >= t_hurdle,
-        "min_trl": (min_trl_max is None) or (min_trl <= min_trl_max),
+        "min_trl": bool(min_trl_ok),
         # fail closed: a required statistic that is None (never computed)
         # FAILS its check — a stage not run cannot pass (soundness #15).
         "p_perm": (p_perm is not None) and (p_perm <= p_perm_max),
@@ -200,6 +211,8 @@ def s5_full_depth_verdict(
         "t_hurdle": t_hurdle,
         "sr_ann": sr_ann,
         "T": T,
+        "t_eff": t_eff,
+        "use_hac": bool(use_hac),
         "min_trl": min_trl,
         "skew": skew,
         "kurt": kurt,

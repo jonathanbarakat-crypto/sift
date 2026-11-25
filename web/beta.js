@@ -255,7 +255,37 @@
     return { kind: "random", subspace: sub };
   }
 
+  function currentFamily() {
+    var sel = $("family-select");
+    return (sel && sel.value === "lead_lag") ? "lead_lag" : "pairs";
+  }
+
+  function applyFamilyControls() {
+    var fam = currentFamily();
+    var isLL = fam === "lead_lag";
+    if ($("slot-a-label")) $("slot-a-label").textContent = isLL ? "Leader (Slot A)" : "Slot A";
+    if ($("slot-b-label")) $("slot-b-label").textContent = isLL ? "Follower (Slot B)" : "Slot B";
+    if ($("closez-wrap")) $("closez-wrap").classList.toggle("hidden", isLL);
+    if ($("lag-wrap")) $("lag-wrap").classList.toggle("hidden", !isLL);
+
+    var cfgData = state.familyConfigs || {};
+    if (isLL) {
+      var ll = cfgData.lead_lag || {};
+      fillSelect($("form-select"), ll.allowed_formations || [60, 120, 252], 120);
+      fillSelect($("openz-select"), ll.allowed_open_z || [1.0, 1.5, 2.0], 1.5);
+      fillSelect($("lag-select"), ll.allowed_lags || [1, 2, 5], 1);
+    } else {
+      var pr = cfgData.pairs || {};
+      fillSelect($("form-select"), pr.allowed_formations || [40, 60, 80], 60);
+      fillSelect($("openz-select"), pr.allowed_open_z || [1.5, 2.0, 2.5], 2.0);
+      fillSelect($("closez-select"), pr.allowed_close_z || [0.3, 0.5, 0.8], 0.5);
+    }
+    updateSlotUI();
+  }
+
   function updateSlotUI() {
+    var isLL = currentFamily() === "lead_lag";
+    var arrow = isLL ? "→" : "↔";
     var aIsSym = $("slot-a-mode").value === "symbol";
     var bIsSym = $("slot-b-mode").value === "symbol";
     $("slot-a-symbol").classList.toggle("hidden", !aIsSym);
@@ -279,15 +309,20 @@
     var sb = readSlot("slot-b-mode", "slot-b-symbol");
     if (sa.kind === "symbol" && sb.kind === "symbol") {
       pill.className = "pill ok";
-      pill.textContent = "Direct Hypothesis (A ↔ B)";
-      meta.textContent = "Subspace: 1 exact hypothesis";
-      summary.textContent = "Tests your exact two-stock hypothesis directly on PIT history. S5 full-depth check runs automatically.";
+      pill.textContent = "Direct Hypothesis (A " + arrow + " B)";
+      meta.textContent = isLL ? "Directed: Leader A → Follower B" : "Subspace: 1 exact hypothesis";
+      summary.textContent = isLL
+        ? "Tests your directed Leader → Follower hypothesis with cross-sectional demeaning, AR(1) pre-whitening, and HAC standard errors. S5 full-depth check runs automatically."
+        : "Tests your exact two-stock hypothesis directly on PIT history. S5 full-depth check runs automatically.";
     } else if (sa.kind === "symbol" || sb.kind === "symbol") {
       var subId = sa.kind === "random" ? sa.subspace : sb.subspace;
       var subInfo = subspaceById(subId);
       var cnt = subInfo ? Math.max(subInfo.eligible_count - 1, 0) : "?";
       pill.className = "pill inf";
-      pill.textContent = "Anchored Search (A ↔ ?)";
+      var anchorLbl = isLL
+        ? (sa.kind === "symbol" ? "Anchored Leader (A → ?)" : "Anchored Follower (? → B)")
+        : "Anchored Search (A ↔ ?)";
+      pill.textContent = anchorLbl;
       meta.textContent = "Anchor locked · " + (subInfo ? subInfo.label : subId) + " (~" + cnt + " partners)";
       summary.textContent = "Locks your anchor and draws a partner uniformly via PCG64 with zero hidden pre-screening. S5 full-depth check runs automatically.";
     } else {
@@ -296,15 +331,17 @@
       var pairEstimate = "?";
       if (infoA && infoB) {
         if (sa.subspace === sb.subspace) {
-          pairEstimate = String(Math.floor(infoA.eligible_count * (infoA.eligible_count - 1) / 2));
+          pairEstimate = isLL
+            ? String(infoA.eligible_count * (infoA.eligible_count - 1))
+            : String(Math.floor(infoA.eligible_count * (infoA.eligible_count - 1) / 2));
         } else {
           pairEstimate = String(infoA.eligible_count * infoB.eligible_count);
         }
       }
       pill.className = "pill warn";
-      pill.textContent = "Uniform Random (? ↔ ?)";
-      meta.textContent = "Zero pre-screen · ~" + pairEstimate + " eligible pairs";
-      summary.textContent = "Draws a pair uniformly via PCG64 across your chosen PIT subspace with zero data-peeking pre-screen (low hit rate on pure noise is expected). S5 full-depth check runs automatically.";
+      pill.textContent = "Uniform Random (? " + arrow + " ?)";
+      meta.textContent = "Zero pre-screen · ~" + pairEstimate + (isLL ? " directed pairs" : " eligible pairs");
+      summary.textContent = "Draws uniformly via PCG64 across your chosen PIT subspace with zero data-peeking pre-screen (low hit rate on pure noise is expected). S5 full-depth check runs automatically.";
     }
   }
 
@@ -314,20 +351,48 @@
       state.catalog = r.data.candidates || [];
       state.subspaces = r.data.subspaces || [];
       state.warehouseReady = !!r.data.warehouse_ready;
+      state.familyConfigs = {
+        pairs: {
+          allowed_formations: r.data.allowed_formations || [40, 60, 80],
+          allowed_open_z: r.data.allowed_open_z || [1.5, 2.0, 2.5],
+          allowed_close_z: r.data.allowed_close_z || [0.3, 0.5, 0.8]
+        },
+        lead_lag: r.data.lead_lag_config || {
+          allowed_lags: [1, 2, 5],
+          allowed_formations: [60, 120, 252],
+          allowed_open_z: [1.0, 1.5, 2.0]
+        }
+      };
+
+      var famSel = $("family-select");
+      if (famSel) {
+        var allowedFams = r.data.allowed_families || ["pairs"];
+        var prevFam = famSel.value;
+        clearEl(famSel);
+        allowedFams.forEach(function (f) {
+          var label = f === "lead_lag"
+            ? "Lead–Lag (Leader A → Follower B · directed)"
+            : "Pairs (A ↔ B · mean-reversion)";
+          famSel.appendChild(mk("option", { value: f }, label));
+        });
+        if (prevFam && allowedFams.indexOf(prevFam) !== -1) {
+          famSel.value = prevFam;
+        }
+      }
 
       populateSlotSelect($("slot-a-mode"));
       populateSlotSelect($("slot-b-mode"));
       fillSelect($("scope-select"), r.data.allowed_scopes || ["free_5y_top1k"], "free_5y_top1k");
-      fillSelect($("form-select"), r.data.allowed_formations || [60], 60);
-      fillSelect($("openz-select"), r.data.allowed_open_z || [2.0], 2.0);
-      fillSelect($("closez-select"), r.data.allowed_close_z || [0.5], 0.5);
 
       var hasExample = state.catalog.some(function (c) { return c.synthetic_example; });
       $("run-example-btn").classList.toggle("hidden", !hasExample);
-      updateSlotUI();
+      applyFamilyControls();
     });
   }
 
+  if ($("family-select")) {
+    $("family-select").addEventListener("change", applyFamilyControls);
+  }
   ["slot-a-mode", "slot-b-mode"].forEach(function (id) {
     $(id).addEventListener("change", updateSlotUI);
   });
@@ -354,6 +419,8 @@
         return;
       }
       var ps = r.data.private_spec;
+      var p = ps.parameters || {};
+      var isLL = p.family === "lead_lag";
       var banner = mk("div", { className: "private-banner" });
       banner.appendChild(mk("span", { className: "pill warn" }, "PRIVATE · OWNER ONLY · DO NOT SHARE"));
       var closeBtn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Hide");
@@ -366,13 +433,14 @@
       if (insts.length) {
         var symList = insts.map(function (it) { return it.symbol; });
         var chips = mk("div", { className: "instrument-chips" });
-        symList.forEach(function (sym, idx) {
-          if (idx > 0) chips.appendChild(mk("span", { className: "mono", style: "color:var(--ink-dim)" }, "↔"));
-          chips.appendChild(mk("span", { className: "instrument-chip" }, sym));
+        insts.forEach(function (it, idx) {
+          if (idx > 0) chips.appendChild(mk("span", { className: "mono", style: "color:var(--ink-dim)" }, isLL ? "→" : "↔"));
+          var lbl = isLL ? (it.role + ": " + it.symbol) : it.symbol;
+          chips.appendChild(mk("span", { className: "instrument-chip" }, lbl));
         });
         var copyBtn = mk("button", { type: "button", className: "btn btn-ghost btn-sm" }, "Copy symbols");
         copyBtn.addEventListener("click", function () {
-          var txt = symList.join(" / ");
+          var txt = symList.join(isLL ? " -> " : " / ");
           if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(txt).then(function () {
               copyBtn.textContent = "Copied (" + txt + ")";
@@ -387,19 +455,19 @@
         box.appendChild(mk("p", { className: "fine-print mono" }, "Synthetic guided example — no live equity symbols."));
       }
 
-      // Parameters (mode, subspace, formation, thresholds — zero prices/slopes)
-      var p = ps.parameters || {};
-      box.appendChild(mk(
-        "p",
-        { className: "mono fine-print", style: "margin:6px 0" },
-        "mode=" + (p.mining_mode || "direct") +
+      // Parameters (family, mode, subspace, formation, thresholds — zero prices/slopes)
+      var paramSummary =
+        "family=" + (p.family || "pairs") +
+        " · mode=" + (p.mining_mode || "direct") +
         " · subspace=" + (p.subspace_filter || "all") +
         " (N=" + (p.subspace_size || 1) + ")" +
         " · scope=" + (p.scope_id || "") +
         " · formation=" + (p.formation || 60) +
         " · entry |z|=" + (p.open_z || 2.0) +
-        " · exit |z|=" + (p.close_z || 0.5)
-      ));
+        (isLL
+          ? (" · lag/hold=" + (p.lag_bars || 1) + "d")
+          : (" · exit |z|=" + (p.close_z || 0.5)));
+      box.appendChild(mk("p", { className: "mono fine-print", style: "margin:6px 0" }, paramSummary));
 
       // Live magnitude-only signal
       var ls = ps.live_signal || {};
@@ -530,29 +598,54 @@
     stopStream();
     resetCeremony();
     var msg = $("mine-msg");
+    var fam = currentFamily();
+    var isLL = fam === "lead_lag";
     var payload;
 
     if (isExample) {
-      payload = { example: true, scope_id: "free_5y_top1k", formation: 60, open_z: 2.0, close_z: 0.5 };
+      if (isLL) {
+        payload = {
+          family: "lead_lag",
+          example: true,
+          scope_id: "free_5y_top1k",
+          lag_bars: 1,
+          formation: 120,
+          open_z: 1.5
+        };
+      } else {
+        payload = {
+          family: "pairs",
+          example: true,
+          scope_id: "free_5y_top1k",
+          formation: 60,
+          open_z: 2.0,
+          close_z: 0.5
+        };
+      }
     } else {
       var sa = readSlot("slot-a-mode", "slot-a-symbol");
       var sb = readSlot("slot-b-mode", "slot-b-symbol");
       if (sa.kind === "symbol" && !sa.value) {
-        setMsg(msg, "Enter a ticker symbol in Slot A or choose a Random subspace.", "err");
+        setMsg(msg, "Enter a ticker symbol in " + (isLL ? "Leader (Slot A)" : "Slot A") + " or choose a Random subspace.", "err");
         return;
       }
       if (sb.kind === "symbol" && !sb.value) {
-        setMsg(msg, "Enter a ticker symbol in Slot B or choose a Random subspace.", "err");
+        setMsg(msg, "Enter a ticker symbol in " + (isLL ? "Follower (Slot B)" : "Slot B") + " or choose a Random subspace.", "err");
         return;
       }
       payload = {
+        family: fam,
         slot_a: sa,
         slot_b: sb,
         scope_id: $("scope-select").value,
         formation: parseInt($("form-select").value, 10),
-        open_z: parseFloat($("openz-select").value),
-        close_z: parseFloat($("closez-select").value)
+        open_z: parseFloat($("openz-select").value)
       };
+      if (isLL) {
+        payload.lag_bars = parseInt($("lag-select").value, 10);
+      } else {
+        payload.close_z = parseFloat($("closez-select").value);
+      }
     }
 
     setMsg(msg, "Pre-registering trial in ledger…", "");
@@ -570,6 +663,7 @@
       $("run-meta-line").textContent =
         "run=" + run.run_id +
         " · trial=" + run.trial_id +
+        " · family=" + (run.family || fam) +
         " · mode=" + (run.mining_mode || "example") +
         " · scope=" + run.scope_id;
       setMsg(msg, "Streaming server-side gauntlet ceremony…", "");
