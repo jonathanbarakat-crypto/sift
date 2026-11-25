@@ -134,8 +134,10 @@ class TelemetryStore:
         self.db_path = Path(db_path)
         if str(self.db_path.parent) not in ("", "."):
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
+        self.con = sqlite3.connect(str(self.db_path), timeout=10.0)
         self.con.row_factory = sqlite3.Row
+        self.con.execute("PRAGMA journal_mode = WAL")
+        self.con.execute("PRAGMA busy_timeout = 10000")
         self.con.execute("PRAGMA foreign_keys = ON")
         self.con.executescript(TELEMETRY_SCHEMA_SQL)
         self.con.commit()
@@ -172,12 +174,16 @@ class TelemetryStore:
             raise TelemetryError(str(exc)) from exc
         ts = time.time() if now is None else float(now)
         blob = json.dumps(data, sort_keys=True, separators=(",", ":"), default=str)
-        cur = self.con.execute(
-            "INSERT INTO telemetry_event (user_id, event_type, payload_json, created_at)"
-            " VALUES (?,?,?,?)",
-            (user_id, event_type, blob, ts),
-        )
-        self.con.commit()
+        try:
+            cur = self.con.execute(
+                "INSERT INTO telemetry_event (user_id, event_type, payload_json, created_at)"
+                " VALUES (?,?,?,?)",
+                (user_id, event_type, blob, ts),
+            )
+            self.con.commit()
+        except Exception:
+            self.con.rollback()
+            raise
         assert cur.lastrowid is not None
         return int(cur.lastrowid)
 

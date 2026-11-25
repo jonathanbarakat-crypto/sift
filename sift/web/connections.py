@@ -4,11 +4,12 @@ Wires an owner's minted card to a monitored saved connection without adding
 any new card or notification mechanics:
 - Ownership is enforced via `CardLayer.cards.assert_owned(card_id, user_id)`
   (cards remain strictly non-transferable).
-- Optional monitoring notifications use `CardLayer.notify.set_prefs(...)`
+- Optional monitoring notifications use `CardLayer.notify.set_pref(...)`
   in beta free-tier `digest` mode only (never paid live tier).
 - Labels are sanitized through `sanitize_user_label` (fail-closed on tickers,
-  banned phrases, and emails).
-- Soft-remove preserves append-only auditability.
+  warehouse symbols, banned phrases, and emails).
+- Shares a single WAL-mode SQLite connection (`app.db`) when passed `con`, or
+  opens its own WAL-mode connection cleanly.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import sqlite3
 import time
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -60,19 +62,31 @@ class SavedConnection:
 
 
 class ConnectionStore:
-    """SQLite store for user saved connections."""
+    """SQLite store for user saved connections (stored in app.db, zero PII)."""
 
-    def __init__(self, db_path: str | Path):
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
         self.db_path = Path(db_path)
-        if str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
+        self._owns_con = con is None
+        if con is not None:
+            self.con = con
+        else:
+            if str(self.db_path.parent) not in ("", "."):
+                self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.con = sqlite3.connect(str(self.db_path), timeout=10.0)
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA journal_mode = WAL")
+            self.con.execute("PRAGMA busy_timeout = 10000")
         self.con.executescript(CONNECTIONS_SCHEMA_SQL)
         self.con.commit()
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     def __enter__(self) -> Self:
         return self
@@ -88,6 +102,7 @@ class ConnectionStore:
         card_id: str,
         label: str | None = None,
         notify_enabled: bool = False,
+        extra_symbols: Collection[str] | None = None,
         now: float | None = None,
     ) -> tuple[SavedConnection, bool]:
         """Save an owned card as a monitored connection.
@@ -98,7 +113,9 @@ class ConnectionStore:
         """
         card = card_layer.cards.assert_owned(card_id, user_id)
         default_label = f"saved {card.family} connection ({card.scope_id})"
-        clean_label = sanitize_user_label(label if label else default_label)
+        clean_label = sanitize_user_label(
+            label if label else default_label, extra_symbols=extra_symbols
+        )
         ts = time.time() if now is None else float(now)
 
         # Optional per-card digest monitoring pref (beta = free digest only).
@@ -110,37 +127,41 @@ class ConnectionStore:
             except NotifyError:
                 notify_enabled = False
 
-        existing = self.con.execute(
-            "SELECT * FROM saved_connection"
-            " WHERE user_id=? AND card_id=? AND removed_at IS NULL",
-            (user_id, card.card_id),
-        ).fetchone()
-        if existing is not None:
+        try:
+            existing = self.con.execute(
+                "SELECT * FROM saved_connection"
+                " WHERE user_id=? AND card_id=? AND removed_at IS NULL",
+                (user_id, card.card_id),
+            ).fetchone()
+            if existing is not None:
+                self.con.execute(
+                    "UPDATE saved_connection SET label=?, notify_enabled=?"
+                    " WHERE connection_id=?",
+                    (clean_label, 1 if notify_enabled else 0, existing["connection_id"]),
+                )
+                self.con.commit()
+                return self.get(str(existing["connection_id"]), user_id), False
+
+            conn_id = f"conn-{uuid.uuid4().hex[:12]}"
             self.con.execute(
-                "UPDATE saved_connection SET label=?, notify_enabled=?"
-                " WHERE connection_id=?",
-                (clean_label, 1 if notify_enabled else 0, existing["connection_id"]),
+                "INSERT INTO saved_connection"
+                " (connection_id, user_id, card_id, trial_id, label, notify_enabled, created_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (
+                    conn_id,
+                    user_id,
+                    card.card_id,
+                    card.trial_id,
+                    clean_label,
+                    1 if notify_enabled else 0,
+                    ts,
+                ),
             )
             self.con.commit()
-            return self.get(str(existing["connection_id"]), user_id), False
-
-        conn_id = f"conn-{uuid.uuid4().hex[:12]}"
-        self.con.execute(
-            "INSERT INTO saved_connection"
-            " (connection_id, user_id, card_id, trial_id, label, notify_enabled, created_at)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (
-                conn_id,
-                user_id,
-                card.card_id,
-                card.trial_id,
-                clean_label,
-                1 if notify_enabled else 0,
-                ts,
-            ),
-        )
-        self.con.commit()
-        return self.get(conn_id, user_id), True
+            return self.get(conn_id, user_id), True
+        except Exception:
+            self.con.rollback()
+            raise
 
     def get(self, connection_id: str, user_id: str) -> SavedConnection:
         row = self.con.execute(
@@ -165,14 +186,32 @@ class ConnectionStore:
         self, connection_id: str, user_id: str, *, now: float | None = None
     ) -> None:
         ts = time.time() if now is None else float(now)
-        cur = self.con.execute(
-            "UPDATE saved_connection SET removed_at=?"
-            " WHERE connection_id=? AND user_id=? AND removed_at IS NULL",
-            (ts, connection_id, user_id),
-        )
-        self.con.commit()
+        try:
+            cur = self.con.execute(
+                "UPDATE saved_connection SET removed_at=?"
+                " WHERE connection_id=? AND user_id=? AND removed_at IS NULL",
+                (ts, connection_id, user_id),
+            )
+            self.con.commit()
+        except Exception:
+            self.con.rollback()
+            raise
         if cur.rowcount != 1:
             raise ConnectionError("Saved connection not found.", 404)
+
+    def delete_for_user(self, user_id: str, *, now: float | None = None) -> int:
+        ts = time.time() if now is None else float(now)
+        try:
+            cur = self.con.execute(
+                "UPDATE saved_connection SET removed_at=?"
+                " WHERE user_id=? AND removed_at IS NULL",
+                (ts, user_id),
+            )
+            self.con.commit()
+            return int(cur.rowcount)
+        except Exception:
+            self.con.rollback()
+            raise
 
     @staticmethod
     def _row_to_conn(row: sqlite3.Row) -> SavedConnection:

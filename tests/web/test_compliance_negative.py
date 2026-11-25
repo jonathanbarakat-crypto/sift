@@ -44,7 +44,7 @@ def _reset_flags():
 def _seed_parquet_warehouse(root: Path) -> None:
     """Create a realistic server-side EODHD parquet warehouse with real ticker names."""
     rng = np.random.Generator(np.random.PCG64(2026))
-    dates = pd.bdate_range("2020-01-02", periods=1400).strftime("%Y-%m-%d").tolist()
+    dates = pd.bdate_range("2019-01-02", periods=1600).strftime("%Y-%m-%d").tolist()
     base_lx = np.cumsum(rng.normal(0.0, 0.01, len(dates)))
     # Plant AAPL/MSFT as a cointegrated pair, JPM/BAC as random walks.
     e = rng.normal(0.0, 1.0, len(dates))

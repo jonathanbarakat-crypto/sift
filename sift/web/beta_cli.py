@@ -1,17 +1,19 @@
 """Operator CLI for the SIFT Gate-1 invited beta.
 
-Subcommands:
-    invite-create   Mint one or more invite codes (hashes stored in beta.db;
-                    raw codes printed once to stdout) and append `beta_invited`.
-    report          Read-only pre-registered Gate-1 D30/D60/D90 active-user
-                    counts + Wilson 95% CI + qualitative bands (zero PII).
-    export-events   Read-only JSONL export of telemetry events keyed strictly
-                    by opaque `user_id` (never email).
+Database isolation:
+- `auth.db`      — invites, sessions, and `beta_user` (the ONLY file with email)
+- `telemetry.db` — append-only `telemetry_event` keyed by opaque `user_id`
+                   (zero email column; safe to copy/export for analytics)
+- `app.db`       — mining run records and saved connections (zero email)
 
-Usage:
-    python3 -m sift.web.beta_cli invite-create --data-dir data --wave wave-1 --count 5
-    python3 -m sift.web.beta_cli report --data-dir data
-    python3 -m sift.web.beta_cli export-events --data-dir data
+Subcommands:
+    invite-create   Mint one or more invite codes in auth.db and log
+                    `beta_invited` to telemetry.db.
+    report          Read-only Gate-1 D30/D60/D90 Wilson 95% CI report from
+                    telemetry.db ONLY (never opens auth.db).
+    export-events   Read-only JSONL export from telemetry.db ONLY.
+    delete-user     Permanently erase a user's email/sessions from auth.db
+                    and deactivate their saved connections in app.db.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sift.web.auth import AuthStore
+from sift.web.connections import ConnectionStore
 from sift.web.telemetry import TelemetryStore, gate1_report
 
 
@@ -115,12 +118,19 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--data-dir", default=default_dir)
     p_exp.add_argument("--event-type", default=None)
 
+    p_del = sub.add_parser("delete-user", help="Permanently erase a user's PII from auth.db")
+    p_del.add_argument("--data-dir", default=default_dir)
+    p_del.add_argument("--user-id", required=True)
+
     args = parser.parse_args(argv)
-    db_path = Path(args.data_dir) / "beta.db"
+    data_dir = Path(args.data_dir)
+    auth_db = data_dir / "auth.db"
+    tel_db = data_dir / "telemetry.db"
+    app_db = data_dir / "app.db"
 
     if args.cmd == "invite-create":
         created = []
-        with AuthStore(db_path) as auth, TelemetryStore(db_path) as tel:
+        with AuthStore(auth_db) as auth, TelemetryStore(tel_db) as tel:
             for _ in range(max(1, int(args.count))):
                 inv = auth.create_invite(wave=args.wave, max_uses=args.max_uses)
                 tel.record(
@@ -144,7 +154,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "report":
         as_of = _parse_as_of(args.as_of)
-        with TelemetryStore(db_path) as tel:
+        # Reads ONLY telemetry.db (never opens auth.db).
+        with TelemetryStore(tel_db) as tel:
             rep = gate1_report(tel, now=as_of)
         if args.as_json:
             print(json.dumps(rep, indent=2))
@@ -153,10 +164,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "export-events":
-        with TelemetryStore(db_path) as tel:
+        # Reads ONLY telemetry.db (never opens auth.db).
+        with TelemetryStore(tel_db) as tel:
             events = tel.export_events(event_type=args.event_type)
         for ev in events:
             print(json.dumps(ev, sort_keys=True))
+        return 0
+
+    if args.cmd == "delete-user":
+        with AuthStore(auth_db) as auth:
+            deleted = auth.delete_account(args.user_id)
+        with ConnectionStore(app_db) as conns:
+            conns.delete_for_user(args.user_id)
+        print(json.dumps({"ok": True, "deleted": deleted, "user_id": args.user_id}))
         return 0
 
     return 1

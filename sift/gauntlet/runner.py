@@ -525,7 +525,10 @@ class GauntletRunner:
             self.record(trial_id, sr)
             results.append(sr)
             if on_stage is not None:
-                on_stage(sr)
+                import contextlib
+
+                with contextlib.suppress(Exception):
+                    on_stage(sr)
 
         s0 = self.run_s0(trial_id, fixture_x, fixture_y, beta_true,
                          half_life_true, spread=fixture_spread)

@@ -1,17 +1,29 @@
 """Thin FastAPI server for the SIFT Gate-1 invited beta application.
 
-Wraps the existing server-side engine (`GauntletRunner` + `CardLayer` +
-`Ledger`) without altering any quant, card, deck, or sim-harness mechanics:
-- Preserves existing static landing page (`/`), `GET /api/onboarding`, and
-  `POST /api/waitlist`.
-- Invite-code-only account creation (`POST /api/auth/signup`) with mandatory
-  day-one ToS acceptance (`tos_accepted: true`) and email-only PII isolation.
-- Authenticated pairs mining (`POST /api/mining/runs`, polling, and SSE
-  ceremony streaming) with automatic S5 full-depth validation (never opt-in).
-- Trial history, honest kill/survivor verdict framing, server-rendered card
-  faces (`sift/cards/face.py` + `sift/cards/copy.py`), vault keep/discard/
-  promote, and saved connections (`connection_saved`).
-- Centralized fail-closed `guard_api_payload` on every API JSON/SSE response.
+Hardened architecture wrapping `GauntletRunner` + `CardLayer` + `Ledger`:
+- Physical DB isolation:
+    * `auth.db`      — invites, sessions, `beta_user` (ONLY file with email)
+    * `telemetry.db` — append-only `telemetry_event` (zero email PII)
+    * `app.db`       — `beta_run` + `saved_connection` (shared WAL connection)
+    * `ledger.db` & `cards/` — trial ledger & card layer (WAL mode)
+- Non-blocking concurrency:
+    * `_fast_pool`   — serves auth/session, waitlist, telemetry, run/trial
+                       reads, and saved connections in milliseconds even while
+                       gauntlet runs execute.
+    * `_engine_pool` — exclusively owns writable `Ledger` + `CardLayer` and
+                       runs `GauntletRunner` CPU work.
+    * `scrypt` password KDF runs off both DB threads via `asyncio.to_thread`
+      with constant-time verification for unknown emails.
+- Fail-closed compliance:
+    * Every JSON response, error handler, and SSE frame is checked by
+      `guard_api_payload` (including active warehouse symbols). Blocked
+      responses return a static 500 message — NEVER echoing the blocked token.
+- Security:
+    * Sliding-window `RateLimiter` on auth, waitlist, and mining endpoints,
+      plus per-user concurrency cap on mining runs.
+    * Strict `Content-Type: application/json` on JSON mutation endpoints (415).
+    * Re-checks `tos_version` on every authenticated request.
+    * `POST /api/auth/delete-account` permanently erases user email & sessions.
 
 Run:
     uvicorn sift.web.app:app --host 127.0.0.1 --port 8080
@@ -24,10 +36,15 @@ import asyncio
 import concurrent.futures
 import contextlib
 import csv
+import hashlib
 import json
+import math
 import os
 import queue
+import secrets
+import sqlite3
 import threading
+from collections.abc import Collection
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,16 +54,26 @@ from urllib.parse import parse_qs
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from sift import flags
 from sift.cards import CardError
 from sift.cards import copy as card_copy
 from sift.cards import decks as deck_copy
 from sift.cards.face import FaceError
+from sift.cards.notify import MODE_DIGEST, NotifyError
 from sift.cards.service import CardLayer, LayerError
 from sift.cards.vault import BASE_CAPACITY, VaultError
 from sift.gauntlet import config as cfg
-from sift.registry import Ledger, LedgerError
-from sift.web.auth import EMAIL_RE, AuthError, AuthStore, BetaUser
+from sift.registry import Ledger
+from sift.web.auth import (
+    DUMMY_SCRYPT_HASH,
+    EMAIL_RE,
+    TOS_VERSION,
+    AuthError,
+    AuthStore,
+    BetaUser,
+    RateLimiter,
+    hash_password,
+    verify_password,
+)
 from sift.web.compliance import ComplianceError, guard_api_payload
 from sift.web.connections import ConnectionError as ConnError
 from sift.web.connections import ConnectionStore
@@ -73,7 +100,9 @@ _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 _WAITLIST_LOCK = threading.Lock()
 
 # Static serving allowlist & denylist (matching web/api/waitlist.py)
-_FORBIDDEN_STATIC_EXTS = frozenset({".py", ".pyc", ".csv", ".json", ".md", ".db", ".sqlite"})
+_FORBIDDEN_STATIC_EXTS = frozenset({
+    ".py", ".pyc", ".csv", ".json", ".md", ".db", ".sqlite", ".db-wal", ".db-shm"
+})
 _STATIC_MIME = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -176,15 +205,24 @@ def _save_waitlist_csv(data_dir: Path, email: str, tos_accepted: bool) -> bool:
         return True
 
 
-def _safe_json(payload: dict[str, Any], status_code: int = 200) -> JSONResponse:
-    """Serialize JSON after fail-closed compliance inspection."""
+def _safe_json(
+    payload: dict[str, Any],
+    status_code: int = 200,
+    *,
+    extra_symbols: Collection[str] | None = None,
+) -> JSONResponse:
+    """Serialize JSON after fail-closed compliance inspection.
+
+    NEVER echoes offending tokens, tickers, or phrases in the 500 body.
+    """
     try:
-        guard_api_payload(payload)
-    except ComplianceError as exc:
-        raise HTTPException(
+        guard_api_payload(payload, extra_symbols=extra_symbols)
+    except ComplianceError:
+        return JSONResponse(
+            content={"ok": False, "error": ComplianceError.public_message},
             status_code=500,
-            detail=f"compliance guard blocked response: {exc}",
-        ) from exc
+            headers={"Cache-Control": "no-store"},
+        )
     return JSONResponse(
         content=payload,
         status_code=status_code,
@@ -192,12 +230,19 @@ def _safe_json(payload: dict[str, Any], status_code: int = 200) -> JSONResponse:
     )
 
 
-class BetaRuntime:
-    """Single-thread DB/engine runtime owning Ledger, CardLayer, and beta.db.
+def _enable_wal(con: sqlite3.Connection) -> None:
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA busy_timeout = 10000")
 
-    Every SQLite connection is created and accessed strictly on one dedicated
-    worker thread, eliminating SQLite thread-affinity errors and write races
-    without modifying `Ledger` or `CardLayer` internals.
+
+class BetaRuntime:
+    """Two-pool runtime decoupling fast auth/app/telemetry I/O from gauntlet compute.
+
+    - `_fast_pool` (1 thread): owns `auth.db`, `telemetry.db`, shared WAL
+      `app.db` (`beta_run` + `saved_connection`), and a read-only WAL
+      connection to `ledger.db` for non-blocking stage reads.
+    - `_engine_pool` (1 thread): owns writable `ledger.db` + `CardLayer` and
+      executes CPU-bound `GauntletRunner` runs.
     """
 
     def __init__(
@@ -208,85 +253,178 @@ class BetaRuntime:
         card_secret: bytes | None = None,
         allow_synthetic_examples: bool | None = None,
         s2_B: int = cfg.S2_B,
+        rate_limit_enabled: bool = True,
     ):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.warehouse_dir = Path(warehouse_dir) if warehouse_dir else None
-        self.card_secret = card_secret
+        self.card_secret = (
+            card_secret
+            if card_secret is not None
+            else (
+                os.environ.get("SIFT_CARD_HMAC_SECRET", "").encode("utf-8")
+                or secrets.token_bytes(32)
+            )
+        )
         self.allow_synthetic_examples = allow_synthetic_examples
         self.s2_B = int(s2_B)
-        self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="sift-beta-db"
+        self.limiter = RateLimiter(enabled=rate_limit_enabled)
+
+        self._fast_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="sift-beta-fast"
+        )
+        self._engine_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="sift-beta-engine"
         )
         self._closed = False
 
-        # Initialized inside the dedicated DB thread:
-        self.ledger: Ledger
-        self.card_layer: CardLayer
+        # Owned by _fast_pool:
         self.auth: AuthStore
         self.telemetry: TelemetryStore
+        self._app_con: sqlite3.Connection
         self.connections: ConnectionStore
         self.runs: MiningStore
+        self._ledger_ro: sqlite3.Connection
+
+        # Owned by _engine_pool:
+        self.ledger: Ledger
+        self.card_layer: CardLayer
         self.catalog: PairCatalog
         self.mining: MiningManager
-        self.call(self._init_stores)
 
-    def _init_stores(self) -> None:
-        beta_db = self.data_dir / "beta.db"
+        self.engine_call(self._init_engine)
+        self.fast_call(self._init_fast)
+        self.engine_call(self._wire_mining)
+
+    def _init_engine(self) -> None:
         self.ledger = Ledger(self.data_dir / "ledger.db")
+        _enable_wal(self.ledger.con)
         self.card_layer = CardLayer(
             self.ledger,
             self.data_dir / "cards",
             card_secret=self.card_secret,
         )
-        self.auth = AuthStore(beta_db)
-        self.telemetry = TelemetryStore(beta_db)
-        self.connections = ConnectionStore(beta_db)
-        self.runs = MiningStore(beta_db)
+        for comp in (
+            self.card_layer.cards,
+            self.card_layer.vault,
+            self.card_layer.shares,
+            self.card_layer.notify,
+            self.card_layer.events,
+            self.card_layer.decks,
+        ):
+            _enable_wal(comp.con)
         self.catalog = PairCatalog(
             warehouse_dir=self.warehouse_dir,
             allow_synthetic_examples=self.allow_synthetic_examples,
         )
+
+    def _init_fast(self) -> None:
+        self.auth = AuthStore(self.data_dir / "auth.db")
+        self.telemetry = TelemetryStore(self.data_dir / "telemetry.db")
+        app_db = self.data_dir / "app.db"
+        self._app_con = sqlite3.connect(str(app_db), timeout=10.0)
+        self._app_con.row_factory = sqlite3.Row
+        _enable_wal(self._app_con)
+        self.connections = ConnectionStore(app_db, con=self._app_con)
+        self.runs = MiningStore(app_db, con=self._app_con)
+        # Mark any orphaned running rows from a previous crash as failed.
+        self.runs.fail_orphaned_runs()
+        # Fast read-only WAL handle onto ledger.db (never blocks behind writes).
+        ledger_uri = f"file:{(self.data_dir / 'ledger.db').resolve()}?mode=ro"
+        self._ledger_ro = sqlite3.connect(ledger_uri, uri=True, timeout=10.0)
+        self._ledger_ro.row_factory = sqlite3.Row
+        self._ledger_ro.execute("PRAGMA busy_timeout = 10000")
+
+    def _wire_mining(self) -> None:
         self.mining = MiningManager(
             ledger=self.ledger,
             card_layer=self.card_layer,
             telemetry=self.telemetry,
             runs=self.runs,
             catalog=self.catalog,
+            commitment_secret=self.card_secret,
             s2_B=self.s2_B,
+            fast_call=self.fast_call,
         )
 
-    def submit(self, fn, *args, **kwargs) -> concurrent.futures.Future:
-        return self._executor.submit(fn, *args, **kwargs)
+    # -- fast pool helpers (auth / telemetry / app.db / RO ledger) -----------
 
+    def fast_submit(self, fn, *args, **kwargs) -> concurrent.futures.Future:
+        return self._fast_pool.submit(fn, *args, **kwargs)
+
+    def fast_call(self, fn, *args, **kwargs):
+        return self.fast_submit(fn, *args, **kwargs).result()
+
+    async def afast(self, fn, *args, **kwargs):
+        return await asyncio.wrap_future(self.fast_submit(fn, *args, **kwargs))
+
+    def read_stages_fast(self, trial_id: str) -> list[dict[str, Any]]:
+        """Read trial stages on _fast_pool via WAL read-only connection."""
+        rows = self._ledger_ro.execute(
+            "SELECT * FROM stage_result WHERE trial_id=? ORDER BY stage",
+            (trial_id,),
+        ).fetchall()
+        return [_stage_to_public(r) for r in rows]
+
+    def read_trial_fast(self, trial_id: str) -> sqlite3.Row | None:
+        return self._ledger_ro.execute(
+            "SELECT trial_id, family, scope_id, provenance, registered_at,"
+            " verdict, survivor_class, discoverer_handle"
+            " FROM trial WHERE trial_id=?",
+            (trial_id,),
+        ).fetchone()
+
+    # -- engine pool helpers (Ledger writes / CardLayer / GauntletRunner) ----
+
+    def engine_submit(self, fn, *args, **kwargs) -> concurrent.futures.Future:
+        return self._engine_pool.submit(fn, *args, **kwargs)
+
+    def engine_call(self, fn, *args, **kwargs):
+        return self.engine_submit(fn, *args, **kwargs).result()
+
+    async def aengine(self, fn, *args, **kwargs):
+        return await asyncio.wrap_future(self.engine_submit(fn, *args, **kwargs))
+
+    # Backwards-compatible alias for tests calling rt.call(rt.auth.*) / rt.telemetry.*
     def call(self, fn, *args, **kwargs):
-        return self.submit(fn, *args, **kwargs).result()
-
-    async def acall(self, fn, *args, **kwargs):
-        fut = self.submit(fn, *args, **kwargs)
-        return await asyncio.wrap_future(fut)
+        fast_objs = (self.auth, self.telemetry, self.connections, self.runs)
+        owner = getattr(fn, "__self__", None)
+        if (
+            owner in fast_objs
+            or any(a in fast_objs for a in args)
+            or any(v in fast_objs for v in kwargs.values())
+        ):
+            return self.fast_call(fn, *args, **kwargs)
+        return self.engine_call(fn, *args, **kwargs)
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
 
-        def _close_all() -> None:
+        def _close_engine() -> None:
+            for store in (self.card_layer, self.ledger):
+                with contextlib.suppress(OSError, RuntimeError):
+                    store.close()
+
+        def _close_fast() -> None:
             for store in (
-                self.runs,
-                self.connections,
+                self._ledger_ro,
+                self._app_con,
                 self.telemetry,
                 self.auth,
-                self.card_layer,
-                self.ledger,
             ):
                 with contextlib.suppress(OSError, RuntimeError):
                     store.close()
 
         try:
-            self._executor.submit(_close_all).result(timeout=10.0)
+            self._engine_pool.submit(_close_engine).result(timeout=15.0)
         finally:
-            self._executor.shutdown(wait=True)
+            self._engine_pool.shutdown(wait=True)
+        try:
+            self._fast_pool.submit(_close_fast).result(timeout=10.0)
+        finally:
+            self._fast_pool.shutdown(wait=True)
 
 
 def _extract_token(request: Request) -> str | None:
@@ -299,11 +437,35 @@ def _extract_token(request: Request) -> str | None:
     return cookie_tok.strip() if cookie_tok else None
 
 
+def _client_ip(request: Request) -> str:
+    if request.client and request.client.host:
+        return str(request.client.host)
+    return "unknown"
+
+
+def _cookie_secure(request: Request) -> bool:
+    if os.environ.get("SIFT_ENV", "dev").strip().lower() == "production":
+        return True
+    if os.environ.get("SIFT_COOKIE_SECURE", "0") in ("1", "true", "True", "yes"):
+        return True
+    return request.url.scheme == "https"
+
+
+def _require_json_content_type(request: Request) -> None:
+    """Enforce `application/json` on JSON mutation routes (blocks simple
+    cross-origin `text/plain` CSRF requests even from sibling subdomains)."""
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        raise HTTPException(
+            status_code=415, detail="Content-Type must be application/json."
+        )
+
+
 def _user_dict(user: BetaUser) -> dict[str, Any]:
     return {
         "user_id": user.user_id,
         "beta": user.beta,
-        "tos_accepted": True,
+        "tos_accepted": user.tos_version == TOS_VERSION,
         "tos_version": user.tos_version,
         "kill_rate_opt_in": user.kill_rate_opt_in,
         "created_at": user.created_at,
@@ -333,6 +495,7 @@ def create_app(
     card_secret: bytes | None = None,
     allow_synthetic_examples: bool | None = None,
     s2_B: int = cfg.S2_B,
+    rate_limit_enabled: bool = True,
 ) -> FastAPI:
     """Create a configured FastAPI application for the SIFT Gate-1 beta."""
     resolved_data = Path(
@@ -349,7 +512,15 @@ def create_app(
         card_secret=card_secret,
         allow_synthetic_examples=allow_synthetic_examples,
         s2_B=s2_B,
+        rate_limit_enabled=rate_limit_enabled,
     )
+
+    def _json(payload: dict[str, Any], status_code: int = 200) -> JSONResponse:
+        return _safe_json(
+            payload,
+            status_code=status_code,
+            extra_symbols=runtime.catalog.forbidden_symbols,
+        )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -367,11 +538,29 @@ def create_app(
     )
     app.state.runtime = runtime
 
+    # Centralized compliance-guarded exception handlers (zero unguarded detail leaks).
+    @app.exception_handler(HTTPException)
+    async def _http_exc_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+        msg = exc.detail if isinstance(exc.detail, str) else "Request failed."
+        return _json({"ok": False, "error": msg}, status_code=exc.status_code)
+
+    @app.exception_handler(Exception)
+    async def _unhandled_exc_handler(_request: Request, _exc: Exception) -> JSONResponse:
+        return JSONResponse(
+            content={"ok": False, "error": "Internal server error."},
+            status_code=500,
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def _require_user(request: Request) -> BetaUser:
         token = _extract_token(request)
-        user = await runtime.acall(runtime.auth.resolve_session, token)
+        user = await runtime.afast(runtime.auth.resolve_session, token)
         if user is None:
             raise HTTPException(status_code=401, detail="Authentication required.")
+        if user.tos_version != TOS_VERSION:
+            raise HTTPException(
+                status_code=403, detail="Updated terms acceptance required."
+            )
         return user
 
     # =========================================================================
@@ -380,20 +569,22 @@ def create_app(
 
     @app.get("/api/health")
     async def api_health() -> JSONResponse:
-        return _safe_json({"ok": True, "service": "sift-beta", "signals_only": True})
+        return _json({"ok": True, "service": "sift-beta", "signals_only": True})
 
     @app.get("/api/onboarding")
     async def api_onboarding(request: Request) -> JSONResponse:
         token = _extract_token(request)
-        user = await runtime.acall(runtime.auth.resolve_session, token)
+        user = await runtime.afast(runtime.auth.resolve_session, token)
         handle = user.user_id if user is not None else None
-        return _safe_json({"ok": True, "onboarding": _onboarding_payload(handle=handle)})
+        return _json({"ok": True, "onboarding": _onboarding_payload(handle=handle)})
 
     @app.post("/api/waitlist")
     async def api_waitlist(request: Request) -> JSONResponse:
+        if not runtime.limiter.check("waitlist", _client_ip(request), limit=20, window_s=60.0):
+            return _json({"ok": False, "error": "Too many requests. Please try later."}, status_code=429)
         raw_bytes = await request.body()
         if not raw_bytes or len(raw_bytes) > 16 * 1024:
-            return _safe_json({"ok": False, "error": "Invalid body"}, status_code=400)
+            return _json({"ok": False, "error": "Invalid body"}, status_code=400)
         ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
         email = ""
         tos_accepted = False
@@ -403,10 +594,10 @@ def create_app(
             except json.JSONDecodeError:
                 body = None
             if not isinstance(body, dict):
-                return _safe_json({"ok": False, "error": "Invalid body"}, status_code=400)
+                return _json({"ok": False, "error": "Invalid body"}, status_code=400)
             raw_email = body.get("email", "")
             if not isinstance(raw_email, str):
-                return _safe_json(
+                return _json(
                     {"ok": False, "error": "Please provide a valid email address."},
                     status_code=400,
                 )
@@ -426,45 +617,59 @@ def create_app(
             )
 
         if not EMAIL_RE.match(email):
-            return _safe_json(
+            return _json(
                 {"ok": False, "error": "Please provide a valid email address."},
                 status_code=400,
             )
         if not tos_accepted:
-            return _safe_json(
+            return _json(
                 {"ok": False, "error": "Please accept the terms to join the waitlist."},
                 status_code=400,
             )
 
         added = _save_waitlist_csv(runtime.data_dir, email, tos_accepted=True)
-        # Aggregate-only telemetry — NEVER store email in telemetry.
-        await runtime.acall(
+        await runtime.afast(
             runtime.telemetry.record,
             "beta_signup",
             {"source": "landing", "tos_accepted": True, "duplicate": not added},
         )
         msg = "Added to the beta waitlist." if added else "You're already on the list."
-        return _safe_json({"ok": True, "message": msg})
+        return _json({"ok": True, "message": msg})
 
     # =========================================================================
-    # Auth routes (invite-only signup, login, logout, me, profile)
+    # Auth routes (invite-only signup, constant-time off-thread login, delete)
     # =========================================================================
 
     @app.post("/api/auth/signup")
     async def api_signup(request: Request) -> JSONResponse:
+        _require_json_content_type(request)
+        if not runtime.limiter.check("signup", _client_ip(request), limit=15, window_s=60.0):
+            return _json({"ok": False, "error": "Too many requests. Please try later."}, status_code=429)
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            return _safe_json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
         if not isinstance(body, dict):
-            return _safe_json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
 
-        def _do_signup():
-            user, token, wave = runtime.auth.signup(
+        try:
+            norm_email, norm_code = runtime.auth.validate_signup_inputs(
                 email=body.get("email", ""),
                 password=body.get("password", ""),
                 invite_code=body.get("invite_code", ""),
                 tos_accepted=body.get("tos_accepted") is True,
+            )
+        except AuthError as exc:
+            return _json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
+
+        # Compute scrypt OFF the DB thread so auth floods never stall other users.
+        pw_hash = await asyncio.to_thread(hash_password, str(body.get("password", "")))
+
+        def _commit_signup():
+            user, token, wave = runtime.auth.complete_signup(
+                norm_email=norm_email,
+                password_hash=pw_hash,
+                norm_code=norm_code,
             )
             runtime.telemetry.record(
                 "beta_accepted", {"wave": wave}, user_id=user.user_id
@@ -474,15 +679,17 @@ def create_app(
                 {"beta": True, "tos_version": user.tos_version, "wave": wave},
                 user_id=user.user_id,
             )
-            runtime.telemetry.record("session_login", {"via": "signup"}, user_id=user.user_id)
+            runtime.telemetry.record(
+                "session_login", {"via": "signup"}, user_id=user.user_id
+            )
             return user, token
 
         try:
-            user, token = await runtime.acall(_do_signup)
+            user, token = await runtime.afast(_commit_signup)
         except AuthError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
+            return _json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
 
-        resp = _safe_json(
+        resp = _json(
             {"ok": True, "user": _user_dict(user), "session_token": token},
             status_code=201,
         )
@@ -491,40 +698,49 @@ def create_app(
             value=token,
             httponly=True,
             samesite="lax",
-            secure=(os.environ.get("SIFT_ENV", "dev").lower() == "production"),
+            secure=_cookie_secure(request),
             max_age=14 * 86400,
         )
         return resp
 
     @app.post("/api/auth/login")
     async def api_login(request: Request) -> JSONResponse:
+        _require_json_content_type(request)
+        if not runtime.limiter.check("login", _client_ip(request), limit=20, window_s=60.0):
+            return _json({"ok": False, "error": "Too many requests. Please try later."}, status_code=429)
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            return _safe_json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
         if not isinstance(body, dict):
-            return _safe_json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
 
-        def _do_login():
-            user, token = runtime.auth.login(
-                email=body.get("email", ""),
-                password=body.get("password", ""),
+        email = str(body.get("email", ""))
+        password = str(body.get("password", ""))
+        found = await runtime.afast(runtime.auth.lookup_for_login, email)
+        # Constant-time scrypt off the DB thread even when email does not exist.
+        stored_hash = found[1] if found is not None else DUMMY_SCRYPT_HASH
+        verified = await asyncio.to_thread(verify_password, password, stored_hash)
+        if found is None or not verified:
+            return _json({"ok": False, "error": "Invalid email or password."}, status_code=401)
+
+        user = found[0]
+
+        def _mint_session():
+            tok = runtime.auth.create_session(user.user_id)
+            runtime.telemetry.record(
+                "session_login", {"via": "password"}, user_id=user.user_id
             )
-            runtime.telemetry.record("session_login", {"via": "password"}, user_id=user.user_id)
-            return user, token
+            return tok
 
-        try:
-            user, token = await runtime.acall(_do_login)
-        except AuthError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
-
-        resp = _safe_json({"ok": True, "user": _user_dict(user), "session_token": token})
+        token = await runtime.afast(_mint_session)
+        resp = _json({"ok": True, "user": _user_dict(user), "session_token": token})
         resp.set_cookie(
             key=SESSION_COOKIE,
             value=token,
             httponly=True,
             samesite="lax",
-            secure=(os.environ.get("SIFT_ENV", "dev").lower() == "production"),
+            secure=_cookie_secure(request),
             max_age=14 * 86400,
         )
         return resp
@@ -532,32 +748,59 @@ def create_app(
     @app.post("/api/auth/logout")
     async def api_logout(request: Request) -> JSONResponse:
         token = _extract_token(request)
-        await runtime.acall(runtime.auth.logout, token)
-        resp = _safe_json({"ok": True})
+        await runtime.afast(runtime.auth.logout, token)
+        resp = _json({"ok": True})
+        resp.delete_cookie(SESSION_COOKIE)
+        return resp
+
+    @app.post("/api/auth/delete-account")
+    async def api_delete_account(request: Request) -> JSONResponse:
+        """Fulfill the privacy-note deletion right: permanently erases `email`
+        and sessions from `auth.db` and removes saved connections, leaving only
+        anonymized opaque-ID telemetry in `telemetry.db`."""
+        _require_json_content_type(request)
+        user = await _require_user(request)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict) or body.get("confirm") is not True:
+            return _json(
+                {"ok": False, "error": "confirm: true is required to delete account."},
+                status_code=400,
+            )
+
+        def _do_delete():
+            runtime.connections.delete_for_user(user.user_id)
+            return runtime.auth.delete_account(user.user_id)
+
+        deleted = await runtime.afast(_do_delete)
+        resp = _json({"ok": True, "deleted": bool(deleted)})
         resp.delete_cookie(SESSION_COOKIE)
         return resp
 
     @app.get("/api/auth/me")
     async def api_me(request: Request) -> JSONResponse:
         user = await _require_user(request)
-        return _safe_json({"ok": True, "user": _user_dict(user)})
+        return _json({"ok": True, "user": _user_dict(user)})
 
     @app.patch("/api/auth/profile")
     async def api_profile(request: Request) -> JSONResponse:
+        _require_json_content_type(request)
         user = await _require_user(request)
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            return _safe_json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
         if not isinstance(body, dict) or not isinstance(body.get("kill_rate_opt_in"), bool):
-            return _safe_json(
+            return _json(
                 {"ok": False, "error": "kill_rate_opt_in boolean is required."},
                 status_code=400,
             )
-        updated = await runtime.acall(
+        updated = await runtime.afast(
             runtime.auth.set_kill_rate_opt_in, user.user_id, body["kill_rate_opt_in"]
         )
-        return _safe_json({"ok": True, "user": _user_dict(updated)})
+        return _json({"ok": True, "user": _user_dict(updated)})
 
     # =========================================================================
     # Mining endpoints (catalog, trigger run, polling, SSE stream)
@@ -566,8 +809,8 @@ def create_app(
     @app.get("/api/mining/catalog")
     async def api_mining_catalog(request: Request) -> JSONResponse:
         await _require_user(request)
-        items = await runtime.acall(runtime.catalog.list_public)
-        return _safe_json({
+        items = runtime.catalog.list_public()
+        return _json({
             "ok": True,
             "candidates": items,
             "allowed_scopes": list(ALLOWED_SCOPES),
@@ -579,32 +822,51 @@ def create_app(
 
     @app.post("/api/mining/runs")
     async def api_start_mining_run(request: Request) -> JSONResponse:
+        _require_json_content_type(request)
         user = await _require_user(request)
+        if not runtime.limiter.check("mining", user.user_id, limit=15, window_s=60.0):
+            return _json(
+                {"ok": False, "error": "Mining rate limit reached. Please wait a moment."},
+                status_code=429,
+            )
+        active_cnt = await runtime.afast(runtime.runs.active_run_count, user.user_id)
+        if active_cnt >= 1:
+            return _json(
+                {"ok": False, "error": "A mining run is already active for this account."},
+                status_code=429,
+            )
+
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            body = {}
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
         if not isinstance(body, dict):
-            return _safe_json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
 
         # Fail closed on any attempt to disable S5 or inject raw symbols/prices.
-        bad_keys = sorted(k for k in body if str(k).lower() in _FORBIDDEN_RUN_INPUT_KEYS)
+        bad_keys = [k for k in body if str(k).lower() in _FORBIDDEN_RUN_INPUT_KEYS]
         if bad_keys:
-            return _safe_json(
+            return _json(
                 {
                     "ok": False,
                     "error": (
-                        "Forbidden parameter(s): S5 registry-depth validation is "
-                        "automatic (never opt-in) and raw symbols/prices are not accepted."
+                        "Forbidden parameter: S5 registry-depth validation is "
+                        "automatic and raw symbols are not accepted."
                     ),
                 },
                 status_code=400,
             )
 
+        raw_example = body.get("example", False)
+        if not isinstance(raw_example, bool):
+            return _json(
+                {"ok": False, "error": "example must be a boolean."}, status_code=400
+            )
+
         def _prepare():
             cid, scope_id, formation, open_z, close_z = runtime.mining.validate_config(
                 candidate_id=body.get("candidate_id"),
-                example=bool(body.get("example", False)),
+                example=raw_example,
                 scope_id=str(body.get("scope_id", "free_5y_top1k")),
                 formation=int(body.get("formation", 60)),
                 open_z=float(body.get("open_z", 2.0)),
@@ -620,13 +882,14 @@ def create_app(
             )
 
         try:
-            run_meta, pair_in = await runtime.acall(_prepare)
+            run_meta, pair_in = await runtime.aengine(_prepare)
         except (MiningError, ValueError, TypeError) as exc:
             code = exc.status_code if isinstance(exc, MiningError) else 400
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=code)
+            msg = str(exc) if isinstance(exc, MiningError) else "Invalid mining configuration."
+            return _json({"ok": False, "error": msg}, status_code=code)
 
         if pair_in is not None:
-            runtime.submit(
+            runtime.engine_submit(
                 runtime.mining.execute_run,
                 run_id=run_meta["run_id"],
                 user_id=user.user_id,
@@ -635,29 +898,50 @@ def create_app(
                 pair_in=pair_in,
             )
 
-        return _safe_json({"ok": True, "run": run_meta}, status_code=202)
+        return _json({"ok": True, "run": run_meta}, status_code=202)
 
     @app.get("/api/mining/runs/{run_id}")
     async def api_get_mining_run(run_id: str, request: Request) -> JSONResponse:
         user = await _require_user(request)
-        try:
-            snap = await runtime.acall(
-                runtime.mining.get_run_snapshot, run_id, user.user_id
+
+        def _read_fast():
+            row = runtime.runs.get_run(run_id, user.user_id)
+            if row is None:
+                return None, []
+            stages = runtime.read_stages_fast(str(row["trial_id"]))
+            return row, stages
+
+        row, stages = await runtime.afast(_read_fast)
+        if row is None:
+            return _json({"ok": False, "error": "Mining run not found."}, status_code=404)
+
+        card_face = None
+        if row["card_id"] and str(row["status"]) == "completed":
+            card_face = await runtime.aengine(
+                runtime.mining.render_owned_face_or_none,
+                str(row["card_id"]),
+                user.user_id,
             )
-        except MiningError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
-        return _safe_json({"ok": True, "run": snap})
+        snap = runtime.mining.build_run_snapshot(row, stages, user.user_id, card_face=card_face)
+        return _json({"ok": True, "run": snap})
 
     @app.get("/api/mining/runs/{run_id}/stream")
     async def api_stream_mining_run(run_id: str, request: Request) -> Response:
         user = await _require_user(request)
-        try:
-            channel = await runtime.acall(
-                runtime.mining.get_channel, run_id, user.user_id
-            )
-        except MiningError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
 
+        def _read_fast():
+            row = runtime.runs.get_run(run_id, user.user_id)
+            if row is None:
+                return None, []
+            return row, runtime.read_stages_fast(str(row["trial_id"]))
+
+        row, stages = await runtime.afast(_read_fast)
+        if row is None:
+            return _json({"ok": False, "error": "Mining run not found."}, status_code=404)
+
+        channel = runtime.mining.get_channel(
+            run_id, user.user_id, row=row, stages=stages
+        )
         sub_q = channel.subscribe()
 
         async def _event_gen():
@@ -673,8 +957,17 @@ def create_app(
                     if item is None:
                         break
                     ev_name, ev_data = item
-                    guard_api_payload(ev_data)
-                    yield f"event: {ev_name}\ndata: {json.dumps(ev_data, separators=(',', ':'))}\n\n"
+                    try:
+                        guard_api_payload(
+                            ev_data, extra_symbols=runtime.catalog.forbidden_symbols
+                        )
+                    except ComplianceError:
+                        ev_name = "error"
+                        ev_data = {"error": ComplianceError.public_message}
+                    yield (
+                        f"event: {ev_name}\n"
+                        f"data: {json.dumps(ev_data, separators=(',', ':'))}\n\n"
+                    )
             finally:
                 channel.unsubscribe(sub_q)
 
@@ -702,7 +995,7 @@ def create_app(
             survivor_n = 0
             for r in run_rows:
                 tid = str(r["trial_id"])
-                stages = [_stage_to_public(s) for s in runtime.ledger.stages(tid)]
+                stages = runtime.read_stages_fast(tid)
                 verdict = str(r["verdict"])
                 if verdict == "killed":
                     killed_n += 1
@@ -740,53 +1033,60 @@ def create_app(
                 },
             }
 
-        return _safe_json(await runtime.acall(_load))
+        return _json(await runtime.afast(_load))
 
     @app.get("/api/trials/{trial_id}")
     async def api_get_trial(trial_id: str, request: Request) -> JSONResponse:
         user = await _require_user(request)
 
-        def _load():
-            try:
-                trial = runtime.ledger.get(trial_id)
-                owner = runtime.ledger.trial_owner(trial_id)
-            except LedgerError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        def _load_fast():
+            row = runtime.read_trial_fast(trial_id)
+            if row is None:
+                return None, []
+            owner = row["discoverer_handle"]
             if owner != user.user_id and not runtime.runs.user_has_trial(
                 user.user_id, trial_id
             ):
-                raise HTTPException(status_code=404, detail="Trial not found.")
-            stages = [_stage_to_public(s) for s in runtime.ledger.stages(trial_id)]
-            killed_at = next(
-                (s["stage"] for s in stages if s["status"] == "fail" and s["stage"] in ("s0", "s1", "s2")),
-                None,
-            )
-            owned_card_id = runtime.mining._find_owned_card_for_trial(
-                trial_id, user.user_id
-            )
-            return {
-                "ok": True,
-                "trial": {
-                    "trial_id": trial.trial_id,
-                    "family": trial.family,
-                    "scope_id": trial.scope_id,
-                    "provenance": trial.provenance,
-                    "registered_at": trial.registered_at,
-                    "verdict": trial.verdict,
-                    "survivor_class": trial.survivor_class,
-                    "killed_at": killed_at,
-                    "card_id": owned_card_id,
-                    "verdict_copy": _safe_verdict_copy(
-                        trial.verdict,
-                        killed_at=killed_at,
-                        survivor_class=trial.survivor_class,
-                        handle=user.user_id,
-                    ),
-                    "stages": stages,
-                },
-            }
+                # Uniform 404 (no unknown-vs-foreign trial_id oracle).
+                return None, []
+            return row, runtime.read_stages_fast(trial_id)
 
-        return _safe_json(await runtime.acall(_load))
+        row, stages = await runtime.afast(_load_fast)
+        if row is None:
+            return _json({"ok": False, "error": "Trial not found."}, status_code=404)
+
+        killed_at = next(
+            (
+                s["stage"]
+                for s in stages
+                if s["status"] == "fail" and s["stage"] in ("s0", "s1", "s2")
+            ),
+            None,
+        )
+        owned_card_id = await runtime.aengine(
+            runtime.mining._find_owned_card_for_trial, trial_id, user.user_id
+        )
+        return _json({
+            "ok": True,
+            "trial": {
+                "trial_id": str(row["trial_id"]),
+                "family": str(row["family"]),
+                "scope_id": str(row["scope_id"]),
+                "provenance": str(row["provenance"]),
+                "registered_at": float(row["registered_at"]),
+                "verdict": str(row["verdict"]),
+                "survivor_class": str(row["survivor_class"]),
+                "killed_at": killed_at,
+                "card_id": owned_card_id,
+                "verdict_copy": _safe_verdict_copy(
+                    str(row["verdict"]),
+                    killed_at=killed_at,
+                    survivor_class=str(row["survivor_class"]),
+                    handle=user.user_id,
+                ),
+                "stages": stages,
+            },
+        })
 
     @app.get("/api/cards")
     async def api_list_cards(request: Request) -> JSONResponse:
@@ -804,21 +1104,13 @@ def create_app(
                     else ("archive" if c.card_id in archive_ids else "unassigned")
                 )
                 item = _card_summary(c, vstate)
-                if flags.cards_v4_1_enabled(user.user_id):
-                    try:
-                        item["face"] = runtime.card_layer.face.render(
-                            c.card_id,
-                            viewer_handle=user.user_id,
-                            current_abs_z=runtime.mining.current_abs_z(c.card_id),
-                        )
-                    except (FaceError, CardError):
-                        item["face"] = None
-                else:
-                    item["face"] = None
+                item["face"] = runtime.mining.render_owned_face_or_none(
+                    c.card_id, user.user_id
+                )
                 items.append(item)
             return {"ok": True, "cards": items}
 
-        return _safe_json(await runtime.acall(_load))
+        return _json(await runtime.aengine(_load))
 
     @app.get("/api/cards/{card_id}/face")
     async def api_card_face(
@@ -831,12 +1123,9 @@ def create_app(
             card = runtime.card_layer.cards.assert_owned(card_id, user.user_id)
             diagram = None
             if with_image:
-                # Deterministic stylized aggregate z-score illustration seeded from
-                # card_id only (zero raw market data / zero per-ticker series).
-                import hashlib
-                import math
-
-                seed_val = int(hashlib.sha256(card.card_id.encode("utf-8")).hexdigest()[:8], 16)
+                seed_val = int(
+                    hashlib.sha256(card.card_id.encode("utf-8")).hexdigest()[:8], 16
+                )
                 phase = (seed_val % 360) * math.pi / 180.0
                 series = [
                     round(
@@ -856,21 +1145,25 @@ def create_app(
             )
 
         try:
-            face = await runtime.acall(_render)
-        except LayerError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=503)
-        except FaceError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=503)
+            face = await runtime.aengine(_render)
+        except (LayerError, FaceError):
+            return _json(
+                {"ok": False, "error": "Card face rendering is unavailable."},
+                status_code=503,
+            )
         except CardError as exc:
             msg = str(exc)
             if "belongs to" in msg or "non-transferable" in msg:
-                return _safe_json(
-                    {"ok": False, "error": "Card does not belong to this account (non-transferable)."},
+                return _json(
+                    {
+                        "ok": False,
+                        "error": "Card does not belong to this account (non-transferable).",
+                    },
                     status_code=403,
                 )
-            return _safe_json({"ok": False, "error": msg}, status_code=404)
+            return _json({"ok": False, "error": "Card not found."}, status_code=404)
 
-        return _safe_json({"ok": True, "face": face})
+        return _json({"ok": True, "face": face})
 
     # =========================================================================
     # Vault & Saved Connections (`connection_saved`)
@@ -880,43 +1173,45 @@ def create_app(
     async def api_vault(request: Request) -> JSONResponse:
         user = await _require_user(request)
 
-        def _load():
+        def _load_engine():
             vault_cards = runtime.card_layer.vault.vault(user.user_id)
             archive_cards = runtime.card_layer.vault.archive(user.user_id)
             all_owned = runtime.card_layer.cards.cards_for_owner(user.user_id)
             known = {c.card_id for c in vault_cards} | {c.card_id for c in archive_cards}
             unassigned = [c for c in all_owned if c.card_id not in known]
             share_slots = runtime.card_layer.vault.share_slots(user.user_id)
-            conns = runtime.connections.list_for_user(user.user_id)
-            hint = _onboarding_payload(handle=user.user_id)["hit_loop_hint"]
-            return {
-                "ok": True,
-                "vault": [_card_summary(c, "vault") for c in vault_cards],
-                "archive": [_card_summary(c, "archive") for c in archive_cards],
-                "unassigned": [_card_summary(c, "unassigned") for c in unassigned],
-                "capacity": {
-                    "used": len(vault_cards),
-                    "share_slots": share_slots,
-                    "by_tier": {
-                        tier: base + share_slots
-                        for tier, base in BASE_CAPACITY.items()
-                    },
-                },
-                "connections": [
-                    {
-                        "connection_id": cn.connection_id,
-                        "card_id": cn.card_id,
-                        "trial_id": cn.trial_id,
-                        "label": cn.label,
-                        "notify_enabled": cn.notify_enabled,
-                        "created_at": cn.created_at,
-                    }
-                    for cn in conns
-                ],
-                "hit_loop_hint": hint,
-            }
+            return vault_cards, archive_cards, unassigned, share_slots
 
-        return _safe_json(await runtime.acall(_load))
+        vault_cards, archive_cards, unassigned, share_slots = await runtime.aengine(
+            _load_engine
+        )
+        conns = await runtime.afast(runtime.connections.list_for_user, user.user_id)
+        hint = _onboarding_payload(handle=user.user_id)["hit_loop_hint"]
+        return _json({
+            "ok": True,
+            "vault": [_card_summary(c, "vault") for c in vault_cards],
+            "archive": [_card_summary(c, "archive") for c in archive_cards],
+            "unassigned": [_card_summary(c, "unassigned") for c in unassigned],
+            "capacity": {
+                "used": len(vault_cards),
+                "share_slots": share_slots,
+                "by_tier": {
+                    tier: base + share_slots for tier, base in BASE_CAPACITY.items()
+                },
+            },
+            "connections": [
+                {
+                    "connection_id": cn.connection_id,
+                    "card_id": cn.card_id,
+                    "trial_id": cn.trial_id,
+                    "label": cn.label,
+                    "notify_enabled": cn.notify_enabled,
+                    "created_at": cn.created_at,
+                }
+                for cn in conns
+            ],
+            "hit_loop_hint": hint,
+        })
 
     @app.post("/api/vault/{card_id}/keep")
     async def api_vault_keep(card_id: str, request: Request) -> JSONResponse:
@@ -935,17 +1230,20 @@ def create_app(
             }
 
         try:
-            return _safe_json(await runtime.acall(_do))
+            return _json(await runtime.aengine(_do))
         except (VaultError, CardError) as exc:
             msg = str(exc)
             if "flag_off" in msg:
-                return _safe_json({"ok": False, "error": msg}, status_code=503)
+                return _json({"ok": False, "error": "Card layer is disabled."}, status_code=503)
             if "belongs to" in msg or "non-transferable" in msg:
-                return _safe_json(
-                    {"ok": False, "error": "Card does not belong to this account (non-transferable)."},
+                return _json(
+                    {
+                        "ok": False,
+                        "error": "Card does not belong to this account (non-transferable).",
+                    },
                     status_code=403,
                 )
-            return _safe_json({"ok": False, "error": msg}, status_code=400)
+            return _json({"ok": False, "error": "Vault operation refused."}, status_code=400)
 
     @app.post("/api/vault/{card_id}/discard")
     async def api_vault_discard(card_id: str, request: Request) -> JSONResponse:
@@ -953,7 +1251,8 @@ def create_app(
 
         def _do():
             res = runtime.card_layer.vault.discard(card_id, user.user_id)
-            runtime.telemetry.record(
+            runtime.fast_call(
+                runtime.telemetry.record,
                 "card_discarded",
                 {
                     "card_id": card_id,
@@ -963,7 +1262,8 @@ def create_app(
                 user_id=user.user_id,
             )
             if int(res["ghosts_shifted"]) > 0:
-                runtime.telemetry.record(
+                runtime.fast_call(
+                    runtime.telemetry.record,
                     "ghost_promoted",
                     {
                         "card_id": card_id,
@@ -985,17 +1285,20 @@ def create_app(
             }
 
         try:
-            return _safe_json(await runtime.acall(_do))
+            return _json(await runtime.aengine(_do))
         except (VaultError, CardError) as exc:
             msg = str(exc)
             if "flag_off" in msg:
-                return _safe_json({"ok": False, "error": msg}, status_code=503)
+                return _json({"ok": False, "error": "Card layer is disabled."}, status_code=503)
             if "belongs to" in msg or "non-transferable" in msg:
-                return _safe_json(
-                    {"ok": False, "error": "Card does not belong to this account (non-transferable)."},
+                return _json(
+                    {
+                        "ok": False,
+                        "error": "Card does not belong to this account (non-transferable).",
+                    },
                     status_code=403,
                 )
-            return _safe_json({"ok": False, "error": msg}, status_code=400)
+            return _json({"ok": False, "error": "Vault discard refused."}, status_code=400)
 
     @app.post("/api/vault/{card_id}/promote")
     async def api_vault_promote(card_id: str, request: Request) -> JSONResponse:
@@ -1014,84 +1317,155 @@ def create_app(
             }
 
         try:
-            return _safe_json(await runtime.acall(_do))
+            return _json(await runtime.aengine(_do))
         except (VaultError, CardError) as exc:
             msg = str(exc)
             if "flag_off" in msg:
-                return _safe_json({"ok": False, "error": msg}, status_code=503)
+                return _json({"ok": False, "error": "Card layer is disabled."}, status_code=503)
             if "belongs to" in msg or "non-transferable" in msg:
-                return _safe_json(
-                    {"ok": False, "error": "Card does not belong to this account (non-transferable)."},
+                return _json(
+                    {
+                        "ok": False,
+                        "error": "Card does not belong to this account (non-transferable).",
+                    },
                     status_code=403,
                 )
-            return _safe_json({"ok": False, "error": msg}, status_code=400)
+            return _json({"ok": False, "error": "Vault promote refused."}, status_code=400)
 
     @app.get("/api/connections")
     async def api_list_connections(request: Request) -> JSONResponse:
         user = await _require_user(request)
+        conns = await runtime.afast(runtime.connections.list_for_user, user.user_id)
+        hint = _onboarding_payload(handle=user.user_id)["hit_loop_hint"]
 
-        def _load():
-            conns = runtime.connections.list_for_user(user.user_id)
-            hint = _onboarding_payload(handle=user.user_id)["hit_loop_hint"]
-            out = []
-            for cn in conns:
-                face = None
-                if flags.cards_v4_1_enabled(user.user_id):
-                    try:
-                        face = runtime.card_layer.face.render(
-                            cn.card_id,
-                            viewer_handle=user.user_id,
-                            current_abs_z=runtime.mining.current_abs_z(cn.card_id),
-                        )
-                    except (FaceError, CardError):
-                        face = None
-                out.append({
+        def _render_faces():
+            return {
+                cn.card_id: runtime.mining.render_owned_face_or_none(
+                    cn.card_id, user.user_id
+                )
+                for cn in conns
+            }
+
+        faces = await runtime.aengine(_render_faces) if conns else {}
+        return _json({
+            "ok": True,
+            "connections": [
+                {
                     "connection_id": cn.connection_id,
                     "card_id": cn.card_id,
                     "trial_id": cn.trial_id,
                     "label": cn.label,
                     "notify_enabled": cn.notify_enabled,
                     "created_at": cn.created_at,
-                    "face": face,
-                })
-            return {"ok": True, "connections": out, "hit_loop_hint": hint}
-
-        return _safe_json(await runtime.acall(_load))
+                    "face": faces.get(cn.card_id),
+                }
+                for cn in conns
+            ],
+            "hit_loop_hint": hint,
+        })
 
     @app.post("/api/connections")
     async def api_save_connection(request: Request) -> JSONResponse:
+        _require_json_content_type(request)
         user = await _require_user(request)
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            return _safe_json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
+            return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
         if not isinstance(body, dict) or not body.get("card_id"):
-            return _safe_json({"ok": False, "error": "card_id is required."}, status_code=400)
+            return _json({"ok": False, "error": "card_id is required."}, status_code=400)
 
-        def _do():
-            conn, newly_created = runtime.connections.save(
-                card_layer=runtime.card_layer,
-                user_id=user.user_id,
-                card_id=str(body["card_id"]),
-                label=body.get("label"),
-                notify_enabled=bool(body.get("notify_enabled", False)),
-            )
-            if newly_created:
-                runtime.telemetry.record(
-                    "connection_saved",
-                    {
-                        "connection_id": conn.connection_id,
-                        "card_id": conn.card_id,
-                        "trial_id": conn.trial_id,
-                    },
-                    user_id=user.user_id,
-                )
-            return conn, newly_created
+        card_id = str(body["card_id"])
+        notify_enabled = bool(body.get("notify_enabled", False))
+
+        # Step 1: verify card ownership & optional digest pref on engine pool.
+        def _verify_card():
+            card = runtime.card_layer.cards.assert_owned(card_id, user.user_id)
+            if notify_enabled:
+                with contextlib.suppress(NotifyError):
+                    runtime.card_layer.notify.set_pref(
+                        card.card_id, user.user_id, True, mode=MODE_DIGEST
+                    )
+            return card
 
         try:
-            conn, newly_created = await runtime.acall(_do)
+            card = await runtime.aengine(_verify_card)
+        except CardError as exc:
+            msg = str(exc)
+            if "belongs to" in msg or "non-transferable" in msg:
+                return _json(
+                    {
+                        "ok": False,
+                        "error": "Card does not belong to this account (non-transferable).",
+                    },
+                    status_code=403,
+                )
+            return _json({"ok": False, "error": "Card not found."}, status_code=404)
+
+        # Step 2: persist connection & telemetry on fast pool (using pre-verified card).
+        def _save_fast():
+            from sift.web.compliance import sanitize_user_label
+
+            default_label = f"saved {card.family} connection ({card.scope_id})"
+            clean_label = sanitize_user_label(
+                body.get("label") if body.get("label") else default_label,
+                extra_symbols=runtime.catalog.forbidden_symbols,
+            )
+            import time as _time
+            import uuid as _uuid
+
+            ts = _time.time()
+            con = runtime.connections.con
+            try:
+                existing = con.execute(
+                    "SELECT * FROM saved_connection"
+                    " WHERE user_id=? AND card_id=? AND removed_at IS NULL",
+                    (user.user_id, card.card_id),
+                ).fetchone()
+                if existing is not None:
+                    con.execute(
+                        "UPDATE saved_connection SET label=?, notify_enabled=?"
+                        " WHERE connection_id=?",
+                        (clean_label, 1 if notify_enabled else 0, existing["connection_id"]),
+                    )
+                    con.commit()
+                    return runtime.connections.get(str(existing["connection_id"]), user.user_id), False
+
+                conn_id = f"conn-{_uuid.uuid4().hex[:12]}"
+                con.execute(
+                    "INSERT INTO saved_connection"
+                    " (connection_id, user_id, card_id, trial_id, label, notify_enabled, created_at)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (
+                        conn_id,
+                        user.user_id,
+                        card.card_id,
+                        card.trial_id,
+                        clean_label,
+                        1 if notify_enabled else 0,
+                        ts,
+                    ),
+                )
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+            conn = runtime.connections.get(conn_id, user.user_id)
+            runtime.telemetry.record(
+                "connection_saved",
+                {
+                    "connection_id": conn.connection_id,
+                    "card_id": conn.card_id,
+                    "trial_id": conn.trial_id,
+                },
+                user_id=user.user_id,
+            )
+            return conn, True
+
+        try:
+            conn, newly_created = await runtime.afast(_save_fast)
         except ComplianceError:
-            return _safe_json(
+            return _json(
                 {
                     "ok": False,
                     "error": (
@@ -1102,17 +1476,9 @@ def create_app(
                 status_code=400,
             )
         except ConnError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
-        except CardError as exc:
-            msg = str(exc)
-            if "belongs to" in msg or "non-transferable" in msg:
-                return _safe_json(
-                    {"ok": False, "error": "Card does not belong to this account (non-transferable)."},
-                    status_code=403,
-                )
-            return _safe_json({"ok": False, "error": msg}, status_code=404)
+            return _json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
 
-        return _safe_json(
+        return _json(
             {
                 "ok": True,
                 "created": newly_created,
@@ -1135,12 +1501,12 @@ def create_app(
     ) -> JSONResponse:
         user = await _require_user(request)
         try:
-            await runtime.acall(
+            await runtime.afast(
                 runtime.connections.remove, connection_id, user.user_id
             )
         except ConnError as exc:
-            return _safe_json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
-        return _safe_json({"ok": True, "removed": connection_id})
+            return _json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
+        return _json({"ok": True, "removed": connection_id})
 
     # =========================================================================
     # Static web UI routes (confined to web/, blocking source/data files)
@@ -1158,18 +1524,18 @@ def create_app(
     @app.get("/{rel_path:path}")
     async def serve_static(rel_path: str) -> Response:
         if rel_path.startswith("api/") or rel_path == "api":
-            return _safe_json({"ok": False, "error": "Not found"}, status_code=404)
+            return _json({"ok": False, "error": "Not found"}, status_code=404)
         rel = Path(rel_path)
         if rel.is_absolute() or ".." in rel.parts:
-            raise HTTPException(status_code=400, detail="Bad path")
+            return _json({"ok": False, "error": "Bad path"}, status_code=400)
         target = (WEB_DIR / rel).resolve()
         web_root = WEB_DIR.resolve()
         if web_root not in target.parents and target != web_root:
-            raise HTTPException(status_code=403, detail="Forbidden")
+            return _json({"ok": False, "error": "Forbidden"}, status_code=403)
         if target.suffix.lower() in _FORBIDDEN_STATIC_EXTS or target.name.startswith("."):
-            raise HTTPException(status_code=404, detail="Not found")
+            return _json({"ok": False, "error": "Not found"}, status_code=404)
         if not target.is_file():
-            raise HTTPException(status_code=404, detail="Not found")
+            return _json({"ok": False, "error": "Not found"}, status_code=404)
         mime = _STATIC_MIME.get(target.suffix.lower(), "application/octet-stream")
         return FileResponse(target, media_type=mime)
 
