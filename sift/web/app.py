@@ -74,7 +74,11 @@ from sift.web.auth import (
     hash_password,
     verify_password,
 )
-from sift.web.compliance import ComplianceError, guard_api_payload
+from sift.web.compliance import (
+    ComplianceError,
+    guard_api_payload,
+    guard_owner_private_payload,
+)
 from sift.web.connections import ConnectionError as ConnError
 from sift.web.connections import ConnectionStore
 from sift.web.mining import (
@@ -82,6 +86,7 @@ from sift.web.mining import (
     ALLOWED_FORMATIONS,
     ALLOWED_OPEN_Z,
     ALLOWED_SCOPES,
+    MINING_MODES,
     MiningError,
     MiningManager,
     MiningStore,
@@ -121,7 +126,8 @@ PRIVACY_NOTE = (
     "request deletion."
 )
 
-# Request fields forbidden on mining runs (S5 is automatic; raw symbols/prices forbidden)
+# Request fields forbidden on mining runs (S5 is automatic; raw prices/bars/
+# slopes/directions and legacy top-level ticker injections are refused fail-closed).
 _FORBIDDEN_RUN_INPUT_KEYS = frozenset({
     "skip_s5",
     "opt_out_s5",
@@ -133,6 +139,10 @@ _FORBIDDEN_RUN_INPUT_KEYS = frozenset({
     "symbol",
     "prices",
     "raw_bars",
+    "ohlcv",
+    "beta",
+    "slope",
+    "direction",
     "legs",
 })
 
@@ -228,6 +238,42 @@ def _safe_json(
         content=payload,
         status_code=status_code,
         headers={"Cache-Control": "no-store"},
+    )
+
+
+_PRIVATE_HEADERS = {
+    "Cache-Control": "no-store, private",
+    "Pragma": "no-cache",
+    "X-Robots-Tag": "noindex, nofollow",
+    "Vary": "Cookie, Authorization",
+}
+
+
+def _safe_private_json(
+    payload: dict[str, Any],
+    *,
+    allowed_symbols: Collection[str],
+    extra_symbols: Collection[str] | None = None,
+    status_code: int = 200,
+) -> JSONResponse:
+    """Serialize an authenticated owner-only Private Spec response after
+    fail-closed `guard_owner_private_payload` verification (v4.2 §5.1)."""
+    try:
+        guard_owner_private_payload(
+            payload,
+            allowed_symbols=allowed_symbols,
+            extra_symbols=extra_symbols,
+        )
+    except ComplianceError:
+        return JSONResponse(
+            content={"ok": False, "error": ComplianceError.public_message},
+            status_code=500,
+            headers=_PRIVATE_HEADERS,
+        )
+    return JSONResponse(
+        content=payload,
+        status_code=status_code,
+        headers=_PRIVATE_HEADERS,
     )
 
 
@@ -523,6 +569,19 @@ def create_app(
             extra_symbols=runtime.catalog.forbidden_symbols,
         )
 
+    def _private_json(
+        payload: dict[str, Any],
+        *,
+        allowed_symbols: Collection[str],
+        status_code: int = 200,
+    ) -> JSONResponse:
+        return _safe_private_json(
+            payload,
+            allowed_symbols=allowed_symbols,
+            extra_symbols=runtime.catalog.forbidden_symbols,
+            status_code=status_code,
+        )
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
@@ -814,6 +873,9 @@ def create_app(
         return _json({
             "ok": True,
             "candidates": items,
+            "subspaces": runtime.catalog.subspaces_public(),
+            "warehouse_ready": runtime.catalog.has_warehouse,
+            "mining_modes": list(MINING_MODES),
             "universe": runtime.catalog.universe_summary(),
             "allowed_scopes": list(ALLOWED_SCOPES),
             "allowed_formations": list(ALLOWED_FORMATIONS),
@@ -845,15 +907,15 @@ def create_app(
         if not isinstance(body, dict):
             return _json({"ok": False, "error": "Invalid JSON body."}, status_code=400)
 
-        # Fail closed on any attempt to disable S5 or inject raw symbols/prices.
+        # Fail closed on any attempt to disable S5 or inject raw prices/slopes/top-level tickers.
         bad_keys = [k for k in body if str(k).lower() in _FORBIDDEN_RUN_INPUT_KEYS]
         if bad_keys:
             return _json(
                 {
                     "ok": False,
                     "error": (
-                        "Forbidden parameter: S5 registry-depth validation is "
-                        "automatic and raw symbols are not accepted."
+                        "Forbidden parameter: S5 registry-depth validation runs "
+                        "automatically and forbidden fields are not accepted."
                     ),
                 },
                 status_code=400,
@@ -865,10 +927,35 @@ def create_app(
                 {"ok": False, "error": "example must be a boolean."}, status_code=400
             )
 
+        raw_slot_a = body.get("slot_a")
+        raw_slot_b = body.get("slot_b")
+        for slot_obj in (raw_slot_a, raw_slot_b):
+            if isinstance(slot_obj, dict):
+                bad_slot_keys = [
+                    k
+                    for k in slot_obj
+                    if str(k).lower() in _FORBIDDEN_RUN_INPUT_KEYS
+                ]
+                if bad_slot_keys:
+                    return _json(
+                        {"ok": False, "error": "Forbidden field inside slot specification."},
+                        status_code=400,
+                    )
+
         def _prepare():
-            cid, scope_id, formation, open_z, close_z = runtime.mining.validate_config(
+            (
+                cid,
+                slot_a,
+                slot_b,
+                scope_id,
+                formation,
+                open_z,
+                close_z,
+            ) = runtime.mining.validate_config(
                 candidate_id=body.get("candidate_id"),
                 example=raw_example,
+                slot_a=raw_slot_a,
+                slot_b=raw_slot_b,
                 scope_id=str(body.get("scope_id", "free_5y_top1k")),
                 formation=int(body.get("formation", 60)),
                 open_z=float(body.get("open_z", 2.0)),
@@ -877,6 +964,8 @@ def create_app(
             return runtime.mining.prepare_run(
                 user_id=user.user_id,
                 candidate_id=cid,
+                slot_a=slot_a,
+                slot_b=slot_b,
                 scope_id=scope_id,
                 formation=formation,
                 open_z=open_z,
@@ -999,6 +1088,12 @@ def create_app(
                 tid = str(r["trial_id"])
                 stages = runtime.read_stages_fast(tid)
                 verdict = str(r["verdict"])
+                cols = set(r.keys())
+                mining_mode = str(r["mining_mode"]) if "mining_mode" in cols else "example"
+                subspace_filter = (
+                    str(r["subspace_filter"]) if "subspace_filter" in cols else "all"
+                )
+                subspace_size = int(r["subspace_size"]) if "subspace_size" in cols else 1
                 if verdict == "killed":
                     killed_n += 1
                 elif verdict == "survivor":
@@ -1009,12 +1104,18 @@ def create_app(
                     "candidate_id": str(r["candidate_id"]),
                     "family": "pairs",
                     "scope_id": str(r["scope_id"]),
+                    "mining_mode": mining_mode,
+                    "subspace_filter": subspace_filter,
+                    "subspace_size": subspace_size,
                     "cached": bool(r["cached"]),
                     "status": str(r["status"]),
                     "verdict": verdict,
                     "survivor_class": str(r["survivor_class"]),
                     "killed_at": r["killed_at"],
                     "card_id": r["card_id"],
+                    "private_spec_eligible": bool(
+                        mining_mode == "direct" or verdict == "survivor"
+                    ),
                     "verdict_copy": _safe_verdict_copy(
                         verdict,
                         killed_at=r["killed_at"],
@@ -1166,6 +1267,77 @@ def create_app(
             return _json({"ok": False, "error": "Card not found."}, status_code=404)
 
         return _json({"ok": True, "face": face})
+
+    # =========================================================================
+    # Authenticated Owner-Only Private Spec endpoints (v4.2 §5.1)
+    # =========================================================================
+
+    @app.get("/api/private/cards/{card_id}/spec")
+    async def api_private_card_spec(card_id: str, request: Request) -> JSONResponse:
+        user = await _require_user(request)
+        if not runtime.limiter.check("private_spec", user.user_id, limit=30, window_s=60.0):
+            return _json(
+                {"ok": False, "error": "Private spec rate limit reached. Please wait a moment."},
+                status_code=429,
+            )
+
+        try:
+            payload, allowed = await runtime.aengine(
+                runtime.mining.build_private_spec_for_card, card_id, user.user_id
+            )
+        except MiningError as exc:
+            return _json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
+        except CardError as exc:
+            msg = str(exc)
+            if "belongs to" in msg or "non-transferable" in msg:
+                return _json(
+                    {
+                        "ok": False,
+                        "error": "Card does not belong to this account (non-transferable).",
+                    },
+                    status_code=403,
+                )
+            return _json({"ok": False, "error": "Card not found."}, status_code=404)
+
+        ps = payload.get("private_spec") or {}
+        await runtime.afast(
+            runtime.telemetry.record,
+            "private_spec_viewed",
+            {
+                "card_id": str(ps.get("card_id") or card_id),
+                "trial_id": str(ps.get("trial_id") or ""),
+            },
+            user_id=user.user_id,
+        )
+        return _private_json(payload, allowed_symbols=allowed)
+
+    @app.get("/api/private/trials/{trial_id}/spec")
+    async def api_private_trial_spec(trial_id: str, request: Request) -> JSONResponse:
+        user = await _require_user(request)
+        if not runtime.limiter.check("private_spec", user.user_id, limit=30, window_s=60.0):
+            return _json(
+                {"ok": False, "error": "Private spec rate limit reached. Please wait a moment."},
+                status_code=429,
+            )
+
+        try:
+            payload, allowed = await runtime.aengine(
+                runtime.mining.build_private_spec_for_trial, trial_id, user.user_id
+            )
+        except MiningError as exc:
+            return _json({"ok": False, "error": str(exc)}, status_code=exc.status_code)
+
+        ps = payload.get("private_spec") or {}
+        await runtime.afast(
+            runtime.telemetry.record,
+            "private_spec_viewed",
+            {
+                "card_id": ps.get("card_id"),
+                "trial_id": str(ps.get("trial_id") or trial_id),
+            },
+            user_id=user.user_id,
+        )
+        return _private_json(payload, allowed_symbols=allowed)
 
     # =========================================================================
     # Vault & Saved Connections (`connection_saved`)

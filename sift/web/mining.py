@@ -44,11 +44,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from data import sectors as sector_meta
 from data import universe as pit_universe
 from data import warehouse as wh
 from sift import flags
 from sift.cards import CardError
 from sift.cards import copy as card_copy
+from sift.cards import events as card_events
 from sift.cards.face import FaceError
 from sift.cards.service import CardLayer
 from sift.cards.vault import VaultError
@@ -65,6 +67,7 @@ ALLOWED_SCOPES = ("free_5y_top1k", "free_1y_top1k")
 ALLOWED_FORMATIONS = (40, 60, 80)
 ALLOWED_OPEN_Z = (1.5, 2.0, 2.5)
 ALLOWED_CLOSE_Z = (0.3, 0.5, 0.8)
+MINING_MODES = ("direct", "anchored", "uniform_random")
 HOLDOUT_BARS = cfg.BARS_PER_YEAR  # 252-bar frozen holdout (soundness #10)
 REGISTRY_DEPTH_BARS = cfg.scope_T("registry_depth")  # 4032 bars
 
@@ -83,20 +86,26 @@ CEREMONY_SEGMENT = {
 
 RUNS_SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS beta_run (
-    run_id         TEXT PRIMARY KEY,
-    user_id        TEXT NOT NULL,
-    trial_id       TEXT NOT NULL,
-    candidate_id   TEXT NOT NULL,
-    scope_id       TEXT NOT NULL,
-    cached         INTEGER NOT NULL DEFAULT 0,
-    status         TEXT NOT NULL,          -- running | completed | failed
-    verdict        TEXT NOT NULL,          -- pending | killed | survivor
-    survivor_class TEXT NOT NULL,
-    killed_at      TEXT,
-    card_id        TEXT,
-    error_message  TEXT,
-    created_at     REAL NOT NULL,
-    completed_at   REAL
+    run_id          TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    trial_id        TEXT NOT NULL,
+    candidate_id    TEXT NOT NULL,
+    scope_id        TEXT NOT NULL,
+    mining_mode     TEXT NOT NULL DEFAULT 'example',
+    subspace_filter TEXT NOT NULL DEFAULT 'all',
+    subspace_size   INTEGER NOT NULL DEFAULT 1,
+    anchor_role     TEXT,
+    anchor_id_hmac  TEXT,
+    anchor_sector   TEXT,
+    cached          INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL,          -- running | completed | failed
+    verdict         TEXT NOT NULL,          -- pending | killed | survivor
+    survivor_class  TEXT NOT NULL,
+    killed_at       TEXT,
+    card_id         TEXT,
+    error_message   TEXT,
+    created_at      REAL NOT NULL,
+    completed_at    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_beta_run_user ON beta_run(user_id, created_at DESC);
 """
@@ -175,6 +184,18 @@ def _pairwise_corr_matrix(log_rets: np.ndarray) -> np.ndarray:
 
 
 @dataclass(frozen=True)
+class _SlotResolution:
+    """Resolved server-side mining mode & scope metadata for a slot run (never leaks symbols)."""
+
+    mining_mode: str  # "direct" | "anchored" | "uniform_random" | "example"
+    subspace_filter: str
+    subspace_size: int
+    anchor_role: str | None = None
+    anchor_id_hmac: str | None = None
+    anchor_sector: str | None = None
+
+
+@dataclass(frozen=True)
 class _WarehouseUniverse:
     """Resolved server-side symbol universe for a warehouse root.
 
@@ -186,6 +207,7 @@ class _WarehouseUniverse:
 
     symbols: list[str]
     all_symbols: frozenset[str]
+    sectors: dict[str, str]
     asof: str | None
     mode: str  # "pit_manifest" | "pit_parquet" | "eod_fallback"
     quarantined_excluded: int
@@ -258,6 +280,27 @@ def _read_universe_symbols(path: Path, exchange: str = "US") -> list[str] | None
         if stem and key not in seen:
             seen.add(key)
             out.append(stem)
+    return out
+
+
+def _read_universe_sectors(
+    root: Path, top_file: Path | None, exchange: str = "US"
+) -> dict[str, str]:
+    """Load canonical `{SYMBOL_UPPER: sector}` map from PIT parquet + meta/sectors fallback."""
+    out: dict[str, str] = {}
+    meta_map = sector_meta.load_sector_map(str(root), exchange=exchange)
+    for k, v in meta_map.items():
+        if v and v != sector_meta.UNCLASSIFIED_SECTOR:
+            out[k.upper()] = v
+    if top_file is not None:
+        with contextlib.suppress(Exception):
+            df = wh.read_parquet(str(top_file))
+            if df is not None and not df.empty and "symbol" in df.columns and "sector" in df.columns:
+                for _, row in df.iterrows():
+                    stem = _symbol_stem(str(row["symbol"]), exchange).upper()
+                    sec = sector_meta.normalize_sector_bucket(row["sector"])
+                    if stem and sec != sector_meta.UNCLASSIFIED_SECTOR:
+                        out[stem] = sec
     return out
 
 
@@ -353,6 +396,7 @@ def _resolve_warehouse_universe(
         return _WarehouseUniverse(
             symbols=selected,
             all_symbols=frozenset(all_symbols),
+            sectors=_read_universe_sectors(root, top_file, exchange=exchange),
             asof=asof,
             mode="pit_manifest",
             quarantined_excluded=len(quarantined_upper),
@@ -390,6 +434,7 @@ def _resolve_warehouse_universe(
             return _WarehouseUniverse(
                 symbols=selected,
                 all_symbols=frozenset(all_symbols),
+                sectors=_read_universe_sectors(root, top_files[-1], exchange=exchange),
                 asof=None,
                 mode="pit_parquet",
                 quarantined_excluded=len(quarantined_upper),
@@ -402,6 +447,7 @@ def _resolve_warehouse_universe(
     return _WarehouseUniverse(
         symbols=selected,
         all_symbols=frozenset(all_symbols),
+        sectors=_read_universe_sectors(root, None, exchange=exchange),
         asof=None,
         mode="eod_fallback",
         quarantined_excluded=len(quarantined_upper),
@@ -650,8 +696,9 @@ class PairCatalog:
         self._wh_prices: np.ndarray | None = None
         self._wh_delist_idx: np.ndarray | None = None
         self._wh_symbols: list[str] = []
+        self._wh_symbol_idx: dict[str, int] = {}
+        self._wh_sectors: dict[str, str] = {}
         self._wh_all_symbols: frozenset[str] = frozenset()
-        self._wh_pairs: dict[str, tuple[int, int]] = {}
         self._wh_panel_corr: np.ndarray | None = None
         self._wh_m_screened: int = 1
         self._wh_holdout_start: int | None = None
@@ -661,6 +708,10 @@ class PairCatalog:
         self._wh_quarantined_excluded: int = 0
         self._wh_pit_listed_count: int = 0
         self._load()
+
+    @property
+    def has_warehouse(self) -> bool:
+        return self._wh_prices is not None and len(self._wh_symbols) >= 2
 
     @property
     def forbidden_symbols(self) -> frozenset[str]:
@@ -678,6 +729,38 @@ class PairCatalog:
             "pit_listed_count": self._wh_pit_listed_count,
         }
 
+    def subspaces_public(self) -> list[dict[str, Any]]:
+        """Non-identifying subspace options for Slot A / Slot B random draws.
+
+        Exposes `Random (All eligible PIT)` plus any canonical sector bucket
+        that has >= 1 eligible PIT symbol (zero tickers, zero pre-screening).
+        """
+        if not self.has_warehouse:
+            return []
+        out: list[dict[str, Any]] = [
+            {
+                "id": "all",
+                "label": "Random (All eligible)",
+                "eligible_count": len(self._wh_symbols),
+            }
+        ]
+        counts: dict[str, int] = {}
+        for sym in self._wh_symbols:
+            sec = self._wh_sectors.get(sym.upper(), sector_meta.UNCLASSIFIED_SECTOR)
+            if sec in sector_meta.SECTOR_BUCKETS:
+                counts[sec] = counts.get(sec, 0) + 1
+        for bucket in sector_meta.SECTOR_BUCKETS:
+            cnt = counts.get(bucket, 0)
+            if cnt >= 1:
+                out.append(
+                    {
+                        "id": bucket,
+                        "label": f"Random ({sector_meta.SECTOR_LABELS[bucket]})",
+                        "eligible_count": cnt,
+                    }
+                )
+        return out
+
     def _load(self) -> None:
         env = os.environ.get("SIFT_ENV", "dev").strip().lower()
         wh_loaded = False
@@ -689,8 +772,9 @@ class PairCatalog:
             else:
                 wh_loaded = self._load_warehouse(self.warehouse_dir, env=env)
 
-        if not wh_loaded and self.allow_synthetic_examples:
-            self._wh_universe_mode = "synthetic"
+        if self.allow_synthetic_examples:
+            if not wh_loaded:
+                self._wh_universe_mode = "synthetic"
             self._register_synthetic_presets()
 
     def _load_warehouse(self, root: Path, *, env: str) -> bool:
@@ -711,14 +795,19 @@ class PairCatalog:
         self._wh_prices = prices
         self._wh_delist_idx = delist_idx
         self._wh_symbols = kept
+        self._wh_symbol_idx = {s.upper(): idx for idx, s in enumerate(kept)}
+        self._wh_sectors = dict(resolved.sectors)
         self._wh_vintage = wh.read_vintage(str(root)) or wh.warehouse_vintage_hash(str(root))
         self._wh_universe_mode = resolved.mode
         self._wh_universe_asof = resolved.asof
         self._wh_quarantined_excluded = resolved.quarantined_excluded
         self._wh_pit_listed_count = resolved.pit_listed_count
 
-        # Lock the trailing 252 bars out of pair screening (soundness #10:
-        # screening correlation NEVER peeks into the frozen holdout).
+        # Lock the trailing 252 bars out of correlation-panel estimation
+        # (soundness #10: panel_corr NEVER peeks into the frozen holdout).
+        # Per docs/mining-modes-policy.md §2, NO silent top-|corr| shortlist is
+        # generated for user-facing mining; panel_corr is used ONLY for A.3
+        # effective independent trials estimation.
         if prices.shape[0] >= cfg.scope_T("free_1y_top1k") + HOLDOUT_BARS:
             self._wh_holdout_start = prices.shape[0] - HOLDOUT_BARS
             screen_prices = prices[: self._wh_holdout_start]
@@ -732,30 +821,8 @@ class PairCatalog:
         corr = _pairwise_corr_matrix(rets)
         self._wh_panel_corr = corr
         n_sym = corr.shape[0]
-        iu = np.triu_indices(n_sym, k=1)
-        self._wh_m_screened = max(int(iu[0].size), 1)
-        order = np.argsort(-np.abs(np.nan_to_num(corr[iu])))
-        count = min(len(order), self.max_warehouse_pairs)
-        for rank_idx in range(count):
-            k = int(order[rank_idx])
-            i, j = int(iu[0][k]), int(iu[1][k])
-            cid = f"pair-{rank_idx + 1:03d}"
-            self._wh_pairs[cid] = (i, j)
-            self._meta[cid] = CandidateMeta(
-                candidate_id=cid,
-                label=f"Warehouse pair #{rank_idx + 1} (cross-sectional co-movement)",
-                description=(
-                    "Pre-registered server-side pair candidate from the production "
-                    "warehouse. Symbols stay server-side; gauntlet stats only."
-                ),
-                family="pairs",
-                default_scope="free_5y_top1k",
-                sector_bucket="cross_sectional_pairs_aggregate",
-                is_example=(rank_idx == 0),
-                synthetic_example=False,
-                data_source="eodhd_warehouse",
-            )
-        return len(self._wh_pairs) > 0
+        self._wh_m_screened = max(n_sym * (n_sym - 1) // 2, 1)
+        return True
 
     def _register_synthetic_presets(self) -> None:
         presets = (
@@ -806,6 +873,8 @@ class PairCatalog:
             self._meta[m.candidate_id] = m
 
     def list_public(self) -> list[dict[str, Any]]:
+        """Guided synthetic examples (when enabled). Never exposes pre-screened
+        warehouse shortlists (docs/mining-modes-policy.md §2)."""
         return [
             {
                 "candidate_id": m.candidate_id,
@@ -827,35 +896,196 @@ class PairCatalog:
                 return m.candidate_id
         if self._meta:
             return next(iter(self._meta))
+        if not self.has_warehouse:
+            raise MiningError(
+                "No server-side warehouse or beta candidate catalog is configured.",
+                503,
+            )
         raise MiningError(
-            "No server-side warehouse or beta candidate catalog is configured.",
-            503,
+            "Guided synthetic examples are not enabled in this environment.",
+            400,
         )
 
-    def build_input(
+    def _pool_for_subspace(self, subspace: str) -> list[int]:
+        sub = str(subspace or "all").strip().lower()
+        if sub == "all":
+            return list(range(len(self._wh_symbols)))
+        if sub not in sector_meta.SECTOR_BUCKETS:
+            raise MiningError("Unsupported random subspace.", 400)
+        return [
+            idx
+            for idx, sym in enumerate(self._wh_symbols)
+            if self._wh_sectors.get(sym.upper()) == sub
+        ]
+
+    def _parse_slot(self, slot: Any) -> tuple[str, str]:
+        if not isinstance(slot, dict):
+            raise MiningError("Invalid slot specification.", 400)
+        kind = str(slot.get("kind", "")).strip().lower()
+        if kind == "symbol":
+            raw = str(slot.get("value", "")).strip()
+            stem = _symbol_stem(raw, exchange="US").upper()
+            if not stem or len(stem) > 12 or not all(
+                c.isalnum() or c in "._-" for c in stem
+            ):
+                raise MiningError("Invalid symbol format in slot.", 400)
+            if stem not in self._wh_symbol_idx:
+                # Generic error: never echo arbitrary user text or dump warehouse symbols.
+                raise MiningError(
+                    "One or more symbols are not eligible in the active point-in-time universe.",
+                    400,
+                )
+            return "symbol", stem
+        if kind == "random":
+            sub = str(slot.get("subspace", "all") or "all").strip().lower()
+            if sub != "all" and sub not in sector_meta.SECTOR_BUCKETS:
+                raise MiningError("Unsupported random subspace.", 400)
+            return "random", sub
+        raise MiningError("Slot kind must be 'symbol' or 'random'.", 400)
+
+    def resolve_slots(
         self,
-        candidate_id: str,
+        *,
+        slot_a: dict[str, Any],
+        slot_b: dict[str, Any],
+        scope_id: str,
+        formation: int,
+        open_z: float,
+        close_z: float,
+        draw_seed: int,
+        commitment_secret: bytes,
+    ) -> tuple[_SlotResolution, _PairInput]:
+        """Resolve Slot A and Slot B into a canonical pair with ZERO pre-screening
+        (docs/mining-modes-policy.md §1-§3).
+
+        - symbol + symbol  -> direct hypothesis
+        - symbol + random  -> anchored search (PCG64 uniform draw in subspace)
+        - random + random  -> uniform random (PCG64 uniform draw in subspace)
+        """
+        if not self.has_warehouse:
+            raise MiningError(
+                "No server-side point-in-time warehouse is configured for slot mining.",
+                503,
+            )
+        ka, va = self._parse_slot(slot_a)
+        kb, vb = self._parse_slot(slot_b)
+
+        rng = np.random.Generator(np.random.PCG64(int(draw_seed)))
+
+        if ka == "symbol" and kb == "symbol":
+            ia, ib = self._wh_symbol_idx[va], self._wh_symbol_idx[vb]
+            if ia == ib:
+                raise MiningError("Slot A and Slot B must select two distinct symbols.", 400)
+            i, j = (ia, ib) if self._wh_symbols[ia].upper() < self._wh_symbols[ib].upper() else (ib, ia)
+            res = _SlotResolution(
+                mining_mode="direct",
+                subspace_filter="direct",
+                subspace_size=1,
+            )
+        elif (ka == "symbol" and kb == "random") or (ka == "random" and kb == "symbol"):
+            anchor_role = "slot_a" if ka == "symbol" else "slot_b"
+            anchor_sym = va if ka == "symbol" else vb
+            subspace = vb if ka == "symbol" else va
+            a_idx = self._wh_symbol_idx[anchor_sym]
+            pool = [idx for idx in self._pool_for_subspace(subspace) if idx != a_idx]
+            if not pool:
+                raise MiningError(
+                    "Selected subspace has no eligible partner distinct from the anchor.",
+                    400,
+                )
+            p_idx = pool[int(rng.integers(0, len(pool)))]
+            i, j = (
+                (a_idx, p_idx)
+                if self._wh_symbols[a_idx].upper() < self._wh_symbols[p_idx].upper()
+                else (p_idx, a_idx)
+            )
+            anchor_hmac = hmac.new(
+                commitment_secret,
+                anchor_sym.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()[:24]
+            anchor_sec = self._wh_sectors.get(
+                anchor_sym, sector_meta.UNCLASSIFIED_SECTOR
+            )
+            res = _SlotResolution(
+                mining_mode="anchored",
+                subspace_filter=subspace,
+                subspace_size=len(pool),
+                anchor_role=anchor_role,
+                anchor_id_hmac=anchor_hmac,
+                anchor_sector=anchor_sec,
+            )
+        else:
+            pool_a = self._pool_for_subspace(va)
+            pool_b = self._pool_for_subspace(vb)
+            if va == vb:
+                if len(pool_a) < 2:
+                    raise MiningError(
+                        "Selected subspace needs at least two eligible symbols.",
+                        400,
+                    )
+                subspace_size = len(pool_a) * (len(pool_a) - 1) // 2
+                drawn = rng.choice(pool_a, size=2, replace=False)
+                u, v = int(drawn[0]), int(drawn[1])
+                sub_filter = va
+            else:
+                pairs_pool = [
+                    (u, v) for u in pool_a for v in pool_b if u != v
+                ]
+                if not pairs_pool:
+                    raise MiningError(
+                        "Selected subspaces contain no distinct eligible pairs.",
+                        400,
+                    )
+                subspace_size = len(pairs_pool)
+                u, v = pairs_pool[int(rng.integers(0, len(pairs_pool)))]
+                sub_filter = f"{va}_x_{vb}"
+            i, j = (u, v) if self._wh_symbols[u].upper() < self._wh_symbols[v].upper() else (v, u)
+            res = _SlotResolution(
+                mining_mode="uniform_random",
+                subspace_filter=sub_filter,
+                subspace_size=subspace_size,
+            )
+
+        pair_in = self._build_warehouse_pair_input(
+            i,
+            j,
+            scope_id=scope_id,
+            formation=formation,
+            open_z=open_z,
+            close_z=close_z,
+        )
+        return res, pair_in
+
+    def compute_live_abs_z_for_pair(
+        self, sym_a: str, sym_b: str, *, formation: int = 60
+    ) -> float | None:
+        """Compute current magnitude-only |z| for a warehouse pair (never signed)."""
+        if not self.has_warehouse or self._wh_prices is None:
+            return None
+        ia = self._wh_symbol_idx.get(sym_a.upper())
+        ib = self._wh_symbol_idx.get(sym_b.upper())
+        if ia is None or ib is None or ia == ib:
+            return None
+        pair = self._wh_prices[:, [ia, ib]]
+        valid = pair[np.all(np.isfinite(pair), axis=1)]
+        if valid.shape[0] < max(formation + 2, 12):
+            return None
+        ps = first_run.pair_series(valid, 0, 1, formation)
+        return _latest_abs_z(ps["spread"], window=formation)
+
+    def _build_warehouse_pair_input(
+        self,
+        i: int,
+        j: int,
         *,
         scope_id: str,
         formation: int,
         open_z: float,
         close_z: float,
-    ) -> tuple[CandidateMeta, _PairInput]:
-        meta = self._meta.get(candidate_id)
-        if meta is None:
-            # Never echo user-supplied candidate_id back in error text.
-            raise MiningError("Unknown candidate_id.", 404)
-
-        if candidate_id == "example-pair-cointegrated":
-            return meta, _synth_cointegrated(scope_id, formation, open_z, close_z)
-        if candidate_id == "example-pair-noise":
-            return meta, _synth_noise(scope_id, formation, open_z, close_z)
-        if candidate_id == "example-pair-regime":
-            return meta, _synth_regime(scope_id, formation, open_z, close_z)
-
+    ) -> _PairInput:
         assert self._wh_prices is not None
         assert self._wh_delist_idx is not None
-        i, j = self._wh_pairs[candidate_id]
         si, sj = self._wh_symbols[i], self._wh_symbols[j]
         full_pair = self._wh_prices[:, [i, j]]
         pair_delist = np.array([self._wh_delist_idx[i], self._wh_delist_idx[j]], dtype=int)
@@ -902,7 +1132,7 @@ class PairCatalog:
         # Never run S5's 3.0 hurdle on a 5y+1-bar window!
         has_full_depth = full_pair.shape[0] >= REGISTRY_DEPTH_BARS
         params: dict[str, Any] = {
-            "pair": [si, sj],
+            "pair": [si.upper(), sj.upper()],
             "formation": formation,
             "open_z": open_z,
             "close_z": close_z,
@@ -912,7 +1142,7 @@ class PairCatalog:
         if holdout_used > 0:
             params["holdout_bars"] = holdout_used
 
-        return meta, _PairInput(
+        return _PairInput(
             params=params,
             vintage=self._wh_vintage,
             fixture_x=x,
@@ -931,6 +1161,29 @@ class PairCatalog:
             m_screened=self._wh_m_screened,
             current_abs_z=_latest_abs_z(ps["spread"], window=formation),
         )
+
+    def build_input(
+        self,
+        candidate_id: str,
+        *,
+        scope_id: str,
+        formation: int,
+        open_z: float,
+        close_z: float,
+    ) -> tuple[CandidateMeta, _PairInput]:
+        meta = self._meta.get(candidate_id)
+        if meta is None:
+            # Never echo user-supplied candidate_id back in error text.
+            raise MiningError("Unknown candidate_id.", 404)
+
+        if candidate_id == "example-pair-cointegrated":
+            return meta, _synth_cointegrated(scope_id, formation, open_z, close_z)
+        if candidate_id == "example-pair-noise":
+            return meta, _synth_noise(scope_id, formation, open_z, close_z)
+        if candidate_id == "example-pair-regime":
+            return meta, _synth_regime(scope_id, formation, open_z, close_z)
+
+        raise MiningError("Unknown candidate_id.", 404)
 
 
 def _stage_to_public(sr: StageResult | sqlite3.Row) -> dict[str, Any]:
@@ -1104,7 +1357,24 @@ class MiningStore:
             self.con.execute("PRAGMA journal_mode = WAL")
             self.con.execute("PRAGMA busy_timeout = 10000")
         self.con.executescript(RUNS_SCHEMA_SQL)
+        self._migrate()
         self.con.commit()
+
+    def _migrate(self) -> None:
+        cols = {
+            r[1] for r in self.con.execute("PRAGMA table_info(beta_run)").fetchall()
+        }
+        additions = (
+            ("mining_mode", "TEXT NOT NULL DEFAULT 'example'"),
+            ("subspace_filter", "TEXT NOT NULL DEFAULT 'all'"),
+            ("subspace_size", "INTEGER NOT NULL DEFAULT 1"),
+            ("anchor_role", "TEXT"),
+            ("anchor_id_hmac", "TEXT"),
+            ("anchor_sector", "TEXT"),
+        )
+        for name, ddl in additions:
+            if name not in cols:
+                self.con.execute(f"ALTER TABLE beta_run ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         if self._owns_con:
@@ -1139,6 +1409,12 @@ class MiningStore:
         status: str,
         verdict: str,
         survivor_class: str,
+        mining_mode: str = "example",
+        subspace_filter: str = "all",
+        subspace_size: int = 1,
+        anchor_role: str | None = None,
+        anchor_id_hmac: str | None = None,
+        anchor_sector: str | None = None,
         killed_at: str | None = None,
         card_id: str | None = None,
         error_message: str | None = None,
@@ -1149,16 +1425,24 @@ class MiningStore:
         try:
             self.con.execute(
                 "INSERT INTO beta_run"
-                " (run_id, user_id, trial_id, candidate_id, scope_id, cached,"
+                " (run_id, user_id, trial_id, candidate_id, scope_id,"
+                "  mining_mode, subspace_filter, subspace_size,"
+                "  anchor_role, anchor_id_hmac, anchor_sector, cached,"
                 "  status, verdict, survivor_class, killed_at, card_id, error_message,"
                 "  created_at, completed_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id,
                     user_id,
                     trial_id,
                     candidate_id,
                     scope_id,
+                    mining_mode,
+                    subspace_filter,
+                    int(subspace_size),
+                    anchor_role,
+                    anchor_id_hmac,
+                    anchor_sector,
                     1 if cached else 0,
                     status,
                     verdict,
@@ -1220,6 +1504,13 @@ class MiningStore:
             "SELECT * FROM beta_run WHERE user_id=?"
             " ORDER BY created_at DESC LIMIT ?",
             (user_id, int(limit)),
+        ).fetchall()
+
+    def list_runs_for_user_trial(self, user_id: str, trial_id: str) -> list[sqlite3.Row]:
+        return self.con.execute(
+            "SELECT * FROM beta_run WHERE user_id=? AND trial_id=?"
+            " ORDER BY created_at DESC",
+            (user_id, trial_id),
         ).fetchall()
 
     def user_has_trial(self, user_id: str, trial_id: str) -> bool:
@@ -1306,18 +1597,15 @@ class MiningManager:
     def validate_config(
         self,
         *,
-        candidate_id: str | None,
-        example: bool,
+        candidate_id: str | None = None,
+        example: bool = False,
+        slot_a: dict[str, Any] | None = None,
+        slot_b: dict[str, Any] | None = None,
         scope_id: str,
         formation: int,
         open_z: float,
         close_z: float,
-    ) -> tuple[str, str, int, float, float]:
-        cid = (
-            self.catalog.default_example_id()
-            if (example or not candidate_id)
-            else str(candidate_id)
-        )
+    ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None, str, int, float, float]:
         if scope_id not in ALLOWED_SCOPES:
             raise MiningError("Unsupported scope_id.", 400)
         if formation not in ALLOWED_FORMATIONS:
@@ -1326,7 +1614,23 @@ class MiningManager:
             raise MiningError("Unsupported open_z threshold.", 400)
         if close_z not in ALLOWED_CLOSE_Z:
             raise MiningError("Unsupported close_z threshold.", 400)
-        return cid, scope_id, int(formation), float(open_z), float(close_z)
+
+        has_slots = slot_a is not None or slot_b is not None
+        if has_slots:
+            if example:
+                raise MiningError("Cannot combine example=true with slot_a/slot_b.", 400)
+            if slot_a is None or slot_b is None:
+                raise MiningError("Both slot_a and slot_b are required.", 400)
+            if not isinstance(slot_a, dict) or not isinstance(slot_b, dict):
+                raise MiningError("slot_a and slot_b must be objects.", 400)
+            return None, slot_a, slot_b, scope_id, int(formation), float(open_z), float(close_z)
+
+        cid = (
+            self.catalog.default_example_id()
+            if (example or not candidate_id)
+            else str(candidate_id)
+        )
+        return cid, None, None, scope_id, int(formation), float(open_z), float(close_z)
 
     def _ensure_admission_epoch(
         self, runner: GauntletRunner, scope_id: str, pair_in: _PairInput
@@ -1364,31 +1668,58 @@ class MiningManager:
         self,
         *,
         user_id: str,
-        candidate_id: str,
+        candidate_id: str | None = None,
+        slot_a: dict[str, Any] | None = None,
+        slot_b: dict[str, Any] | None = None,
         scope_id: str,
         formation: int,
         open_z: float,
         close_z: float,
+        draw_seed: int | None = None,
     ) -> tuple[dict[str, Any], _PairInput | None]:
         """Pre-register trial BEFORE any gauntlet computation (v3 §5).
 
-        Handles four cases cleanly without double-execution or race errors:
-        1. New unique trial -> register in ledger, log `trial_registered` with
-           HMAC `config_commitment`, mark in-flight, return `pair_in` to run.
-        2. Already decided in ledger -> replay cached stages & verdict immediately
-           (without leaking cross-user cache info or another user's card_id).
-        3. Currently in-flight (`_in_flight[trial_id]`) -> coalesce this run
-           as a waiter on the active execution (NEVER calls `run_gauntlet` twice!).
-        4. Orphaned partially-decided pending trial (prior crash mid-gauntlet) ->
-           fail cleanly instead of crashing on append-only stage constraints.
+        Handles unified slot mining (`direct` / `anchored` / `uniform_random`,
+        docs/mining-modes-policy.md) as well as synthetic onboarding examples,
+        and manages fresh, cached, coalesced in-flight, and orphaned trials cleanly.
         """
-        _, pair_in = self.catalog.build_input(
-            candidate_id,
-            scope_id=scope_id,
-            formation=formation,
-            open_z=open_z,
-            close_z=close_z,
-        )
+        run_id = f"run-{uuid.uuid4().hex[:12]}"
+        if slot_a is not None and slot_b is not None:
+            seed_val = (
+                int(draw_seed)
+                if draw_seed is not None
+                else int.from_bytes(
+                    hashlib.sha256(f"{user_id}:{run_id}".encode("utf-8")).digest()[:8],
+                    "little",
+                )
+            )
+            slot_res, pair_in = self.catalog.resolve_slots(
+                slot_a=slot_a,
+                slot_b=slot_b,
+                scope_id=scope_id,
+                formation=formation,
+                open_z=open_z,
+                close_z=close_z,
+                draw_seed=seed_val,
+                commitment_secret=self._commitment_secret,
+            )
+            effective_cid = f"slot-{slot_res.mining_mode}"
+        else:
+            assert candidate_id is not None
+            _, pair_in = self.catalog.build_input(
+                candidate_id,
+                scope_id=scope_id,
+                formation=formation,
+                open_z=open_z,
+                close_z=close_z,
+            )
+            slot_res = _SlotResolution(
+                mining_mode="example",
+                subspace_filter="synthetic",
+                subspace_size=1,
+            )
+            effective_cid = str(candidate_id)
+
         cfg_hash = config_hash_of(pair_in.params)
         existing = self.ledger.con.execute(
             "SELECT trial_id, verdict, survivor_class FROM trial"
@@ -1414,7 +1745,6 @@ class MiningManager:
         # (prevents cross-user oracle revealing another user's research).
         cached_for_user = bool(ledger_cached and user_already_ran)
 
-        run_id = f"run-{uuid.uuid4().hex[:12]}"
         ch = _RunChannel(extra_symbols=self.catalog.forbidden_symbols)
         self._put_channel(run_id, ch)
 
@@ -1425,6 +1755,9 @@ class MiningManager:
                 {
                     "trial_id": trial.trial_id,
                     "scope_id": scope_id,
+                    "mining_mode": slot_res.mining_mode,
+                    "subspace_filter": slot_res.subspace_filter,
+                    "subspace_size": slot_res.subspace_size,
                     "provenance": "user_initiated",
                     # Keyed HMAC commitment — never raw SHA-256 of pair symbols.
                     "config_commitment": self._config_commitment(trial.config_hash),
@@ -1432,6 +1765,14 @@ class MiningManager:
                 },
                 user_id=user_id,
             )
+
+        mode_meta = {
+            "mining_mode": slot_res.mining_mode,
+            "subspace_filter": slot_res.subspace_filter,
+            "subspace_size": slot_res.subspace_size,
+        }
+        if slot_res.anchor_sector is not None:
+            mode_meta["anchor_sector"] = slot_res.anchor_sector
 
         # Case 2: Trial already decided in ledger -> instant cached replay.
         if ledger_cached and trial.verdict != "pending":
@@ -1450,8 +1791,14 @@ class MiningManager:
                 run_id=run_id,
                 user_id=user_id,
                 trial_id=trial.trial_id,
-                candidate_id=candidate_id,
+                candidate_id=effective_cid,
                 scope_id=scope_id,
+                mining_mode=slot_res.mining_mode,
+                subspace_filter=slot_res.subspace_filter,
+                subspace_size=slot_res.subspace_size,
+                anchor_role=slot_res.anchor_role,
+                anchor_id_hmac=slot_res.anchor_id_hmac,
+                anchor_sector=slot_res.anchor_sector,
                 cached=cached_for_user,
                 status="completed",
                 verdict=trial.verdict,
@@ -1467,6 +1814,7 @@ class MiningManager:
                         "trial_id": trial.trial_id,
                         "scope_id": scope_id,
                         "cached": cached_for_user,
+                        **mode_meta,
                     },
                 )
                 for s in stages:
@@ -1482,6 +1830,11 @@ class MiningManager:
                         "killed_at": killed_at,
                         "card_id": owned_card_id,
                         "cached": cached_for_user,
+                        "mining_mode": slot_res.mining_mode,
+                        "private_spec_eligible": bool(
+                            slot_res.mining_mode == "direct"
+                            or trial.verdict == "survivor"
+                        ),
                         "verdict_copy": _safe_verdict_copy(
                             trial.verdict,
                             killed_at=killed_at,
@@ -1501,6 +1854,7 @@ class MiningManager:
                     "status": "completed",
                     "stream_url": f"/api/mining/runs/{run_id}/stream",
                     "poll_url": f"/api/mining/runs/{run_id}",
+                    **mode_meta,
                 },
                 None,
             )
@@ -1520,8 +1874,14 @@ class MiningManager:
                 run_id=run_id,
                 user_id=user_id,
                 trial_id=trial.trial_id,
-                candidate_id=candidate_id,
+                candidate_id=effective_cid,
                 scope_id=scope_id,
+                mining_mode=slot_res.mining_mode,
+                subspace_filter=slot_res.subspace_filter,
+                subspace_size=slot_res.subspace_size,
+                anchor_role=slot_res.anchor_role,
+                anchor_id_hmac=slot_res.anchor_id_hmac,
+                anchor_sector=slot_res.anchor_sector,
                 cached=cached_for_user,
                 status="running",
                 verdict="pending",
@@ -1534,6 +1894,7 @@ class MiningManager:
                     "trial_id": trial.trial_id,
                     "scope_id": scope_id,
                     "cached": cached_for_user,
+                    **mode_meta,
                 },
             )
             return (
@@ -1545,6 +1906,7 @@ class MiningManager:
                     "status": "running",
                     "stream_url": f"/api/mining/runs/{run_id}/stream",
                     "poll_url": f"/api/mining/runs/{run_id}",
+                    **mode_meta,
                 },
                 None,
             )
@@ -1557,8 +1919,14 @@ class MiningManager:
                 run_id=run_id,
                 user_id=user_id,
                 trial_id=trial.trial_id,
-                candidate_id=candidate_id,
+                candidate_id=effective_cid,
                 scope_id=scope_id,
+                mining_mode=slot_res.mining_mode,
+                subspace_filter=slot_res.subspace_filter,
+                subspace_size=slot_res.subspace_size,
+                anchor_role=slot_res.anchor_role,
+                anchor_id_hmac=slot_res.anchor_id_hmac,
+                anchor_sector=slot_res.anchor_sector,
                 cached=False,
                 status="failed",
                 verdict="pending",
@@ -1584,6 +1952,7 @@ class MiningManager:
                     "status": "failed",
                     "stream_url": f"/api/mining/runs/{run_id}/stream",
                     "poll_url": f"/api/mining/runs/{run_id}",
+                    **mode_meta,
                 },
                 None,
             )
@@ -1598,8 +1967,14 @@ class MiningManager:
             run_id=run_id,
             user_id=user_id,
             trial_id=trial.trial_id,
-            candidate_id=candidate_id,
+            candidate_id=effective_cid,
             scope_id=scope_id,
+            mining_mode=slot_res.mining_mode,
+            subspace_filter=slot_res.subspace_filter,
+            subspace_size=slot_res.subspace_size,
+            anchor_role=slot_res.anchor_role,
+            anchor_id_hmac=slot_res.anchor_id_hmac,
+            anchor_sector=slot_res.anchor_sector,
             cached=False,
             status="running",
             verdict="pending",
@@ -1612,6 +1987,7 @@ class MiningManager:
                 "trial_id": trial.trial_id,
                 "scope_id": scope_id,
                 "cached": False,
+                **mode_meta,
             },
         )
         return (
@@ -1623,6 +1999,7 @@ class MiningManager:
                 "status": "running",
                 "stream_url": f"/api/mining/runs/{run_id}/stream",
                 "poll_url": f"/api/mining/runs/{run_id}",
+                **mode_meta,
             },
             pair_in,
         )
@@ -1747,6 +2124,8 @@ class MiningManager:
                 if wch is None:
                     continue
                 w_card = card_id if (card_id and card_owner == wuser) else None
+                w_row = self._fast_call(self.runs.get_run, wid, wuser)
+                w_mode = str(w_row["mining_mode"]) if w_row is not None else "example"
                 try:
                     wch.publish(
                         "verdict",
@@ -1759,6 +2138,10 @@ class MiningManager:
                             "card_id": w_card,
                             "vault_admitted": vault_admitted if w_card else False,
                             "cached": False,
+                            "mining_mode": w_mode,
+                            "private_spec_eligible": bool(
+                                w_mode == "direct" or verdict == "survivor"
+                            ),
                             "verdict_copy": _safe_verdict_copy(
                                 verdict,
                                 killed_at=killed_at,
@@ -1825,20 +2208,32 @@ class MiningManager:
         user_id: str,
         card_face: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return {
+        cols = set(row.keys())
+        mining_mode = str(row["mining_mode"]) if "mining_mode" in cols else "example"
+        subspace_filter = str(row["subspace_filter"]) if "subspace_filter" in cols else "all"
+        subspace_size = int(row["subspace_size"]) if "subspace_size" in cols else 1
+        anchor_sector = row["anchor_sector"] if "anchor_sector" in cols else None
+        verdict = str(row["verdict"])
+        snap: dict[str, Any] = {
             "run_id": str(row["run_id"]),
             "trial_id": str(row["trial_id"]),
             "candidate_id": str(row["candidate_id"]),
             "scope_id": str(row["scope_id"]),
+            "mining_mode": mining_mode,
+            "subspace_filter": subspace_filter,
+            "subspace_size": subspace_size,
             "cached": bool(row["cached"]),
             "status": str(row["status"]),
-            "verdict": str(row["verdict"]),
+            "verdict": verdict,
             "survivor_class": str(row["survivor_class"]),
             "killed_at": row["killed_at"],
             "card_id": row["card_id"],
             "card_face": card_face,
+            "private_spec_eligible": bool(
+                mining_mode == "direct" or verdict == "survivor"
+            ),
             "verdict_copy": _safe_verdict_copy(
-                str(row["verdict"]),
+                verdict,
                 killed_at=row["killed_at"],
                 survivor_class=str(row["survivor_class"]),
                 handle=user_id,
@@ -1849,6 +2244,9 @@ class MiningManager:
             if row["completed_at"] is None
             else float(row["completed_at"]),
         }
+        if anchor_sector:
+            snap["anchor_sector"] = str(anchor_sector)
+        return snap
 
     def render_owned_face_or_none(
         self, card_id: str | None, user_id: str
@@ -1865,6 +2263,248 @@ class MiningManager:
             )
         except (CardError, FaceError):
             return None
+
+    def build_private_spec_for_card(
+        self, card_id: str, user_id: str
+    ) -> tuple[dict[str, Any], frozenset[str]]:
+        """Build authenticated owner-only Private Spec for a minted card (v4.2 §5.1).
+
+        Never leaks raw prices, vendor slopes/betas, sign/direction, or P&L.
+        Returns `(payload, allowed_symbols)` for `guard_owner_private_payload`.
+        """
+        if not flags.owner_private_spec_enabled(user_id):
+            raise MiningError("Owner private spec is disabled.", 503)
+        card = self.card_layer.cards.assert_owned(str(card_id), user_id)
+        trial_row = self.ledger.con.execute(
+            "SELECT * FROM trial WHERE trial_id=?", (card.trial_id,)
+        ).fetchone()
+        if trial_row is None:
+            raise MiningError("Trial not found.", 404)
+        user_runs = self._fast_call(
+            self.runs.list_runs_for_user_trial, user_id, card.trial_id
+        )
+        return self._assemble_private_spec(
+            user_id=user_id,
+            trial_row=trial_row,
+            user_runs=user_runs,
+            card=card,
+        )
+
+    def build_private_spec_for_trial(
+        self, trial_id: str, user_id: str
+    ) -> tuple[dict[str, Any], frozenset[str]]:
+        """Build authenticated owner-only Private Spec for an eligible trial (v4.2 §5.1).
+
+        Eligibility (owner decision 2026-11-25):
+        - Allowed for all `direct` (user-supplied) hypotheses owned/run by `user_id`.
+        - Allowed for `survivor` trials (or trials with a minted card owned by `user_id`).
+        - Refused (403) for killed `anchored` and `uniform_random` trials so server-drawn
+          unknown legs cannot be enumerated without surviving the gauntlet.
+        """
+        if not flags.owner_private_spec_enabled(user_id):
+            raise MiningError("Owner private spec is disabled.", 503)
+        trial_row = self.ledger.con.execute(
+            "SELECT * FROM trial WHERE trial_id=?", (str(trial_id),)
+        ).fetchone()
+        if trial_row is None:
+            raise MiningError("Trial not found.", 404)
+        user_runs = self._fast_call(
+            self.runs.list_runs_for_user_trial, user_id, str(trial_id)
+        )
+        is_owner = (str(trial_row["discoverer_handle"] or "") == user_id) or bool(user_runs)
+        if not is_owner:
+            # Uniform 404 (no foreign trial_id oracle).
+            raise MiningError("Trial not found.", 404)
+
+        owned_card_id = self._find_owned_card_for_trial(str(trial_id), user_id)
+        card = (
+            self.card_layer.cards.get_card(owned_card_id)
+            if owned_card_id is not None
+            else None
+        )
+        verdict = str(trial_row["verdict"])
+        has_direct_run = any(
+            str(r["mining_mode"]) == "direct"
+            for r in user_runs
+            if "mining_mode" in set(r.keys())
+        )
+        eligible = has_direct_run or verdict == "survivor" or card is not None
+        if not eligible:
+            raise MiningError(
+                "Private symbol details are available for direct hypotheses and surviving trials only.",
+                403,
+            )
+        return self._assemble_private_spec(
+            user_id=user_id,
+            trial_row=trial_row,
+            user_runs=user_runs,
+            card=card,
+        )
+
+    def _assemble_private_spec(
+        self,
+        *,
+        user_id: str,
+        trial_row: sqlite3.Row,
+        user_runs: list[sqlite3.Row],
+        card: Any | None,
+    ) -> tuple[dict[str, Any], frozenset[str]]:
+        now = time.time()
+        trial_id = str(trial_row["trial_id"])
+        family = str(trial_row["family"])
+        scope_id = str(trial_row["scope_id"])
+        verdict = str(trial_row["verdict"])
+        survivor_class = str(trial_row["survivor_class"])
+        vintage = str(trial_row["data_vintage_hash"])
+
+        try:
+            raw_params = json.loads(str(trial_row["params_json"] or "{}"))
+        except (ValueError, TypeError):
+            raw_params = {}
+        if not isinstance(raw_params, dict):
+            raw_params = {}
+
+        # Strict allowlist extraction from params_json — NEVER pass params_json through.
+        instruments: list[dict[str, str]] = []
+        allowed: list[str] = []
+        raw_pair = raw_params.get("pair")
+        if isinstance(raw_pair, list) and len(raw_pair) == 2:
+            for item in raw_pair:
+                stem = _symbol_stem(str(item), exchange="US").upper()
+                if stem:
+                    instruments.append({"role": "leg", "symbol": stem})
+                    allowed.append(stem)
+
+        latest_run = user_runs[0] if user_runs else None
+        run_cols = set(latest_run.keys()) if latest_run is not None else set()
+        mining_mode = (
+            str(latest_run["mining_mode"])
+            if latest_run is not None and "mining_mode" in run_cols
+            else ("direct" if instruments else "example")
+        )
+        subspace_filter = (
+            str(latest_run["subspace_filter"])
+            if latest_run is not None and "subspace_filter" in run_cols
+            else ("direct" if mining_mode == "direct" else "all")
+        )
+        subspace_size = (
+            int(latest_run["subspace_size"])
+            if latest_run is not None and "subspace_size" in run_cols
+            else 1
+        )
+        anchor_sector = (
+            str(latest_run["anchor_sector"])
+            if latest_run is not None
+            and "anchor_sector" in run_cols
+            and latest_run["anchor_sector"]
+            else None
+        )
+
+        formation = int(raw_params.get("formation", 60))
+        open_z = float(raw_params.get("open_z", 2.0))
+        close_z = float(raw_params.get("close_z", 0.5))
+        holdout_bars = (
+            int(raw_params["holdout_bars"])
+            if raw_params.get("holdout_bars") is not None
+            else None
+        )
+
+        # Stages via _stage_to_public (already strips S0 beta_hat).
+        stages = [_stage_to_public(r) for r in self.ledger.stages(trial_id)]
+
+        # Magnitude-only live |z| (never signed).
+        abs_z: float | None = None
+        if card is not None:
+            abs_z = self.current_abs_z(str(card.card_id))
+        if abs_z is None and len(allowed) == 2:
+            abs_z = self.catalog.compute_live_abs_z_for_pair(
+                allowed[0], allowed[1], formation=formation
+            )
+        if abs_z is not None:
+            abs_z = round(abs(float(abs_z)), 4)
+
+        band = card_copy.gauge_band(abs_z if abs_z is not None else 0.0)
+        band_label = card_copy.gauge_label(band)
+
+        durability: dict[str, Any] = {
+            "hits_trailing_12m": None,
+            "median_hold_days": None,
+            "half_life_days": None,
+            "health_ratio": None,
+            "health_phrase": card_copy.health_phrase(None),
+            "tier": card.tier if card is not None else None,
+            "mint_baseline": None,
+        }
+        if card is not None:
+            pf = card_events.persistence_facts(self.ledger, card, now=now)
+            hf = card_events.health_facts(self.ledger, card, now=now)
+            durability["hits_trailing_12m"] = pf.get("hits_trailing_12m")
+            durability["median_hold_days"] = pf.get("median_hold_days")
+            durability["half_life_days"] = pf.get("half_life_days")
+            durability["health_ratio"] = hf.get("health_ratio")
+            durability["health_phrase"] = card_copy.health_phrase(hf.get("health_ratio"))
+            if (
+                card.baseline_t_net is not None
+                or card.baseline_sr_ann is not None
+                or card.baseline_holdout_bars is not None
+            ):
+                durability["mint_baseline"] = {
+                    "t_net": card.baseline_t_net,
+                    "sr_ann": card.baseline_sr_ann,
+                    "holdout_bars": card.baseline_holdout_bars,
+                }
+
+        try:
+            loop_hint = card_copy.hit_loop_hint(handle=user_id)
+        except card_copy.CopyError:
+            loop_hint = (
+                "Your saved connection fired. Check the pair in your own charting "
+                "or broker tool and make your own call."
+            )
+
+        parameters: dict[str, Any] = {
+            "family": family,
+            "scope_id": scope_id,
+            "mining_mode": mining_mode,
+            "subspace_filter": subspace_filter,
+            "subspace_size": subspace_size,
+            "formation": formation,
+            "open_z": open_z,
+            "close_z": close_z,
+            "holdout_bars": holdout_bars,
+            "data_vintage_hash": vintage,
+        }
+        if anchor_sector is not None:
+            parameters["anchor_sector"] = anchor_sector
+
+        spec: dict[str, Any] = {
+            "card_id": card.card_id if card is not None else None,
+            "trial_id": trial_id,
+            "verdict": verdict,
+            "survivor_class": survivor_class,
+            "instruments": instruments,
+            "parameters": parameters,
+            "gauntlet_stats": stages,
+            "live_signal": {
+                "magnitude_z": abs_z,
+                "band": band,
+                "label": band_label,
+                "note": "magnitude is |z| only — no sign, no direction",
+            },
+            "durability_and_health": durability,
+            "guidance": loop_hint,
+            "watermark": {
+                "handle": user_id,
+                "ts": now,
+                "non_shareable": True,
+                "note": "private owner view — do not share",
+            },
+            "disclaimer": (
+                "Private owner view — do not share. SIFT does not trade; "
+                "survival facts and magnitude only, never advice."
+            ),
+        }
+        return {"ok": True, "private_spec": spec}, frozenset(allowed)
 
     def get_channel(
         self,
@@ -1883,6 +2523,8 @@ class MiningManager:
         # failed, or restart-interrupted runs cleanly so streams NEVER hang).
         replay = _RunChannel(extra_symbols=self.catalog.forbidden_symbols)
         status = str(row["status"])
+        cols = set(row.keys())
+        mining_mode = str(row["mining_mode"]) if "mining_mode" in cols else "example"
         try:
             replay.publish(
                 "registered",
@@ -1890,6 +2532,7 @@ class MiningManager:
                     "run_id": str(row["run_id"]),
                     "trial_id": str(row["trial_id"]),
                     "scope_id": str(row["scope_id"]),
+                    "mining_mode": mining_mode,
                     "cached": bool(row["cached"]),
                 },
             )
@@ -1907,6 +2550,10 @@ class MiningManager:
                         "killed_at": row["killed_at"],
                         "card_id": row["card_id"],
                         "cached": bool(row["cached"]),
+                        "mining_mode": mining_mode,
+                        "private_spec_eligible": bool(
+                            mining_mode == "direct" or str(row["verdict"]) == "survivor"
+                        ),
                         "verdict_copy": _safe_verdict_copy(
                             str(row["verdict"]),
                             killed_at=row["killed_at"],
@@ -1955,6 +2602,7 @@ __all__ = [
     "HOLDOUT_BARS",
     "MAX_CACHED_CHANNELS",
     "MAX_CACHED_LIVE_Z",
+    "MINING_MODES",
     "REGISTRY_DEPTH_BARS",
     "CandidateMeta",
     "MiningError",

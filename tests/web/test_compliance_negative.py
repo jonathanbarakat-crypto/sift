@@ -141,21 +141,39 @@ def test_zero_ticker_price_banned_phrase_or_pii_leak_across_all_endpoints(tmp_pa
         assert r_me.status_code == 200
         _assert_no_leaks(r_me.text, context="GET /api/auth/me")
 
-        # Catalog backed by real AAPL/MSFT/JPM/BAC parquet warehouse
+        # Catalog backed by real AAPL/MSFT/JPM/BAC parquet warehouse (zero pre-screened shortlist)
         r_cat = tc.get("/api/mining/catalog", headers=headers)
         assert r_cat.status_code == 200
         _assert_no_leaks(r_cat.text, context="GET /api/mining/catalog")
-        candidates = r_cat.json()["candidates"]
-        assert len(candidates) >= 1
-        assert candidates[0]["data_source"] == "eodhd_warehouse"
+        cat_body = r_cat.json()
+        assert cat_body["warehouse_ready"] is True
+        assert cat_body["candidates"] == []
+        assert len(cat_body["subspaces"]) >= 1
 
-        # Run every candidate in the warehouse catalog and inspect SSE + poll + trials + cards
+        # Run direct, anchored, and uniform_random slot modes and inspect SSE + poll + trials + cards
+        slot_runs = [
+            {
+                "slot_a": {"kind": "symbol", "value": "AAPL"},
+                "slot_b": {"kind": "symbol", "value": "MSFT"},
+                "scope_id": "free_5y_top1k",
+            },
+            {
+                "slot_a": {"kind": "symbol", "value": "JPM"},
+                "slot_b": {"kind": "random", "subspace": "all"},
+                "scope_id": "free_5y_top1k",
+            },
+            {
+                "slot_a": {"kind": "random", "subspace": "all"},
+                "slot_b": {"kind": "random", "subspace": "all"},
+                "scope_id": "free_5y_top1k",
+            },
+        ]
         minted_card_ids = []
-        for cand in candidates[:2]:
+        for run_body in slot_runs:
             r_run = tc.post(
                 "/api/mining/runs",
                 headers=headers,
-                json={"candidate_id": cand["candidate_id"], "scope_id": "free_5y_top1k"},
+                json=run_body,
             )
             assert r_run.status_code == 202
             _assert_no_leaks(r_run.text, context="POST /api/mining/runs")
@@ -210,7 +228,11 @@ def test_zero_ticker_price_banned_phrase_or_pii_leak_across_all_endpoints(tmp_pa
         r_inject = tc.post(
             "/api/mining/runs",
             headers=headers,
-            json={"candidate_id": candidates[0]["candidate_id"], "tickers": ["AAPL", "MSFT"]},
+            json={
+                "slot_a": {"kind": "random", "subspace": "all"},
+                "slot_b": {"kind": "random", "subspace": "all"},
+                "tickers": ["AAPL", "MSFT"],
+            },
         )
         assert r_inject.status_code == 400
 

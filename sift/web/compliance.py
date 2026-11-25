@@ -128,6 +128,15 @@ _OPAQUE_ID_FIELDS = frozenset({
     "band",
     "provenance",
     "removed",
+    "mining_mode",
+    "subspace_filter",
+    "anchor_id_hmac",
+    "anchor_role",
+    "anchor_sector",
+    "data_vintage_hash",
+    "id",
+    "asof",
+    "mode",
 })
 
 # Exact keys allowed to carry base64 PNG strings (already guarded at draw time
@@ -283,6 +292,182 @@ def guard_api_payload(
     return payload
 
 
+# Fields used by mining mode / subspace transparency (still checked for
+# tickers, forbidden keys, and email PII — never bypasses ticker guard).
+_PRIVATE_EXTRA_FORBIDDEN_KEYS = frozenset({
+    "slope",
+    "beta",
+    "beta_hat",
+    "beta_levels",
+    "beta_true",
+    "hedge_ratio",
+    "z_signed",
+    "signed_z",
+    "spread_series",
+    "residuals",
+    "series",
+    "prices_x",
+    "prices_y",
+})
+
+PRIVATE_FORBIDDEN_KEYS = frozenset(FORBIDDEN_RESPONSE_KEYS | _PRIVATE_EXTRA_FORBIDDEN_KEYS)
+
+_VALID_INSTRUMENT_SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9._-]{0,11}$")
+_INSTRUMENT_SYMBOL_PATH_RE = re.compile(r"^\$\.private_spec\.instruments\[\d+\]\.symbol$")
+_MAGNITUDE_KEYS = frozenset({"magnitude_z", "current_abs_z"})
+_PRIVATE_ALLOWED_ROLES = frozenset({"leg", "leader", "follower", "anchor", "asset"})
+
+
+def guard_owner_private_payload(
+    payload: Any,
+    *,
+    allowed_symbols: Collection[str],
+    extra_symbols: Collection[str] | None = None,
+    max_instruments: int = 10,
+    path: str = "$",
+) -> Any:
+    """Fail-closed compliance guard strictly for authenticated owner-only
+    Private Spec responses (`/api/private/.../spec`, v4.2 §5.1).
+
+    Preserves every red line except allowing the exact symbols of ONE owned
+    trial/card inside `$.private_spec.instruments[i].symbol`:
+    - Zero raw prices, OHLCV, volume, bars, or raw `params_json`.
+    - Zero vendor-fitted slope / beta / hedge_ratio / spread_series.
+    - Zero sign / direction / buy / sell / long / short / P&L / returns.
+    - Zero negative `magnitude_z` / `current_abs_z` (magnitude only).
+    - Zero email PII.
+    - Zero banned phrases across every non-identifier string field.
+    - Zero tickers or warehouse symbols anywhere OUTSIDE
+      `$.private_spec.instruments[i].symbol`; inside that exact slot, every
+      symbol MUST belong to `allowed_symbols` and `len(instruments) <= max_instruments`.
+    """
+    import math as _math
+
+    allowed_set = frozenset(
+        str(s).split(".", 1)[0].strip().upper()
+        for s in allowed_symbols
+        if str(s).strip()
+    )
+
+    if isinstance(payload, dict) and "private_spec" in payload:
+        ps = payload["private_spec"]
+        if not isinstance(ps, dict):
+            raise ComplianceError("invalid private_spec container", rule="private_spec_shape")
+        instruments = ps.get("instruments")
+        if not isinstance(instruments, list) or len(instruments) > int(max_instruments):
+            raise ComplianceError(
+                "invalid or oversized private_spec.instruments",
+                rule="private_instruments_limit",
+            )
+        wm = ps.get("watermark")
+        if not isinstance(wm, dict) or wm.get("non_shareable") is not True:
+            raise ComplianceError(
+                "private_spec must carry watermark.non_shareable=True",
+                rule="private_watermark",
+            )
+        disc = ps.get("disclaimer")
+        if not isinstance(disc, str) or "does not trade" not in disc.lower() or "private" not in disc.lower():
+            raise ComplianceError(
+                "private_spec missing private non-trading disclaimer",
+                rule="private_disclaimer",
+            )
+
+    def _walk(obj: Any, cur_path: str, key_name: str | None = None) -> None:
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                ks = str(k)
+                kl = ks.lower()
+                child_path = f"{cur_path}.{ks}"
+                if kl == "symbol" and _INSTRUMENT_SYMBOL_PATH_RE.match(child_path):
+                    if not isinstance(v, str):
+                        raise ComplianceError(
+                            f"non-string instrument symbol at {child_path}",
+                            rule="private_symbol_type",
+                        )
+                    norm = v.strip().upper()
+                    if not _VALID_INSTRUMENT_SYMBOL_RE.match(norm) or norm not in allowed_set:
+                        raise ComplianceError(
+                            f"unauthorized instrument symbol at {child_path}",
+                            rule="unauthorized_symbol",
+                        )
+                    continue
+                if kl in PRIVATE_FORBIDDEN_KEYS:
+                    raise ComplianceError(
+                        f"forbidden private response key at {cur_path}",
+                        rule="forbidden_key",
+                    )
+                if "email" in kl:
+                    raise ComplianceError(
+                        f"forbidden email key at {cur_path}", rule="email_key"
+                    )
+                if kl in _MAGNITUDE_KEYS and v is not None:
+                    if (
+                        isinstance(v, bool)
+                        or not isinstance(v, (int, float))
+                        or not _math.isfinite(float(v))
+                        or float(v) < 0.0
+                    ):
+                        raise ComplianceError(
+                            f"invalid or signed magnitude at {child_path}",
+                            rule="signed_magnitude",
+                        )
+                if kl == "role" and cur_path.startswith("$.private_spec.instruments["):
+                    if not isinstance(v, str) or v not in _PRIVATE_ALLOWED_ROLES:
+                        raise ComplianceError(
+                            f"invalid instrument role at {child_path}",
+                            rule="invalid_role",
+                        )
+                    continue
+                _walk(v, child_path, key_name=kl)
+        elif isinstance(obj, (list, tuple)):
+            for idx, item in enumerate(obj):
+                _walk(item, f"{cur_path}[{idx}]", key_name=key_name)
+        elif isinstance(obj, str):
+            if EMAIL_RE.search(obj):
+                raise ComplianceError(
+                    f"email-shaped PII detected at {cur_path}", rule="email_value"
+                )
+            assert_no_tickers(obj, path=cur_path, extra_symbols=extra_symbols)
+            if key_name in _LEGAL_CLAUSE_FIELDS:
+                if key_name == "disclaimer":
+                    if "does not trade" not in obj.lower():
+                        raise ComplianceError(
+                            f"invalid disclaimer at {cur_path}", rule="disclaimer"
+                        )
+                    try:
+                        card_copy._assert_legal_clause_clean(obj)
+                    except card_copy.CopyError as exc:
+                        raise ComplianceError(
+                            f"banned phrase in disclaimer at {cur_path}",
+                            rule="banned_phrase",
+                        ) from exc
+                elif key_name == "privacy_note":
+                    try:
+                        card_copy.assert_copy_clean(obj)
+                    except card_copy.CopyError as exc:
+                        raise ComplianceError(
+                            f"banned phrase at {cur_path}", rule="banned_phrase"
+                        ) from exc
+                else:
+                    try:
+                        card_copy._assert_legal_clause_clean(obj)
+                    except card_copy.CopyError as exc:
+                        raise ComplianceError(
+                            f"banned phrase in legal clause at {cur_path}",
+                            rule="banned_phrase",
+                        ) from exc
+            elif key_name not in _OPAQUE_ID_FIELDS:
+                try:
+                    card_copy.assert_copy_clean(obj)
+                except card_copy.CopyError as exc:
+                    raise ComplianceError(
+                        f"banned phrase at {cur_path}", rule="banned_phrase"
+                    ) from exc
+
+    _walk(payload, path)
+    return payload
+
+
 def sanitize_user_label(
     label: str, *, extra_symbols: Collection[str] | None = None
 ) -> str:
@@ -308,9 +493,11 @@ def sanitize_user_label(
 __all__ = [
     "EMAIL_RE",
     "FORBIDDEN_RESPONSE_KEYS",
+    "PRIVATE_FORBIDDEN_KEYS",
     "ComplianceError",
     "assert_no_email_pii",
     "assert_no_tickers",
     "guard_api_payload",
+    "guard_owner_private_payload",
     "sanitize_user_label",
 ]

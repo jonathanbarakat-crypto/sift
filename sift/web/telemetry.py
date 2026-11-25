@@ -48,6 +48,7 @@ ALLOWED_EVENT_TYPES = frozenset({
     "card_discarded",
     "ghost_promoted",
     "share_grant",
+    "private_spec_viewed",
     "feedback_note",
 })
 

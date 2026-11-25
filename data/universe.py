@@ -51,6 +51,12 @@ if __package__ in (None, ""):
         MIN_MEDIAN_RAW_CLOSE_USD,
         evaluate_symbol_dollar_volume,
     )
+    from data.sectors import (  # type: ignore
+        UNCLASSIFIED_SECTOR,
+        load_sector_map,
+        normalize_sector_bucket,
+        normalize_symbol_stem,
+    )
     from data.security_type import is_common_stock_symbol  # type: ignore
 else:
     from . import warehouse as wh
@@ -61,6 +67,12 @@ else:
         MAX_SINGLE_DAY_PRICE_MULT,
         MIN_MEDIAN_RAW_CLOSE_USD,
         evaluate_symbol_dollar_volume,
+    )
+    from .sectors import (
+        UNCLASSIFIED_SECTOR,
+        load_sector_map,
+        normalize_sector_bucket,
+        normalize_symbol_stem,
     )
     from .security_type import is_common_stock_symbol
 
@@ -79,7 +91,7 @@ DEFAULT_MIN_BARS = 20
 DEFAULT_MIN_AVG_DOLLAR_VOLUME = 1_000_000.0  # $1M mean daily dollar volume
 
 RANKED_COLUMNS = [
-    "rank", "symbol", "exchange", "avg_dollar_volume", "bars", "first_date", "last_date",
+    "rank", "symbol", "exchange", "sector", "avg_dollar_volume", "bars", "first_date", "last_date",
     "asof", "ended_before_asof", "delisted", "delist_idx_available",
 ]
 QUARANTINE_COLUMNS = [
@@ -165,6 +177,7 @@ def build_ranked_table(
     min_bars: int = 0,
     min_avg_dollar_volume: float = 0.0,
     splits_by_symbol: dict[str, list] | None = None,
+    sectors_by_symbol: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Point-in-time ranking as of ``asof`` (YYYY-MM-DD).
 
@@ -277,9 +290,16 @@ def build_ranked_table(
             continue
 
         ended = ev["last_date"] < asof_date
+        sym_sector = UNCLASSIFIED_SECTOR
+        if sectors_by_symbol:
+            stem = normalize_symbol_stem(str(sym), exchange=str(ex or "US"))
+            raw_sec = sectors_by_symbol.get(stem) or sectors_by_symbol.get(str(sym))
+            if raw_sec is not None:
+                sym_sector = normalize_sector_bucket(raw_sec)
         ranked_rows.append({
             "symbol": sym,
             "exchange": ex,
+            "sector": sym_sector,
             "avg_dollar_volume": adv,
             "bars": n_bars,
             "first_date": ev["first_date"],
@@ -364,8 +384,10 @@ def main(argv: list | None = None) -> int:
     log(f"loading bars from {root}/eod …")
     bars = load_all_bars(root)
     splits_by_symbol = load_all_splits(root)
+    sectors_by_symbol = load_sector_map(root, exchange="US")
     log(f"loaded {len(bars)} bars, {bars['symbol'].nunique() if not bars.empty else 0} symbols, "
-        f"{len(splits_by_symbol)} cached splits file(s)")
+        f"{len(splits_by_symbol)} cached splits file(s), "
+        f"{len(sectors_by_symbol)} sector mapping(s)")
 
     ranked, quarantine = build_ranked_table(
         bars,
@@ -374,6 +396,7 @@ def main(argv: list | None = None) -> int:
         min_bars=args.min_bars,
         min_avg_dollar_volume=args.min_avg_dollar_volume,
         splits_by_symbol=splits_by_symbol,
+        sectors_by_symbol=sectors_by_symbol,
     )
     n_non_common = int(ranked.attrs.get("non_common_excluded", 0))
     n_splits_verified = int(ranked.attrs.get("splits_verified_symbols", 0))
@@ -418,6 +441,11 @@ def main(argv: list | None = None) -> int:
 
     n_ended = int(ranked["ended_before_asof"].sum())
     n_ended_top = int(top["ended_before_asof"].sum())
+    top_sector_counts = (
+        {str(k): int(v) for k, v in top["sector"].value_counts().items()}
+        if (not top.empty and "sector" in top.columns)
+        else {}
+    )
     if research:
         survivorship = (
             "BIASED — research-grade vintage (vendor has no delisted list): the "
@@ -445,6 +473,7 @@ def main(argv: list | None = None) -> int:
             "symbols_with_splits_file": n_splits_verified,
             "symbols_without_splits_file": n_splits_missing,
         },
+        "sector_counts": top_sector_counts,
         "non_common_excluded": n_non_common,
         "ranked_path": ranked_path,
         "top_path": top_path,
