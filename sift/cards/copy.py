@@ -336,6 +336,54 @@ def hit_notification_copy(card_id: str, band: str, abs_z: float | None,
     return assert_copy_clean(" ".join(parts))
 
 
+# -- honest verdict framing (beta-plan.md §3 step 3) ------------------------------
+
+def verdict_framing(
+    verdict: str,
+    *,
+    killed_at: str | None = None,
+    survivor_class: str | None = None,
+    handle: str | None = None,
+) -> str:
+    """Honest-result framing shown regardless of outcome (beta-plan §3):
+    if a candidate is killed, say so plainly ('killed at stage Sx — this is
+    the product working'); if it survives, state the survivor class honestly
+    without implying advice or an instant win. Fail-closed on banned phrases
+    and on flag-off."""
+    _require_flag(handle)
+    v = str(verdict).strip().lower()
+    if v == "killed":
+        stage = (killed_at or "screen").strip().upper()
+        text = (
+            f"Killed at stage {stage} — this is the product working. "
+            f"Most candidates do not survive the pre-registered stress test; "
+            f"recording the kill keeps the registry honest."
+        )
+        return assert_copy_clean(text)
+    if v == "survivor":
+        cls = (survivor_class or "on-watch-amber").strip()
+        if cls == "validated-green":
+            text = (
+                "Survived the pre-registered stress test through full-depth "
+                "registry validation (validated-green). This certifies "
+                "durability in the research window — not an instant win and "
+                "nothing about what to do with it. SIFT shows evidence; you "
+                "make the calls."
+            )
+            return assert_copy_clean(text)
+        text = (
+            f"Passed the initial screen ({cls}). Evidence stays provisional "
+            f"(on-watch-amber) until full-depth validation clears — SIFT "
+            f"shows evidence; you make the calls."
+        )
+        return assert_copy_clean(text)
+    if v == "pending":
+        return assert_copy_clean(
+            "Trial registered in the ledger and awaiting stage completion."
+        )
+    raise CopyError(f"unknown verdict {verdict!r} — refused")
+
+
 __all__ = [
     "BANNED_PHRASES",
     "BANNED_WORDS",
@@ -357,4 +405,5 @@ __all__ = [
     "mint_baseline_note",
     "onboarding_statement",
     "tos_acceptance_text",
+    "verdict_framing",
 ]

@@ -9,6 +9,7 @@ full-depth become on-watch-amber, not validated-green (v3 §8.4).
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass, field
 
@@ -490,6 +491,7 @@ class GauntletRunner:
         full_spread_returns: np.ndarray | None = None,
         delist_idx: np.ndarray | None = None,
         holdout_baseline: dict | None = None,
+        on_stage=None,
     ) -> dict:
         """Run S0-S4 in order, recording each stage row. Short-circuits on the
         first failing stage (later stages stay pending — a stage not run
@@ -498,6 +500,10 @@ class GauntletRunner:
         an S0-S4 pass and decides the survivor class (validated-green vs
         on-watch-amber). `delist_idx` masks post-delist bars everywhere.
         Returns the verdict dict.
+
+        `on_stage` (optional observational callback) is invoked with each
+        recorded StageResult as it finishes (used for SSE progress streaming;
+        zero effect on gauntlet decisions or thresholds).
 
         soundness #10: `holdout_baseline` (the frozen-holdout live-baseline:
         t_net / sr_ann / holdout_bars / holdout_start_bar, computed ONCE by
@@ -515,22 +521,26 @@ class GauntletRunner:
             raise ValueError("S4 requires prices")
         results: list[StageResult] = []
 
+        def _record_and_emit(sr: StageResult) -> None:
+            self.record(trial_id, sr)
+            results.append(sr)
+            if on_stage is not None:
+                with contextlib.suppress(Exception):
+                    on_stage(sr)
+
         s0 = self.run_s0(trial_id, fixture_x, fixture_y, beta_true,
                          half_life_true, spread=fixture_spread)
-        self.record(trial_id, s0)
-        results.append(s0)
+        _record_and_emit(s0)
         if s0.status == "fail":
             return self._verdict(trial_id, results, killed_at="s0")
 
         s1 = self.run_s1(trial_id, excess_returns)
-        self.record(trial_id, s1)
-        results.append(s1)
+        _record_and_emit(s1)
         if s1.status == "fail":
             return self._verdict(trial_id, results, killed_at="s1")
 
         s2 = self.run_s2(trial_id, perm_series, perm_statistic_fn, B=s2_B)
-        self.record(trial_id, s2)
-        results.append(s2)
+        _record_and_emit(s2)
         if s2.status == "fail":
             return self._verdict(trial_id, results, killed_at="s2")
 
@@ -539,15 +549,13 @@ class GauntletRunner:
         wf = stats.walk_forward_returns(prices)
         net = wf["net"]
         s4 = self.run_s4(trial_id, net, scope_id, p_perm=s2.p_value)
-        self.record(trial_id, s4)
-        results.append(s4)
+        _record_and_emit(s4)
         self.ledger.update_var_stat(scope_id)  # refresh N and V from ledger
         s4_bar_met = v42.s4_passed(s4.detail, scope_id)
 
         sr_bar = (s4.detail["sr_ann"] / np.sqrt(cfg.BARS_PER_YEAR))
         s3 = self.run_s3(trial_id, sr_bar, s4.detail["T"], s2.p_value, scope_id)
-        self.record(trial_id, s3)
-        results.append(s3)
+        _record_and_emit(s3)
         s3_pass = s3.status == "pass"
         # v4.2 §2-§3: an S0-S2 passer that misses the S4 or S3 bar is NOT
         # killed — it is a survivor at the bronze evidence tier.
@@ -582,8 +590,7 @@ class GauntletRunner:
                 s2_B=s2_B,
                 seed=self.seed,
             )
-            self.record(trial_id, s5)
-            results.append(s5)
+            _record_and_emit(s5)
             self.ledger.update_var_stat("registry_depth")
             cls = s5.detail["survivor_class"]
             self.ledger.decide(trial_id, "survivor", cls)

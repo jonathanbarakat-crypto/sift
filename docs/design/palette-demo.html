@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIFT — palette demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400..900&family=Spectral:ital,wght@0,300;0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* type */
+    --font-display: "Cinzel", "Times New Roman", serif;            /* engraved inscription caps — art-nouveau voice */
+    --font-serif:   "Spectral", Georgia, "Times New Roman", serif;  /* screen serif for card copy / prose */
+    --font-sans:    "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; /* fintech UI */
+    --font-mono:    "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;                    /* numbers, tickers, hexes */
+    /* canvas & surfaces */
+    --bg:      #0A0C12;
+    --bg-alt:  #0D1017;
+    --panel:   #12161F;
+    --panel-2: #171C28;
+    --line:    #232A3A;
+    --ink:     #E8ECF4;
+    --ink-dim: #9AA4B8;
+    /* antique tier metals */
+    --bronze: #C08552; --bronze-dk: #8A5A33; --bronze-hi: #E0AA76; --bronze-bg: #241B12;
+    --silver: #C9CDD6; --silver-dk: #8E939F; --silver-hi: #EDF1F6; --silver-bg: #22262E;
+    --gold:   #D4AF6A; --gold-dk:   #A8823F; --gold-hi:   #F0D49A; --gold-bg:   #2B2413;
+    --plat:   #DCE6EC; --plat-dk:   #93A7B4; --plat-hi:   #FFFFFF; --plat-bg:   #1B242E;
+    /* brand accents */
+    --accent: #7FB4C9;
+    --brass:  #C9A227;
+    --lime:   #9BC53D;
+    --warn:   #E0B15E;
+    --danger: #E06C5B;
+    --info:   #7AA2C9;
+    /* data-viz */
+    --series: #7FB4C9; --series-2: #C9A227;
+    --series-pos: #9BC53D; --series-neg: #E06C5B;
+    --band: rgba(224,177,94,0.14);
+    --peak: #F0D49A;
+    --grid: #1C2230;
+    --stage-pass: #9BC53D; --stage-pending: #9AA4B8; --stage-fail: #E06C5B;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--font-sans);
+    line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: rgba(127,180,201,.35); }
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-thumb { background: #232A3A; border-radius: 5px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 64px; }
+  h1 { font-family: var(--font-display); font-weight: 700; font-size: clamp(1.9rem, 4vw, 2.8rem); letter-spacing: .04em; line-height: 1.15; margin: 40px 0 8px; }
+  h2 { font-family: var(--font-display); font-weight: 600; font-size: 1.25rem; letter-spacing: .05em; margin: 56px 0 6px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+  h2 .note { color: var(--ink-dim); font-family: var(--font-sans); font-weight: 400; font-size: .9rem; letter-spacing: 0; }
+  p.sub { color: var(--ink-dim); margin: 0 0 20px; max-width: 68ch; font-family: var(--font-serif); font-size: 1.02rem; }
+  code { font-family: var(--font-mono); font-size: .85em;
+         background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
+
+  /* swatches */
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+  .swatch { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
+  .swatch .chip { height: 74px; border-bottom: 1px solid var(--line); }
+  .swatch .meta { padding: 8px 12px 10px; }
+  .swatch .name { font-weight: 600; font-size: .9rem; }
+  .swatch .hex { font-family: var(--font-mono); font-size: .8rem; color: var(--ink-dim); }
+
+  /* tier cards (mini card-face mock) */
+  .tiers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .tcard { border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel);
+           border-top: 4px solid; overflow: hidden; }
+  .tcard .band { padding: 10px 14px; font-family: var(--font-display); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: .82rem; }
+  .tcard .body { padding: 12px 14px 14px; color: var(--ink-dim); font-size: .88rem; font-family: var(--font-serif); }
+  .tcard .body b { color: var(--ink); font-family: var(--font-sans); font-size: .84rem; }
+  .t-bronze   { border-top-color: var(--bronze); } .t-bronze .band { background: var(--bronze-bg); color: var(--bronze-hi); }
+  .t-silver   { border-top-color: var(--silver); } .t-silver .band { background: var(--silver-bg); color: var(--silver-hi); }
+  .t-gold     { border-top-color: var(--gold);   } .t-gold   .band { background: var(--gold-bg);   color: var(--gold-hi); }
+  .t-platinum { border-top-color: var(--plat);   } .t-platinum .band { background: var(--plat-bg); color: var(--plat-hi); }
+
+  /* metallic sheen demo */
+  .sheen { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .metal { height: 84px; border-radius: var(--radius); border: 1px solid var(--line);
+           display: flex; align-items: flex-end; padding: 10px 14px; font-family: var(--font-display); font-weight: 700; font-size: .9rem; letter-spacing: .14em; text-transform: uppercase; }
+  .m-bronze   { background: linear-gradient(135deg, var(--bronze-dk), var(--bronze) 45%, var(--bronze-hi) 60%, var(--bronze) 75%, var(--bronze-dk)); color: #1a120a; }
+  .m-silver   { background: linear-gradient(135deg, var(--silver-dk), var(--silver) 45%, var(--silver-hi) 60%, var(--silver) 75%, var(--silver-dk)); color: #14171c; }
+  .m-gold     { background: linear-gradient(135deg, var(--gold-dk), var(--gold) 45%, var(--gold-hi) 60%, var(--gold) 75%, var(--gold-dk)); color: #241a08; }
+  .m-platinum { background: linear-gradient(135deg, var(--plat-dk), var(--plat) 45%, var(--plat-hi) 60%, var(--plat) 75%, var(--plat-dk)); color: #10161c; }
+
+  /* dashboard mock */
+  .dash { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; }
+  @media (max-width: 760px) { .dash { grid-template-columns: 1fr; } }
+  .dash h3 { margin: 0 0 4px; font-size: 1rem; font-variant-numeric: tabular-nums; }
+  .dash .dim { color: var(--ink-dim); font-size: .85rem; margin: 0 0 12px; font-family: var(--font-serif); }
+  .row { font-variant-numeric: tabular-nums; }
+  .chart { background: var(--bg-alt); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .stages { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+  .stage { font-family: var(--font-mono); font-size: .78rem; padding: 4px 10px;
+           border-radius: 999px; border: 1px solid var(--line); background: var(--bg-alt); }
+  .stage.pass { color: var(--stage-pass); border-color: rgba(155,197,61,.4); }
+  .stage.pending { color: var(--stage-pending); }
+  .stage.fail { color: var(--stage-fail); border-color: rgba(224,108,91,.4); }
+  .gauge { display: flex; gap: 6px; margin-top: 10px; }
+  .gband { flex: 1; text-align: center; font-size: .75rem; padding: 5px 0; border-radius: 6px; border: 1px solid var(--line); color: var(--ink-dim); }
+  .gband.on-compressed { color: var(--silver-dk); border-color: rgba(142,147,159,.5); background: rgba(142,147,159,.08); }
+  .gband.on-normal { color: var(--accent); border-color: rgba(127,180,201,.5); background: rgba(127,180,201,.08); }
+  .gband.on-stretched { color: var(--peak); border-color: rgba(240,212,154,.5); background: rgba(240,212,154,.08); }
+  .rows { display: grid; gap: 8px; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+         background: var(--bg-alt); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font-size: .85rem; }
+  .row .tag { font-family: var(--font-mono); font-size: .75rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+  .tag.b { color: var(--bronze-hi); border-color: rgba(224,170,118,.4); }
+  .tag.s { color: var(--silver-hi); border-color: rgba(237,241,246,.3); }
+  .tag.g { color: var(--gold-hi); border-color: rgba(240,212,154,.4); }
+  .tag.p { color: var(--plat-hi); border-color: rgba(255,255,255,.35); }
+  .btn { display: inline-block; padding: 9px 18px; border-radius: 999px; font-family: var(--font-sans); font-weight: 600; font-size: .9rem;
+         background: var(--accent); color: #08131f; border: 1px solid var(--accent); }
+  .btn.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  .btn.brass { background: var(--brass); border-color: var(--brass); color: #1c1503; }
+  .sem { display: flex; gap: 10px; flex-wrap: wrap; }
+  .pill { font-size: .8rem; padding: 5px 12px; border-radius: 999px; border: 1px solid; }
+  .pill.ok { color: var(--lime); border-color: rgba(155,197,61,.45); background: rgba(155,197,61,.07); }
+  .pill.warn { color: var(--warn); border-color: rgba(224,177,94,.45); background: rgba(224,177,94,.07); }
+  .pill.err { color: var(--danger); border-color: rgba(224,108,91,.45); background: rgba(224,108,91,.07); }
+  .pill.inf { color: var(--info); border-color: rgba(122,162,201,.45); background: rgba(122,162,201,.07); }
+
+  /* deck ranks */
+  .ranks { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+  .rank { width: 52px; text-align: center; }
+  .rank .bar { border-radius: 8px 8px 4px 4px; border: 1px solid var(--line); display: flex; align-items: flex-start; justify-content: center; padding-top: 6px; font-family: var(--font-display); font-weight: 700; }
+  .rank .lbl { font-size: .75rem; color: var(--ink-dim); margin-top: 5px; font-family: var(--font-mono); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>SIFT palette — dark fintech × antique metal</h1>
+  <p class="sub">Dark mode by default. Antique (aged, desaturated) bronze / silver / gold / platinum for card tiers,
+  oxidized-teal + brass accents for the art-nouveau undertone, one reserved green for “survived the gauntlet”.
+  All text pairs on this page meet WCAG AA (≥4.5:1).</p>
+
+  <h2>Typography <span class="note">— four OFL faces, one per voice</span></h2>
+  <div class="dash" style="grid-template-columns:1fr">
+    <div class="rows">
+      <div class="row" style="align-items:baseline"><span style="font-family:var(--font-display);font-weight:700;font-size:1.5rem;letter-spacing:.08em">CINZEL — display</span><span style="color:var(--ink-dim);font-size:.8rem">engraved inscription caps · wordmarks, tier bands, rank letters, h1/h2 · wght 400–900 variable · OFL</span></div>
+      <div class="row" style="align-items:baseline"><span style="font-family:var(--font-serif);font-size:1.15rem">Spectral — card copy &amp; prose</span><span style="color:var(--ink-dim);font-size:.8rem">screen-first serif · 300/400/600 + italic · OFL</span></div>
+      <div class="row" style="align-items:baseline"><span style="font-family:var(--font-sans);font-size:1rem">IBM Plex Sans — UI body</span><span style="color:var(--ink-dim);font-size:.8rem">fintech dashboard neutral · 400/500/600 · OFL</span></div>
+      <div class="row" style="align-items:baseline"><span style="font-family:var(--font-mono);font-size:1rem;font-variant-numeric:tabular-nums">IBM Plex Mono 0123456789 +4.02% |z|≥4.0</span><span style="color:var(--ink-dim);font-size:.8rem">numbers, tickers, hex codes, stage pills · tabular-nums · OFL</span></div>
+    </div>
+    <p class="dim" style="margin:12px 0 0">Fallbacks: Cinzel → Times New Roman; Spectral → Georgia; Plex Sans → system-ui; Plex Mono → ui-monospace. All four load from Google Fonts (css2 API, display=swap) and degrade gracefully offline.</p>
+  </div>
+
+  <h2>Canvas &amp; surfaces <span class="note">— neutrals with a blue-charcoal cast</span></h2>
+  <div class="swatches">
+    <div class="swatch"><div class="chip" style="background:#0A0C12"></div><div class="meta"><div class="name">--bg</div><div class="hex">#0A0C12</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#0D1017"></div><div class="meta"><div class="name">--bg-alt</div><div class="hex">#0D1017</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#12161F"></div><div class="meta"><div class="name">--panel (card body)</div><div class="hex">#12161F</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#171C28"></div><div class="meta"><div class="name">--panel-2</div><div class="hex">#171C28</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#232A3A"></div><div class="meta"><div class="name">--line</div><div class="hex">#232A3A</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#E8ECF4"></div><div class="meta"><div class="name">--ink</div><div class="hex">#E8ECF4 · 16.5:1</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#9AA4B8"></div><div class="meta"><div class="name">--ink-dim</div><div class="hex">#9AA4B8 · 7.8:1</div></div></div>
+  </div>
+
+  <h2>Antique tier metals <span class="note">— accent for strokes/text, dk→hi for the sheen</span></h2>
+  <div class="swatches">
+    <div class="swatch"><div class="chip" style="background:#C08552"></div><div class="meta"><div class="name">bronze</div><div class="hex">#C08552</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#8A5A33"></div><div class="meta"><div class="name">bronze-dk</div><div class="hex">#8A5A33</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#E0AA76"></div><div class="meta"><div class="name">bronze-hi</div><div class="hex">#E0AA76</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#C9CDD6"></div><div class="meta"><div class="name">silver</div><div class="hex">#C9CDD6</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#8E939F"></div><div class="meta"><div class="name">silver-dk</div><div class="hex">#8E939F</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#EDF1F6"></div><div class="meta"><div class="name">silver-hi</div><div class="hex">#EDF1F6</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#D4AF6A"></div><div class="meta"><div class="name">gold</div><div class="hex">#D4AF6A</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#A8823F"></div><div class="meta"><div class="name">gold-dk</div><div class="hex">#A8823F</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#F0D49A"></div><div class="meta"><div class="name">gold-hi</div><div class="hex">#F0D49A</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#DCE6EC"></div><div class="meta"><div class="name">platinum</div><div class="hex">#DCE6EC</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#93A7B4"></div><div class="meta"><div class="name">plat-dk</div><div class="hex">#93A7B4</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#FFFFFF"></div><div class="meta"><div class="name">plat-hi</div><div class="hex">#FFFFFF</div></div></div>
+  </div>
+
+  <h2>Metallic sheen <span class="note">— dk → accent → hi gradient for frames &amp; bands</span></h2>
+  <div class="sheen">
+    <div class="metal m-bronze">Bronze</div>
+    <div class="metal m-silver">Silver</div>
+    <div class="metal m-gold">Gold</div>
+    <div class="metal m-platinum">Platinum</div>
+  </div>
+
+  <h2>Card faces <span class="note">— tier band wash + metal top border (as in the PIL renderer)</span></h2>
+  <div class="tiers">
+    <div class="tcard t-bronze"><div class="band">Bronze card</div><div class="body"><b>Vault capacity 2.</b> Survived S0–S5 at mint. Decay can only move a card down.</div></div>
+    <div class="tcard t-silver"><div class="band">Silver card</div><div class="body"><b>Vault capacity 4.</b> Pre-registered live-window upgrade possible after 12 months.</div></div>
+    <div class="tcard t-gold"><div class="band">Gold card</div><div class="body"><b>Vault capacity 6.</b> Full-depth |t_net| ≥ 4.0 + p_perm ≤ 0.01 at mint.</div></div>
+    <div class="tcard t-platinum"><div class="band">Platinum card</div><div class="body"><b>Top tier.</b> S4 pass + S5 pass + full-depth |t_net| ≥ 4.0 + p_perm ≤ 0.01.</div></div>
+  </div>
+
+  <h2>Brand accents &amp; semantics</h2>
+  <div class="swatches">
+    <div class="swatch"><div class="chip" style="background:#7FB4C9"></div><div class="meta"><div class="name">--accent (teal-steel)</div><div class="hex">#7FB4C9</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#C9A227"></div><div class="meta"><div class="name">--brass (highlight)</div><div class="hex">#C9A227</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#9BC53D"></div><div class="meta"><div class="name">--lime (survived only)</div><div class="hex">#9BC53D</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#E0B15E"></div><div class="meta"><div class="name">--warn (amber/decay)</div><div class="hex">#E0B15E</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#E06C5B"></div><div class="meta"><div class="name">--danger (fail/kill)</div><div class="hex">#E06C5B</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#7AA2C9"></div><div class="meta"><div class="name">--info</div><div class="hex">#7AA2C9</div></div></div>
+  </div>
+  <p style="margin-top:16px">
+    <span class="btn">Primary action</span>
+    <span class="btn brass" style="margin-left:8px">Brass highlight</span>
+    <span class="btn ghost" style="margin-left:8px">Ghost</span>
+  </p>
+  <div class="sem" style="margin-top:14px">
+    <span class="pill ok">validated-green · survived</span>
+    <span class="pill warn">on-watch · decayed amber</span>
+    <span class="pill err">failed stage · kill-switch</span>
+    <span class="pill inf">info</span>
+  </div>
+
+  <h2>Dashboard mock <span class="note">— mining display, gauntlet stages, gauge, vault rows</span></h2>
+  <div class="dash">
+    <div>
+      <h3>Mining run · pairs · free_5y_top1k</h3>
+      <p class="dim">Anonymized aggregate series — no tickers. Server-side gauntlet, pre-registered thresholds.</p>
+      <div class="chart">
+        <svg viewBox="0 0 520 200" width="100%" role="img" aria-label="z-score chart with entry bands">
+          <rect x="0" y="0" width="520" height="200" fill="#0D1017"/>
+          <!-- gridlines -->
+          <g stroke="#1C2230" stroke-width="1">
+            <line x1="0" y1="50" x2="520" y2="50"/><line x1="0" y1="100" x2="520" y2="100"/><line x1="0" y1="150" x2="520" y2="150"/>
+          </g>
+          <!-- entry bands at +/-2 -->
+          <rect x="0" y="12" width="520" height="30" fill="rgba(224,177,94,0.14)"/>
+          <rect x="0" y="158" width="520" height="30" fill="rgba(224,177,94,0.14)"/>
+          <line x1="0" y1="27" x2="520" y2="27" stroke="#C9A227" stroke-width="1" stroke-dasharray="4 4" opacity=".7"/>
+          <line x1="0" y1="173" x2="520" y2="173" stroke="#C9A227" stroke-width="1" stroke-dasharray="4 4" opacity=".7"/>
+          <line x1="0" y1="100" x2="520" y2="100" stroke="#232A3A" stroke-width="1"/>
+          <!-- z-score series -->
+          <polyline fill="none" stroke="#7FB4C9" stroke-width="2" stroke-linejoin="round"
+            points="0,110 30,95 60,118 90,88 120,104 150,70 180,122 210,92 240,60 270,115 300,84 330,126 360,74 390,108 420,96 450,52 480,118 520,90"/>
+          <!-- peak marker -->
+          <circle cx="450" cy="52" r="4" fill="#F0D49A"/>
+          <text x="455" y="44" fill="#F0D49A" font-size="11" style="font-family:var(--font-mono)">|z| peak</text>
+        </svg>
+      </div>
+      <div class="stages">
+        <span class="stage pass">S0 pass</span><span class="stage pass">S1 pass</span><span class="stage pass">S2 pass</span>
+        <span class="stage pass">S3 pass</span><span class="stage pass">S4 pass</span><span class="stage pending">S5 pending</span>
+        <span class="stage fail">S6 fail</span>
+      </div>
+      <div class="gauge">
+        <span class="gband on-compressed">compressed</span>
+        <span class="gband">normal</span>
+        <span class="gband on-stretched">stretched</span>
+      </div>
+    </div>
+    <div>
+      <h3>Vault</h3>
+      <p class="dim">Capacity by tier · ghost FIFO · non-transferable</p>
+      <div class="rows">
+        <div class="row"><span>card_8f2a…c1</span><span class="tag p">platinum</span></div>
+        <div class="row"><span>card_3b91…77</span><span class="tag g">gold</span></div>
+        <div class="row"><span>card_5c04…e9</span><span class="tag s">silver</span></div>
+        <div class="row"><span>card_9d27…12</span><span class="tag b">bronze</span></div>
+        <div class="row"><span style="color:var(--ink-dim)">ghost #3 — FIFO</span><span class="tag">ghost</span></div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Deck ranks F–S <span class="note">— mapped onto the metal ramp, distinct from card tiers</span></h2>
+  <div class="ranks">
+    <div class="rank"><div class="bar" style="height:34px;background:#1A1F2A;color:#5A6274">F</div><div class="lbl">#5A6274</div></div>
+    <div class="rank"><div class="bar" style="height:46px;background:#241B12;color:#C08552">D</div><div class="lbl">bronze</div></div>
+    <div class="rank"><div class="bar" style="height:58px;background:#22262E;color:#C9CDD6">C</div><div class="lbl">silver</div></div>
+    <div class="rank"><div class="bar" style="height:70px;background:#2B2413;color:#D4AF6A">B</div><div class="lbl">gold</div></div>
+    <div class="rank"><div class="bar" style="height:82px;background:#2A2408;color:#C9A227">A</div><div class="lbl">brass</div></div>
+    <div class="rank"><div class="bar" style="height:94px;background:#1B242E;color:#DCE6EC;border-color:#93A7B4">S</div><div class="lbl">platinum</div></div>
+  </div>
+
+  <h2>Data-viz tokens</h2>
+  <div class="swatches">
+    <div class="swatch"><div class="chip" style="background:#7FB4C9"></div><div class="meta"><div class="name">--series</div><div class="hex">#7FB4C9</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#C9A227"></div><div class="meta"><div class="name">--series-2</div><div class="hex">#C9A227</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#9BC53D"></div><div class="meta"><div class="name">--series-pos</div><div class="hex">#9BC53D</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#E06C5B"></div><div class="meta"><div class="name">--series-neg</div><div class="hex">#E06C5B</div></div></div>
+    <div class="swatch"><div class="chip" style="background:rgba(224,177,94,0.14);border-bottom:1px solid #232A3A"></div><div class="meta"><div class="name">--band</div><div class="hex">rgba(224,177,94,.14)</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#F0D49A"></div><div class="meta"><div class="name">--peak</div><div class="hex">#F0D49A</div></div></div>
+    <div class="swatch"><div class="chip" style="background:#1C2230"></div><div class="meta"><div class="name">--grid</div><div class="hex">#1C2230</div></div></div>
+  </div>
+
+</div>
+</body>
+</html>
