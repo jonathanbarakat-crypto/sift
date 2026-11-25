@@ -71,7 +71,8 @@ SILVER_DSR, SILVER_T_NET = 0.95, 3.0       # deprecated alias: the admission gat
 
 def s4_passed(detail: dict, scope_id: str) -> bool:
     """S4's pre-registered bar, evaluated on the recorded stage detail:
-    net SR > S4_NET_SR_MIN AND |t_net| >= tau_cal(scope) AND MinTRL <= T.
+    net SR > S4_NET_SR_MIN AND |t_net| >= tau_cal(scope) AND MinTRL <= T
+    (or MinTRL <= T_eff when HAC is active, e.g. `lead_lag`).
     UNCHANGED thresholds — in v4.2 this is an evidence bar, not a kill."""
     sr_ann = detail.get("sr_ann")
     t_net = detail.get("t_net")
@@ -80,7 +81,10 @@ def s4_passed(detail: dict, scope_id: str) -> bool:
     if sr_ann is None or t_net is None or min_trl is None or T is None:
         return False
     tau = cfg.tau_cal(scope_id)
-    return (sr_ann > cfg.S4_NET_SR_MIN) and (abs(t_net) >= tau) and (min_trl <= T)
+    sample_cap = detail.get("t_eff") if detail.get("use_hac") else T
+    if sample_cap is None:
+        return False
+    return (sr_ann > cfg.S4_NET_SR_MIN) and (abs(t_net) >= tau) and (min_trl <= sample_cap)
 
 
 def survivor_class_for(*, s4_pass: bool, s3_pass: bool, s5_pass: bool | None) -> str:

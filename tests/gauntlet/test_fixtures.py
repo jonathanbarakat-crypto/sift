@@ -125,7 +125,7 @@ def test_f_null_fails_s3_dsr(ledger):
     # register 200 null trials in the stratum so N=200
     for i in range(200):
         ledger.register("null", "free_5y_top1k", {"i": i}, "vintage-fx")
-    n, v = ledger.stratum_stats("free_5y_top1k")
+    n, v = ledger.stratum_stats("free_5y_top1k", family="null")
     assert n == 200
     sr_bar = 0.01  # a modest per-bar Sharpe a noise run might show
     d = stats.dsr(sr_bar, T, n, max(v, 1 / T), skew=0.0, kurt=3.0)

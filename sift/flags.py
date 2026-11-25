@@ -45,15 +45,22 @@ import time
 FLAG_CARDS_V4_1 = "cards_v4_1"
 FLAG_DECKS_V4_2 = "decks_v4_2"
 FLAG_OWNER_PRIVATE_SPEC = "owner_private_spec"
+FLAG_FAMILY_LEAD_LAG = "family_lead_lag"
 
-_KNOWN_FLAGS = (FLAG_CARDS_V4_1, FLAG_DECKS_V4_2, FLAG_OWNER_PRIVATE_SPEC)
+_KNOWN_FLAGS = (
+    FLAG_CARDS_V4_1,
+    FLAG_DECKS_V4_2,
+    FLAG_OWNER_PRIVATE_SPEC,
+    FLAG_FAMILY_LEAD_LAG,
+)
 
 # Beta cohort: ON by default. Override globally with SIFT_CARDS_V4_1=0 /
-# SIFT_DECKS_V4_2=0 / SIFT_OWNER_PRIVATE_SPEC=0.
+# SIFT_DECKS_V4_2=0 / SIFT_OWNER_PRIVATE_SPEC=0 / SIFT_FAMILY_LEAD_LAG=0.
 _DEFAULTS = {
     FLAG_CARDS_V4_1: os.environ.get("SIFT_CARDS_V4_1", "1") not in ("0", "false", "False", "off", "OFF"),
     FLAG_DECKS_V4_2: os.environ.get("SIFT_DECKS_V4_2", "1") not in ("0", "false", "False", "off", "OFF"),
     FLAG_OWNER_PRIVATE_SPEC: os.environ.get("SIFT_OWNER_PRIVATE_SPEC", "1") not in ("0", "false", "False", "off", "OFF"),
+    FLAG_FAMILY_LEAD_LAG: os.environ.get("SIFT_FAMILY_LEAD_LAG", "1") not in ("0", "false", "False", "off", "OFF"),
 }
 
 _lock = threading.Lock()
@@ -127,6 +134,14 @@ def owner_private_spec_enabled(handle: str | None = None) -> bool:
     return is_enabled(FLAG_OWNER_PRIVATE_SPEC, handle)
 
 
+def family_lead_lag_enabled(handle: str | None = None) -> bool:
+    """The single read gating `lead_lag` family runs (docs/lead-lag-family-spec.md).
+
+    Kill-switch: `SIFT_FAMILY_LEAD_LAG=0` (fail-closed when off).
+    """
+    return is_enabled(FLAG_FAMILY_LEAD_LAG, handle)
+
+
 def reset() -> None:
     """Test helper: restore defaults and clear overrides."""
     with _lock:
@@ -142,16 +157,22 @@ def reset() -> None:
             os.environ.get("SIFT_OWNER_PRIVATE_SPEC", "1")
             not in ("0", "false", "False", "off", "OFF")
         )
+        _DEFAULTS[FLAG_FAMILY_LEAD_LAG] = (
+            os.environ.get("SIFT_FAMILY_LEAD_LAG", "1")
+            not in ("0", "false", "False", "off", "OFF")
+        )
 
 
 __all__ = [
     "FLAG_CARDS_V4_1",
     "FLAG_DECKS_V4_2",
+    "FLAG_FAMILY_LEAD_LAG",
     "FLAG_OWNER_PRIVATE_SPEC",
     "cards_v4_1_enabled",
     "decks_v4_2_enabled",
     "disable_for_user",
     "enable_for_user",
+    "family_lead_lag_enabled",
     "is_enabled",
     "known_flags",
     "owner_private_spec_enabled",

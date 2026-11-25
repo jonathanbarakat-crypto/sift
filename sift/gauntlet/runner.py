@@ -16,8 +16,9 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from sift.gauntlet import config as cfg
+from sift.gauntlet import families, stats, v42
+from sift.gauntlet import lead_lag as ll
 from sift.gauntlet import s5 as s5stats
-from sift.gauntlet import stats, v42
 from sift.registry import Ledger
 
 
@@ -40,8 +41,9 @@ class StageResult:
 
 
 class GauntletRunner:
-    """Runs stages S0-S4 against a Ledger. Pure orchestration; all statistics
-    live in sift.gauntlet.stats."""
+    """Runs stages S0-S5 against a Ledger. Pure orchestration; family-specific
+    statistics live in `sift.gauntlet.stats`, `sift.gauntlet.lead_lag`, and
+    `sift.gauntlet.families`."""
 
     def __init__(self, ledger: Ledger, seed: int = 0, card_minter=None,
                  admission_epoch: int | None = None,
@@ -58,23 +60,25 @@ class GauntletRunner:
         # latest frozen epoch if any, else live raw N (raw_fallback).
         self.admission_epoch = admission_epoch
         # sift #59: panel asset return-correlation matrix (N x N) used to
-        # derive the A.3 average inter-trial correlation rho_bar for a pairs
-        # stratum (shared-asset legs correlate). None -> rho_bar from the
-        # frozen epoch row if present, else 0.0 (raw fallback).
+        # derive the A.3 average inter-trial correlation rho_bar for a stratum
+        # (shared-asset legs correlate). None -> rho_bar from the frozen epoch
+        # row if present, else 0.0 (raw fallback).
         self.panel_corr = None if panel_corr is None else np.asarray(panel_corr, float)
 
     # -- sift #59: correlation-adjusted independent N (DSR Appendix A.3) -----
 
-    def _admission_n_eff(self, scope_id: str, n_stratum: int) -> tuple[float, float, int | None, str, dict]:
-        """Resolve the DSR admission denominator for `scope_id` (sift #59).
+    def _admission_n_eff(
+        self, scope_id: str, n_stratum: int, *, family: str = "pairs"
+    ) -> tuple[float, float, int | None, str, dict]:
+        """Resolve the DSR admission denominator for `(family, scope_id)` (sift #59).
 
         Order of preference:
         1. the FROZEN stratum_epoch row for the runner's admission epoch
            (latest frozen epoch when admission_epoch is None) — identical
            trials face an identical bar within the epoch;
         2. recompute from the runner's panel_corr (A.3 average inter-trial
-           correlation; for a pairs stratum the shared-asset legs make two
-           pair-trials correlated, approximated by the mean off-diagonal of
+           correlation; for a pairs/lead_lag stratum the shared-asset legs make
+           two trials correlated, approximated by the mean off-diagonal of
            the panel correlation matrix) WITHOUT freezing — the live count
            is only a fallback when no epoch was pre-registered;
         3. raw fallback: n_eff = n_stratum, rho_bar = 0.0, method
@@ -88,7 +92,7 @@ class GauntletRunner:
         n_stratum is returned separately by callers for audit.
         """
         frozen = self.ledger.stratum_epoch_stats(
-            scope_id, self.admission_epoch)
+            scope_id, self.admission_epoch, family=family)
         if frozen is not None:
             return (frozen["n_eff"], frozen["rho_bar"], frozen["epoch"],
                     frozen["method"], frozen["detail"])
@@ -96,10 +100,12 @@ class GauntletRunner:
             rho = stats.mean_inter_trial_correlation(self.panel_corr)
             n_eff = stats.implied_independent_n(max(n_stratum, 1), rho)
             detail = {"panel_assets": int(self.panel_corr.shape[0]),
-                      "source": "panel_corr_a3", "frozen": False}
+                      "source": "panel_corr_a3", "frozen": False,
+                      "family": family}
             return (n_eff, rho, self.admission_epoch, "a3_avg_corr", detail)
         return (float(max(n_stratum, 1)), 0.0, self.admission_epoch,
-                "raw_fallback", {"reason": "no frozen epoch and no panel_corr"})
+                "raw_fallback", {"reason": "no frozen epoch and no panel_corr",
+                                 "family": family})
 
     def set_admission_epoch(self, scope_id: str, epoch: int, *,
                             panel_corr: np.ndarray | None = None,
@@ -107,9 +113,10 @@ class GauntletRunner:
                             rho_bar: float | None = None,
                             m_trials: int | None = None,
                             method: str | None = None,
-                            detail: dict | None = None) -> dict:
+                            detail: dict | None = None,
+                            family: str = "pairs") -> dict:
         """Pre-register (freeze) the evaluation epoch's admission denominator
-        for `scope_id` (sift #59): compute n_eff from the A.3 average
+        for `(family, scope_id)` (sift #59): compute n_eff from the A.3 average
         inter-trial correlation (panel_corr, or an explicitly supplied
         rho_bar/n_eff) and freeze it in stratum_epoch. Returns the frozen
         row. Re-freezing the same epoch with different values raises —
@@ -121,7 +128,7 @@ class GauntletRunner:
         count. Freezing with the epoch's final M is what makes identical
         trials face an identical bar: the counter is not read per-trial at
         evaluation time."""
-        n_stratum, _ = self.ledger.stratum_stats(scope_id)
+        n_stratum, _ = self.ledger.stratum_stats(scope_id, family=family)
         m = int(m_trials) if m_trials is not None else max(n_stratum, 1)
         if n_eff is not None and rho_bar is not None:
             neff, rho = float(n_eff), float(rho_bar)
@@ -139,11 +146,12 @@ class GauntletRunner:
             det = dict(detail or {})
             det.setdefault("panel_assets", int(np.asarray(corr).shape[0]))
         det.setdefault("m_trials_preregistered", m)
+        det.setdefault("family", family)
         self.ledger.freeze_stratum_epoch(
             scope_id, epoch, n_eff=neff, rho_bar=rho, method=meth, detail=det,
-            n_eff_raw=m)
+            n_eff_raw=m, family=family)
         self.admission_epoch = epoch
-        return self.ledger.stratum_epoch_stats(scope_id, epoch)
+        return self.ledger.stratum_epoch_stats(scope_id, epoch, family=family)
 
     # -- individual stages -------------------------------------------------
     def run_s0(self, trial_id: str, x: np.ndarray, y: np.ndarray,
@@ -204,12 +212,21 @@ class GauntletRunner:
                            p_value=r["p_perm"], seed=seed,
                            detail={"B": B, "block_len": r["block_len"]})
 
-    def run_s3(self, trial_id: str, sr_hat_per_bar: float, T: int,
-               p_value: float, scope_id: str) -> StageResult:
-        """S3 scope-stratified DSR >= 0.95 AND BH-FDR enforced at family level:
+    def run_s3(
+        self,
+        trial_id: str,
+        sr_hat_per_bar: float,
+        T: int,
+        p_value: float,
+        scope_id: str,
+        *,
+        family: str | None = None,
+        t_eff: float | None = None,
+    ) -> StageResult:
+        """S3 family+scope stratified DSR >= 0.95 AND BH-FDR enforced at family level:
         the candidate must be in the BH rejection set at q = S3_BH_Q over the
-        stratum's S2 p-values (soundness #6, path A ENFORCE — the README
-        advertises 'DSR>=0.95 + BH-FDR', so both gate).
+        (family, scope_id) stratum's S2 p-values (soundness #6, path A ENFORCE —
+        the README advertises 'DSR>=0.95 + BH-FDR', so both gate).
 
         UNITS (#1/#16): `sr_hat_per_bar` is PER-BAR (callers pass
         sr_ann/sqrt(BARS_PER_YEAR)) and the ledger's stratum V is per-bar
@@ -220,8 +237,9 @@ class GauntletRunner:
 
         What BH adds beyond S2's per-trial p<=0.05: S2 is a per-trial screen;
         BH-FDR controls the family-wise false discovery rate across the whole
-        stratum (all trials sharing this scope), so a candidate that is only
-        marginally significant in a large family (q_bh > q) is NOT admitted.
+        stratum (all trials sharing this family and scope), so a candidate that
+        is only marginally significant in a large family (q_bh > q) is NOT
+        admitted.
 
         Dependence caveat (documented, not silently assumed): BH assumes
         independence/PRDS on the p-values. Within-stratum trials share the
@@ -244,20 +262,27 @@ class GauntletRunner:
         stratum_epoch row for the pre-registered admission epoch (see
         _admission_n_eff), so identical trials face an identical bar within
         an epoch; the raw n_stratum stays recorded for audit."""
-        n_stratum, v_stratum = self.ledger.stratum_stats(scope_id)
+        if family is None:
+            row = self.ledger.con.execute(
+                "SELECT family FROM trial WHERE trial_id=?", (trial_id,)
+            ).fetchone()
+            fam = str(row["family"]) if row is not None else "pairs"
+        else:
+            fam = family
+        n_stratum, v_stratum = self.ledger.stratum_stats(scope_id, family=fam)
         n_eff, rho_bar, epoch, neff_method, neff_detail = self._admission_n_eff(
-            scope_id, n_stratum)
+            scope_id, n_stratum, family=fam)
         # the candidate's own S4 statistic enters the stratum variance
         returns = getattr(self, "_last_s4_returns", None)
         skew, kurt = stats.skew_kurt(returns) if returns is not None else (0.0, 3.0)
         d = stats.dsr(sr_hat_per_bar, T, max(n_stratum, 1), v_stratum,
-                      skew=skew, kurt=kurt, n_eff=n_eff)
-        # BH-FDR over the stratum's S2 p-values (family level, same scope)
+                      skew=skew, kurt=kurt, n_eff=n_eff, t_eff=t_eff)
+        # BH-FDR strictly over the (family, scope_id) stratum's S2 p-values
         rows = self.ledger.con.execute(
             "SELECT sr.p_value FROM stage_result sr JOIN trial t"
-            " ON sr.trial_id = t.trial_id WHERE t.scope_id=? AND sr.stage='s2'"
-            " AND sr.p_value IS NOT NULL",
-            (scope_id,),
+            " ON sr.trial_id = t.trial_id WHERE t.family=? AND t.scope_id=?"
+            " AND sr.stage='s2' AND sr.p_value IS NOT NULL",
+            (fam, scope_id),
         ).fetchall()
         pvals = [r[0] for r in rows] + [p_value]
         bh = stats.bh_fdr(np.array(pvals), q=cfg.S3_BH_Q)
@@ -273,12 +298,14 @@ class GauntletRunner:
                            p_value=p_value, n_stratum=n_stratum,
                            v_stratum=d["v_stratum"], dsr=d["dsr"], q_bh=q_bh,
                            n_eff=d["n_eff"], rho_bar=rho_bar, epoch=epoch,
-                           detail={"sr_star": d["sr_star"], "sr_hat": d["sr_hat"],
+                           detail={"family": fam,
+                                   "sr_star": d["sr_star"], "sr_hat": d["sr_hat"],
                                    "n_eff": d["n_eff"], "rho_bar": rho_bar,
                                    "neff_method": neff_method,
                                    "neff_detail": neff_detail,
                                    "admission_epoch": epoch,
                                    "skew": skew, "kurt": kurt,
+                                   "t_eff": t_eff,
                                    "admission_label": (
                                        "admission evidence at mint-time N "
                                        "(DSR gate only — never a tier input, "
@@ -295,14 +322,21 @@ class GauntletRunner:
                                        "conservative fallback under "
                                        "arbitrary dependence")})
 
-    def run_s4(self, trial_id: str, net_returns: np.ndarray, scope_id: str,
-               p_perm: float | None = None) -> StageResult:
+    def run_s4(
+        self,
+        trial_id: str,
+        net_returns: np.ndarray,
+        scope_id: str,
+        p_perm: float | None = None,
+        *,
+        use_hac: bool = False,
+    ) -> StageResult:
         """S4 cost-aware walk-forward — v4.2 §2: a SCORED stage, not a kill.
         The stage row records pass|fail against the pre-registered bar
-        (net SR > S4_NET_SR_MIN, |t_net| >= tau_cal(scope), MinTRL <= T) AND
-        the full score (net SR, t_net, MinTRL, T) in the stage detail either
-        way; in v4.2 the bar defines the gold/platinum evidence tiers, not a
-        kill line — S0-S2 passers survive S4 regardless.
+        (net SR > S4_NET_SR_MIN, |t_net| >= tau_cal(scope), MinTRL <= T or
+        MinTRL <= T_eff when HAC is active) AND the full score in the stage
+        detail either way; in v4.2 the bar defines the gold/platinum evidence
+        tiers, not a kill line — S0-S2 passers survive S4 regardless.
 
         UNITS (#1): the s4 stage row stores statistic=sr_ann (ANNUALIZED);
         it stays annualized because every reader of the column (minting tier
@@ -311,22 +345,45 @@ class GauntletRunner:
         r = np.asarray(net_returns, float)
         r = r[np.isfinite(r)]
         T = r.size
-        sr_ann = stats.sharpe_ratio(r)
-        t_net = stats.t_stat_sharpe(r)
+        sr_ann = stats.sharpe_ratio(r) if T >= 2 else 0.0
+        if use_hac:
+            hac = stats.t_stat_sharpe_hac(r)
+            t_net = float(hac["t"])
+            t_eff = float(hac["t_eff"])
+            hac_lag = int(hac["lag"])
+        else:
+            t_net = stats.t_stat_sharpe(r)
+            t_eff = float(T)
+            hac_lag = 0
         skew, kurt = stats.skew_kurt(r)
         sr_bar = sr_ann / np.sqrt(cfg.BARS_PER_YEAR)
         min_trl = stats.min_trl(sr_bar, skew, kurt, alpha=0.05)
         tau = cfg.tau_cal(scope_id)
-        passed = (sr_ann > cfg.S4_NET_SR_MIN) and (abs(t_net) >= tau) and (min_trl <= T)
+        sample_cap = t_eff if use_hac else T
+        passed = (
+            (sr_ann > cfg.S4_NET_SR_MIN)
+            and (abs(t_net) >= tau)
+            and (min_trl <= sample_cap)
+        )
         self._last_s4_returns = r
+        detail = {
+            "t_net": t_net,
+            "sr_ann": sr_ann,
+            "min_trl": min_trl,
+            "T": T,
+            "skew": skew,
+            "kurt": kurt,
+            "tau_cal": tau,
+            "s4_bar_met": bool(passed),
+        }
+        if use_hac:
+            detail["t_eff"] = t_eff
+            detail["hac_lag"] = hac_lag
+            detail["use_hac"] = True
         return StageResult("s4", "pass" if passed else "fail",
                            statistic=sr_ann, threshold=tau,
                            p_value=p_perm,
-                           detail={"t_net": t_net, "sr_ann": sr_ann,
-                                   "min_trl": min_trl, "T": T,
-                                   "skew": skew, "kurt": kurt,
-                                   "tau_cal": tau,
-                                   "s4_bar_met": bool(passed)})
+                           detail=detail)
 
     # -- S5: registry-depth validation (automatic, never opt-in) ------------
     def run_s5(
@@ -340,6 +397,7 @@ class GauntletRunner:
         s2_B: int = cfg.S2_B,
         seed: int | None = None,
         scope_id: str = "registry_depth",
+        family: str | None = None,
     ) -> StageResult:
         """S5 registry-depth validation: re-runs S2-S4 statistics at the
         `registry_depth` scope (full window) on every S0-S4 survivor.
@@ -362,6 +420,13 @@ class GauntletRunner:
         Pass -> validated-green; fail -> on-watch-amber (v3 §8.4). Both are
         recorded as the trial's s5 stage row with scope registry_depth.
         """
+        if family is None:
+            row = self.ledger.con.execute(
+                "SELECT family FROM trial WHERE trial_id=?", (trial_id,)
+            ).fetchone()
+            fam = str(row["family"]) if row is not None else "pairs"
+        else:
+            fam = family
         seed = self.seed if seed is None else seed
         prices = np.asarray(full_prices, float)
         mask = s5stats.delist_mask(prices, delist_idx)
@@ -419,9 +484,9 @@ class GauntletRunner:
         t_net = stats.t_stat_sharpe(net) if net.size >= 2 else 0.0
         T = int(net.size)
         sr_bar = sr_ann / math.sqrt(cfg.BARS_PER_YEAR) if net.size >= 2 else 0.0
-        n_stratum, v_stratum = self.ledger.stratum_stats(scope_id)
+        n_stratum, v_stratum = self.ledger.stratum_stats(scope_id, family=fam)
         n_eff, rho_bar, epoch, neff_method, neff_detail = self._admission_n_eff(
-            scope_id, n_stratum)
+            scope_id, n_stratum, family=fam)
         skew, kurt = stats.skew_kurt(net) if net.size >= 4 else (0.0, 3.0)
         d = stats.dsr(sr_bar, max(T, 2), max(n_stratum, 1), v_stratum,
                       skew=skew, kurt=kurt, n_eff=n_eff)
@@ -444,7 +509,8 @@ class GauntletRunner:
             p_value=p_perm, n_stratum=n_stratum,
             v_stratum=d["v_stratum"], dsr=d["dsr"], seed=seed,
             n_eff=d["n_eff"], rho_bar=rho_bar, epoch=epoch,
-            detail={"t_net": t_net, "sr_ann": sr_ann, "T": T,
+            detail={"family": fam,
+                    "t_net": t_net, "sr_ann": sr_ann, "T": T,
                     "n_eff": d["n_eff"], "rho_bar": rho_bar,
                     "neff_method": neff_method, "neff_detail": neff_detail,
                     "admission_epoch": epoch,
@@ -458,6 +524,169 @@ class GauntletRunner:
                     "checks": verdict["checks"],
                     "scope": scope_id, "survivor_class": (
                         "validated-green" if passed else "on-watch-amber")},
+        )
+
+    def run_s5_lead_lag(
+        self,
+        trial_id: str,
+        *,
+        full_prices: np.ndarray,
+        full_market_returns: np.ndarray | None = None,
+        lag_bars: int = cfg.LEAD_LAG_DEFAULT_LAG,
+        hold_bars: int | None = None,
+        formation: int = cfg.LEAD_LAG_DEFAULT_FORMATION,
+        open_z: float = cfg.LEAD_LAG_DEFAULT_OPEN_Z,
+        step: int = cfg.LEAD_LAG_STEP,
+        delist_idx: np.ndarray | None = None,
+        s2_B: int = cfg.S2_B,
+        seed: int | None = None,
+        scope_id: str = "registry_depth",
+        half_spreads: str | float | np.ndarray = "roll",
+    ) -> StageResult:
+        """S5 full-depth validation for `lead_lag` (docs/lead-lag-family-spec.md §3 S5):
+
+        Delist-masked, HAC mandatory (`t_stat_sharpe_hac` + `T_eff`), CSCV (S=16)
+        over the pre-registered 9-point `s5_variant_grid_lead_lag(lag_bars)`, and
+        DSR stratified strictly within `("lead_lag", scope_id)`.
+        """
+        fam = "lead_lag"
+        W = int(lag_bars)
+        H = W if hold_bars is None else int(hold_bars)
+        seed = self.seed if seed is None else seed
+        prices = np.asarray(full_prices, float)
+        mask = s5stats.delist_mask(prices, delist_idx)
+        T_use = min(prices.shape[0], max(s5stats.leading_valid_window(mask), 2))
+        window = prices[:T_use]
+        rm_win = (
+            None
+            if full_market_returns is None
+            else np.asarray(full_market_returns, float)[:T_use]
+        )
+        # S2 at full depth on delist-safe leading valid window
+        r_valid = s5stats.valid_returns(window, None, mask[:T_use])
+        ra_tilde = ll.demean_returns(r_valid[:, 0], rm_win)
+        rb_tilde = ll.demean_returns(r_valid[:, 1], rm_win)
+        s2 = ll.s2_lead_lag_permutation(
+            ra_tilde, rb_tilde, lag_bars=W, hold_bars=H, B=s2_B, seed=seed
+        )
+        p_perm = float(s2["p_perm"])
+
+        # S4 walk-forward at full depth on delist-safe leading window
+        wf = ll.lead_lag_walk_forward(
+            window,
+            market_returns=rm_win,
+            lag_bars=W,
+            hold_bars=H,
+            formation=formation,
+            open_z=open_z,
+            step=step,
+            half_spreads=half_spreads,
+        )
+        net = wf["net"]
+        net = net[np.isfinite(net)]
+
+        # CSCV (S=16) over the pre-registered 9-point S5_VARIANT_GRID_LEAD_LAG
+        grid = cfg.s5_variant_grid_lead_lag(W)
+        cols = []
+        for v in grid:
+            wv = ll.lead_lag_walk_forward(
+                window,
+                market_returns=rm_win,
+                lag_bars=int(v["lag_bars"]),
+                hold_bars=int(v["hold_bars"]),
+                formation=int(v["formation"]),
+                open_z=float(v["open_z"]),
+                step=int(v["step"]),
+                half_spreads=half_spreads,
+            )
+            nv = wv["net"]
+            cols.append(
+                nv[np.isfinite(nv)] if nv.size == T_use else np.full(T_use, np.nan)
+            )
+        R = np.full((T_use, len(cols)), np.nan)
+        for j, c in enumerate(cols):
+            k = min(T_use, c.size)
+            R[:k, j] = c[:k]
+        pbo = stats.cscv_pbo(R, S=cfg.S5_CSCV_S, seed=seed)
+        pbo_grid_digest = cfg.s5_variant_grid_lead_lag_digest(W)
+
+        sr_ann = stats.sharpe_ratio(net) if net.size >= 2 else 0.0
+        hac = stats.t_stat_sharpe_hac(net) if net.size >= 2 else {"t": 0.0, "t_eff": 0.0}
+        t_net = float(hac["t"])
+        t_eff = float(hac["t_eff"])
+        T = int(net.size)
+        sr_bar = sr_ann / math.sqrt(cfg.BARS_PER_YEAR) if net.size >= 2 else 0.0
+        n_stratum, v_stratum = self.ledger.stratum_stats(scope_id, family=fam)
+        n_eff, rho_bar, epoch, neff_method, neff_detail = self._admission_n_eff(
+            scope_id, n_stratum, family=fam
+        )
+        skew, kurt = stats.skew_kurt(net) if net.size >= 4 else (0.0, 3.0)
+        d = stats.dsr(
+            sr_bar,
+            max(T, 2),
+            max(n_stratum, 1),
+            v_stratum,
+            skew=skew,
+            kurt=kurt,
+            n_eff=n_eff,
+            t_eff=t_eff if t_eff > 1.0 else None,
+        )
+        verdict = s5stats.s5_full_depth_verdict(
+            net,
+            t_hurdle=cfg.S4_T_NET_FULL,
+            net_sr_min=cfg.S4_NET_SR_MIN,
+            min_trl_max=cfg.scope_T(scope_id),
+            p_perm=p_perm,
+            p_perm_max=cfg.S2_P_MAX,
+            dsr=d["dsr"],
+            dsr_min=cfg.S3_DSR_MIN,
+            pbo=pbo,
+            pbo_max=cfg.S4_PBO_MAX,
+            use_hac=True,
+        )
+        passed = bool(verdict["pass"])
+        return StageResult(
+            "s5",
+            "pass" if passed else "fail",
+            statistic=t_net,
+            threshold=cfg.S4_T_NET_FULL,
+            p_value=p_perm,
+            n_stratum=n_stratum,
+            v_stratum=d["v_stratum"],
+            dsr=d["dsr"],
+            seed=seed,
+            n_eff=d["n_eff"],
+            rho_bar=rho_bar,
+            epoch=epoch,
+            detail={
+                "family": fam,
+                "lag_bars": W,
+                "hold_bars": H,
+                "t_net": t_net,
+                "t_eff": t_eff,
+                "use_hac": True,
+                "sr_ann": sr_ann,
+                "T": T,
+                "n_eff": d["n_eff"],
+                "rho_bar": rho_bar,
+                "neff_method": neff_method,
+                "neff_detail": neff_detail,
+                "admission_epoch": epoch,
+                "min_trl": verdict["min_trl"],
+                "pbo": pbo,
+                "pbo_n_configs": len(grid),
+                "pbo_grid_digest": pbo_grid_digest,
+                "pbo_S": cfg.S5_CSCV_S,
+                "p_perm": p_perm,
+                "block_len": s2["block_len"],
+                "T_window_used": T_use,
+                "n_s2_obs": int(s2["n"]),
+                "checks": verdict["checks"],
+                "scope": scope_id,
+                "survivor_class": (
+                    "validated-green" if passed else "on-watch-amber"
+                ),
+            },
         )
 
 
@@ -510,7 +739,8 @@ class GauntletRunner:
         the engine on the locked holdout) is passed to the card minter so it
         is persisted on the minted card; it is also surfaced on the verdict
         dict as `holdout_baseline`. None when the run had no holdout."""
-        self.ledger.get(trial_id)
+        trial = self.ledger.get(trial_id)
+        fam = trial.family
         if fixture_x is None or fixture_y is None:
             raise ValueError("S0 requires fixture_x/fixture_y")
         if excess_returns is None:
@@ -550,11 +780,13 @@ class GauntletRunner:
         net = wf["net"]
         s4 = self.run_s4(trial_id, net, scope_id, p_perm=s2.p_value)
         _record_and_emit(s4)
-        self.ledger.update_var_stat(scope_id)  # refresh N and V from ledger
+        self.ledger.update_var_stat(scope_id, family=fam)  # refresh N and V from ledger
         s4_bar_met = v42.s4_passed(s4.detail, scope_id)
 
         sr_bar = (s4.detail["sr_ann"] / np.sqrt(cfg.BARS_PER_YEAR))
-        s3 = self.run_s3(trial_id, sr_bar, s4.detail["T"], s2.p_value, scope_id)
+        s3 = self.run_s3(
+            trial_id, sr_bar, s4.detail["T"], s2.p_value, scope_id, family=fam
+        )
         _record_and_emit(s3)
         s3_pass = s3.status == "pass"
         # v4.2 §2-§3: an S0-S2 passer that misses the S4 or S3 bar is NOT
@@ -589,9 +821,10 @@ class GauntletRunner:
                 delist_idx=delist_idx,
                 s2_B=s2_B,
                 seed=self.seed,
+                family=fam,
             )
             _record_and_emit(s5)
-            self.ledger.update_var_stat("registry_depth")
+            self.ledger.update_var_stat("registry_depth", family=fam)
             cls = s5.detail["survivor_class"]
             self.ledger.decide(trial_id, "survivor", cls)
             card_id = self._maybe_mint_card(trial_id, "survivor", cls,
@@ -614,6 +847,276 @@ class GauntletRunner:
                 "s4_score": {k: s4.detail.get(k) for k in
                              ("sr_ann", "t_net", "min_trl", "T", "tau_cal",
                               "s4_bar_met")}}
+
+    def run_lead_lag_gauntlet(
+        self,
+        trial_id: str,
+        *,
+        prices: np.ndarray,
+        market_returns: np.ndarray | None = None,
+        lag_bars: int = cfg.LEAD_LAG_DEFAULT_LAG,
+        hold_bars: int | None = None,
+        formation: int = cfg.LEAD_LAG_DEFAULT_FORMATION,
+        open_z: float = cfg.LEAD_LAG_DEFAULT_OPEN_Z,
+        step: int = cfg.LEAD_LAG_STEP,
+        scope_id: str = "free_5y_top1k",
+        s2_B: int = cfg.S2_B,
+        full_prices: np.ndarray | None = None,
+        full_market_returns: np.ndarray | None = None,
+        delist_idx: np.ndarray | None = None,
+        gamma_true: float | None = None,
+        holdout_baseline: dict | None = None,
+        half_spreads: str | float | np.ndarray = "roll",
+        on_stage=None,
+    ) -> dict:
+        """Execute S0 -> S1 -> S2 -> S4 -> S3 -> S5 for a registered `lead_lag`
+        trial (`docs/lead-lag-family-spec.md`).
+
+        * Strict `(family="lead_lag", scope_id)` stratum isolation (never pools
+          into `pairs` strata).
+        * Mandatory HAC standard errors on S1/S2 (`gamma_hat`) and S4/S5
+          (`t_stat_sharpe_hac` + `T_eff`).
+        * Market-neutralized follower return gating in S4/S5 with Roll
+          half-spread + 1.0 bps market-hedge leg floor; unhedged diagnostic
+          recorded in `s4.detail`.
+        * Delist-masked S5 automatic when `full_prices` is supplied.
+        """
+        trial = self.ledger.get(trial_id)
+        if trial.family != "lead_lag":
+            raise ValueError(
+                f"run_lead_lag_gauntlet requires a 'lead_lag' trial, got {trial.family!r}"
+            )
+        adapter = families.get_family("lead_lag")
+        W = int(lag_bars)
+        H = W if hold_bars is None else int(hold_bars)
+        P = np.asarray(prices, float)
+        mask = s5stats.delist_mask(P, delist_idx)
+        T_valid = min(P.shape[0], max(s5stats.leading_valid_window(mask), 0))
+        P_clean = P[:T_valid] if T_valid >= 2 else P
+        rm_clean = (
+            None
+            if market_returns is None
+            else np.asarray(market_returns, float)[: P_clean.shape[0]]
+        )
+
+        results: list[StageResult] = []
+
+        def _record_and_emit(sr: StageResult) -> None:
+            self.record(trial_id, sr)
+            results.append(sr)
+            if on_stage is not None:
+                with contextlib.suppress(Exception):
+                    on_stage(sr)
+
+        # S0: real-data sanity + optional planted fixture calibration
+        s0_raw = adapter.s0_calibrate(
+            prices=P,
+            market_returns=market_returns,
+            lag_bars=W,
+            hold_bars=H,
+            formation=formation,
+            step=step,
+            delist_idx=delist_idx,
+            gamma_true=gamma_true,
+        )
+        s0 = StageResult(
+            "s0",
+            "pass" if s0_raw["passed"] else "fail",
+            statistic=s0_raw["statistic"],
+            threshold=s0_raw["threshold"],
+            detail=s0_raw["detail"],
+        )
+        _record_and_emit(s0)
+        if s0.status == "fail":
+            return self._verdict(trial_id, results, killed_at="s0")
+
+        # Demeaned pre-delist returns for S1 and S2
+        r_valid = s5stats.valid_returns(P_clean, None, mask[: P_clean.shape[0]])
+        ra_tilde = ll.demean_returns(r_valid[:, 0], rm_clean)
+        rb_tilde = ll.demean_returns(r_valid[:, 1], rm_clean)
+
+        # S1: HAC |t_HAC(gamma_hat)| >= 2.0
+        s1_raw = adapter.s1_screen(
+            r_a_tilde=ra_tilde, r_b_tilde=rb_tilde, lag_bars=W, hold_bars=H
+        )
+        s1 = StageResult(
+            "s1",
+            "pass" if s1_raw["pass"] else "fail",
+            statistic=s1_raw["abs_t"],
+            threshold=cfg.S1_THRESHOLD,
+            detail={
+                "abs_t": s1_raw["abs_t"],
+                "n": s1_raw["n"],
+                "hac_lag": s1_raw["lag"],
+                "lag_bars": W,
+                "hold_bars": H,
+            },
+        )
+        _record_and_emit(s1)
+        if s1.status == "fail":
+            return self._verdict(trial_id, results, killed_at="s1")
+
+        # S2: block-permutation null permuting pre-whitened leader x_t
+        s2_raw = adapter.s2_null(
+            r_a_tilde=ra_tilde,
+            r_b_tilde=rb_tilde,
+            lag_bars=W,
+            hold_bars=H,
+            B=s2_B,
+            seed=self.seed,
+        )
+        s2_pass = float(s2_raw["p_perm"]) <= cfg.S2_P_MAX
+        s2 = StageResult(
+            "s2",
+            "pass" if s2_pass else "fail",
+            statistic=s2_raw["observed"],
+            threshold=cfg.S2_P_MAX,
+            p_value=s2_raw["p_perm"],
+            seed=self.seed,
+            detail={
+                "B": int(s2_B),
+                "block_len": s2_raw["block_len"],
+                "n": s2_raw["n"],
+                "hac_lag": s2_raw["lag"],
+            },
+        )
+        _record_and_emit(s2)
+        if s2.status == "fail":
+            return self._verdict(trial_id, results, killed_at="s2")
+
+        # S4 (scored, HAC mandatory, market-neutralized gating)
+        wf = adapter.s4_walk_forward(
+            P_clean,
+            market_returns=rm_clean,
+            lag_bars=W,
+            hold_bars=H,
+            formation=formation,
+            open_z=open_z,
+            step=step,
+            half_spreads=half_spreads,
+        )
+        net = wf["net"]
+        s4 = self.run_s4(
+            trial_id, net, scope_id, p_perm=s2.p_value, use_hac=True
+        )
+        # Record unhedged diagnostic alongside market-neutralized primary score
+        raw_net = wf["raw_net"]
+        raw_fin = raw_net[np.isfinite(raw_net)]
+        s4.detail["unhedged_sr_ann"] = (
+            stats.sharpe_ratio(raw_fin) if raw_fin.size >= 2 else 0.0
+        )
+        s4.detail["unhedged_t_net"] = (
+            float(stats.t_stat_sharpe_hac(raw_fin)["t"])
+            if raw_fin.size >= 2
+            else 0.0
+        )
+        s4.detail["current_abs_z"] = wf["current_abs_z"]
+        s4.detail["lag_bars"] = W
+        s4.detail["hold_bars"] = H
+        _record_and_emit(s4)
+        self.ledger.update_var_stat(scope_id, family="lead_lag")
+        s4_bar_met = v42.s4_passed(s4.detail, scope_id)
+
+        # S3: strictly isolated ("lead_lag", scope_id) stratum
+        sr_bar = s4.detail["sr_ann"] / np.sqrt(cfg.BARS_PER_YEAR)
+        t_eff = s4.detail.get("t_eff")
+        s3 = self.run_s3(
+            trial_id,
+            sr_bar,
+            s4.detail["T"],
+            s2.p_value,
+            scope_id,
+            family="lead_lag",
+            t_eff=t_eff if (t_eff is not None and t_eff > 1.0) else None,
+        )
+        _record_and_emit(s3)
+        s3_pass = s3.status == "pass"
+
+        s4_score = {
+            k: s4.detail.get(k)
+            for k in (
+                "sr_ann",
+                "t_net",
+                "t_eff",
+                "min_trl",
+                "T",
+                "tau_cal",
+                "s4_bar_met",
+                "use_hac",
+            )
+        }
+
+        if not s4_bar_met or not s3_pass:
+            cls = v42.survivor_class_for(
+                s4_pass=s4_bar_met, s3_pass=s3_pass, s5_pass=None
+            )
+            self.ledger.decide(trial_id, "survivor", cls)
+            card_id = self._maybe_mint_card(
+                trial_id, "survivor", cls, holdout_baseline=holdout_baseline
+            )
+            return {
+                "trial_id": trial_id,
+                "verdict": "survivor",
+                "survivor_class": cls,
+                "stages": results,
+                "killed_at": None,
+                "card_id": card_id,
+                "holdout_baseline": holdout_baseline,
+                "current_abs_z": wf["current_abs_z"],
+                "s4_score": s4_score,
+            }
+
+        # Automatic S5 at registry_depth when full_prices is provided
+        if full_prices is not None:
+            s5 = self.run_s5_lead_lag(
+                trial_id,
+                full_prices=full_prices,
+                full_market_returns=full_market_returns,
+                lag_bars=W,
+                hold_bars=H,
+                formation=formation,
+                open_z=open_z,
+                step=step,
+                delist_idx=delist_idx,
+                s2_B=s2_B,
+                seed=self.seed,
+                half_spreads=half_spreads,
+            )
+            _record_and_emit(s5)
+            self.ledger.update_var_stat("registry_depth", family="lead_lag")
+            cls = s5.detail["survivor_class"]
+            self.ledger.decide(trial_id, "survivor", cls)
+            card_id = self._maybe_mint_card(
+                trial_id, "survivor", cls, holdout_baseline=holdout_baseline
+            )
+            return {
+                "trial_id": trial_id,
+                "verdict": "survivor",
+                "survivor_class": cls,
+                "stages": results,
+                "killed_at": None,
+                "s5": s5.detail,
+                "card_id": card_id,
+                "holdout_baseline": holdout_baseline,
+                "current_abs_z": wf["current_abs_z"],
+                "s4_score": s4_score,
+            }
+
+        self.ledger.decide(trial_id, "survivor", "on-watch-amber")
+        card_id = self._maybe_mint_card(
+            trial_id, "survivor", "on-watch-amber", holdout_baseline=holdout_baseline
+        )
+        return {
+            "trial_id": trial_id,
+            "verdict": "survivor",
+            "survivor_class": "on-watch-amber",
+            "stages": results,
+            "killed_at": None,
+            "card_id": card_id,
+            "holdout_baseline": holdout_baseline,
+            "current_abs_z": wf["current_abs_z"],
+            "s4_score": s4_score,
+        }
 
     def _maybe_mint_card(self, trial_id: str, verdict: str, survivor_class: str,
                          holdout_baseline: dict | None = None) -> str | None:

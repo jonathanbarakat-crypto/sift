@@ -232,7 +232,9 @@ class CardFaceRenderer:
         # family -> coarse sector aggregate label (aggregates, not names)
         fam = card.family.lower()
         bucket = "diversified_multi_sector"
-        if "pairs" in fam:
+        if "lead" in fam or "lag" in fam:
+            bucket = "directed_lead_lag_aggregate"
+        elif "pairs" in fam:
             bucket = "cross_sectional_pairs_aggregate"
         elif "sector" in fam:
             bucket = "sector_neutral_aggregate"
@@ -245,16 +247,19 @@ class CardFaceRenderer:
     def _family_specifics(self, card: Card, s0: dict) -> dict:
         """Per-family anonymized specifics (mechanics 4): lead-lag lag /
         hedge ratio + half-life — numeric survival facts from the S0 stage
-        row only. No symbols, no directions, no P&L."""
+        row only. No symbols, no directions, no slopes (gamma_hat), no P&L."""
         fam = card.family.lower()
         spec: dict = {}
         if "lead" in fam or "lag" in fam:
             lag = s0.get("lag_days")
+            if lag is None and s0.get("statistic") is not None:
+                val = int(round(float(s0["statistic"])))
+                if val > 0:
+                    lag = val
             if lag is not None:
-                spec["lag_days"] = lag
-            xcorr = s0.get("peak_xcorr")
-            if xcorr is not None:
-                spec["peak_xcorr"] = xcorr
+                spec["lag_bars"] = int(lag)
+                spec["hold_bars"] = int(lag)
+            spec["directed"] = True
         else:
             # pairs / hedge / mean-reversion: hedge ratio + half-life
             beta = s0.get("statistic")          # S0 hedge-ratio estimate

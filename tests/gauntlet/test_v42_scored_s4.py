@@ -86,7 +86,7 @@ def _run(ledger, cards, *, prices_scope, prices_full=None, handle="alice",
          seed=7, s2_B=200, scope_id="free_5y_top1k", n_null=0,
          half_life_true=1.9, with_minter=True):
     for i in range(n_null):
-        ledger.register("null", scope_id, {"i": i, "h": handle, "s": seed}, "v1")
+        ledger.register("pairs", scope_id, {"null_i": i, "h": handle, "s": seed}, "v1")
     x, y = prices_scope[:, 0], prices_scope[:, 1]
     sr = _spread_returns(prices_scope)
     excess = stats.pairs_strategy_returns(prices_scope)["gross"][60:]

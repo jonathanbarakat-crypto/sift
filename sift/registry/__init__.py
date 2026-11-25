@@ -88,23 +88,27 @@ CREATE TABLE IF NOT EXISTS stage_result (
 );
 
 CREATE TABLE IF NOT EXISTS stratum_stats (
-    scope_id    TEXT PRIMARY KEY,
+    family      TEXT NOT NULL DEFAULT 'pairs',
+    scope_id    TEXT NOT NULL,
     n_trials    INTEGER NOT NULL,
     var_stat    REAL NOT NULL,  -- PER-BAR SR^2 units (#1): sample variance of the
                                 -- stratum's s4 statistics converted to per-bar
                                 -- (statistic / sqrt(BARS_PER_YEAR)) BEFORE the variance
-    updated_at  REAL NOT NULL
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (family, scope_id)
 );
 
--- sift #59: epoch-frozen admission denominators. At the pre-registered
--- evaluation epoch boundary the stratum's RAW N and the correlation-
--- adjusted independent N_eff (DSR Appendix A.3) are frozen and cached
--- here; run_s3/run_s5 read the FROZEN rows so identical trials face an
--- identical bar within the epoch regardless of registration order.
+-- sift #59 + lead_lag spec §5: epoch-frozen admission denominators keyed by
+-- (family, scope_id, epoch). At the pre-registered evaluation epoch boundary
+-- the stratum's RAW N and the correlation-adjusted independent N_eff (DSR
+-- Appendix A.3) are frozen and cached here; run_s3/run_s5 read the FROZEN
+-- rows so identical trials face an identical bar within the epoch regardless
+-- of registration order and families never pool into each other's stratum.
 -- n_eff_raw counts registered trials; n_eff is the A.3-adjusted count
 -- (float); both are recorded for audit. A new epoch = new row (epoch is
 -- part of the key); strata never re-freeze retroactively.
 CREATE TABLE IF NOT EXISTS stratum_epoch (
+    family      TEXT NOT NULL DEFAULT 'pairs',
     scope_id    TEXT NOT NULL,
     epoch       INTEGER NOT NULL,
     n_eff_raw   INTEGER NOT NULL,   -- raw registered-trial count at freeze
@@ -113,11 +117,12 @@ CREATE TABLE IF NOT EXISTS stratum_epoch (
     method      TEXT NOT NULL,       -- 'a3_avg_corr' | 'asset_cluster_pairs' | 'raw_fallback'
     detail_json TEXT NOT NULL,       -- canonical JSON: eigenspectrum / cluster detail
     frozen_at   REAL NOT NULL,
-    PRIMARY KEY (scope_id, epoch)
+    PRIMARY KEY (family, scope_id, epoch)
 );
 
 CREATE INDEX IF NOT EXISTS idx_stage_stage ON stage_result(stage);
 CREATE INDEX IF NOT EXISTS idx_trial_scope ON trial(scope_id);
+CREATE INDEX IF NOT EXISTS idx_trial_family_scope ON trial(family, scope_id);
 
 CREATE TABLE IF NOT EXISTS ledger_event (
     event_id     INTEGER PRIMARY KEY AUTOINCREMENT,   -- append-only; rows never deleted
@@ -200,6 +205,57 @@ class Ledger:
         if "beta" not in trial_cols:
             self.con.execute(
                 "ALTER TABLE trial ADD COLUMN beta INTEGER NOT NULL DEFAULT 0")
+        # Multi-family stratum isolation (docs/lead-lag-family-spec.md §5):
+        # legacy ledgers keyed stratum_stats by (scope_id) and stratum_epoch by
+        # (scope_id, epoch). Recreate with PRIMARY KEY (family, scope_id[, epoch])
+        # and migrate all existing rows under family='pairs' without dropping data.
+        ss_cols = {r[1] for r in self.con.execute(
+            "PRAGMA table_info(stratum_stats)").fetchall()}
+        if ss_cols and "family" not in ss_cols:
+            self.con.execute(
+                "ALTER TABLE stratum_stats RENAME TO _stratum_stats_legacy")
+            self.con.execute(
+                "CREATE TABLE stratum_stats ("
+                " family TEXT NOT NULL DEFAULT 'pairs',"
+                " scope_id TEXT NOT NULL,"
+                " n_trials INTEGER NOT NULL,"
+                " var_stat REAL NOT NULL,"
+                " updated_at REAL NOT NULL,"
+                " PRIMARY KEY (family, scope_id))"
+            )
+            self.con.execute(
+                "INSERT INTO stratum_stats (family, scope_id, n_trials, var_stat, updated_at)"
+                " SELECT 'pairs', scope_id, n_trials, var_stat, updated_at"
+                " FROM _stratum_stats_legacy"
+            )
+            self.con.execute("DROP TABLE _stratum_stats_legacy")
+        se_cols = {r[1] for r in self.con.execute(
+            "PRAGMA table_info(stratum_epoch)").fetchall()}
+        if se_cols and "family" not in se_cols:
+            self.con.execute(
+                "ALTER TABLE stratum_epoch RENAME TO _stratum_epoch_legacy")
+            self.con.execute(
+                "CREATE TABLE stratum_epoch ("
+                " family TEXT NOT NULL DEFAULT 'pairs',"
+                " scope_id TEXT NOT NULL,"
+                " epoch INTEGER NOT NULL,"
+                " n_eff_raw INTEGER NOT NULL,"
+                " n_eff REAL NOT NULL,"
+                " rho_bar REAL NOT NULL,"
+                " method TEXT NOT NULL,"
+                " detail_json TEXT NOT NULL,"
+                " frozen_at REAL NOT NULL,"
+                " PRIMARY KEY (family, scope_id, epoch))"
+            )
+            self.con.execute(
+                "INSERT INTO stratum_epoch"
+                " (family, scope_id, epoch, n_eff_raw, n_eff, rho_bar,"
+                "  method, detail_json, frozen_at)"
+                " SELECT 'pairs', scope_id, epoch, n_eff_raw, n_eff, rho_bar,"
+                "  method, detail_json, frozen_at"
+                " FROM _stratum_epoch_legacy"
+            )
+            self.con.execute("DROP TABLE _stratum_epoch_legacy")
 
     def __enter__(self) -> "Ledger":
         return self
@@ -256,7 +312,7 @@ class Ledger:
                 " VALUES (?,?, 'pending', ?)",
                 (trial_id, s, now),
             )
-        self._bump_stratum(scope_id, now)
+        self._bump_stratum(scope_id, now, family=family)
         db.maybe_commit(self.con)
         return self.get(trial_id)
 
@@ -385,31 +441,35 @@ class Ledger:
         )
         db.maybe_commit(self.con)
 
-    # -- scope-stratified denominators -------------------------------------
-    def _bump_stratum(self, scope_id: str, now: float) -> None:
-        """N counts every registered trial in the stratum, including kills.
-        var_stat is the sample variance of the stratum's recorded S4
-        statistics CONVERTED TO PER-BAR units (divided by sqrt(BARS_PER_YEAR))
-        before the variance — #1: the s4 row stores ANNUALIZED sr_ann, and
-        dsr() consumes a per-bar sr_hat, so V must be per-bar SR^2 (the deck
-        path does the same in decks/service.py::_deck_stratum_variance)."""
+    # -- family + scope stratified denominators ----------------------------
+    def _bump_stratum(self, scope_id: str, now: float, *, family: str = "pairs") -> None:
+        """N counts every registered trial in the (family, scope_id) stratum,
+        including kills. var_stat is the sample variance of the stratum's
+        recorded S4 statistics CONVERTED TO PER-BAR units (divided by
+        sqrt(BARS_PER_YEAR)) before the variance — #1: the s4 row stores
+        ANNUALIZED sr_ann, and dsr() consumes a per-bar sr_hat, so V must be
+        per-bar SR^2 (the deck path does the same in
+        decks/service.py::_deck_stratum_variance)."""
         n = self.con.execute(
-            "SELECT COUNT(*) FROM trial WHERE scope_id=?", (scope_id,)
+            "SELECT COUNT(*) FROM trial WHERE family=? AND scope_id=?",
+            (family, scope_id),
         ).fetchone()[0]
         row = self.con.execute(
-            "SELECT var_stat FROM stratum_stats WHERE scope_id=?", (scope_id,)
+            "SELECT var_stat FROM stratum_stats WHERE family=? AND scope_id=?",
+            (family, scope_id),
         ).fetchone()
         v = row["var_stat"] if row else 0.0
         self.con.execute(
-            "INSERT INTO stratum_stats (scope_id, n_trials, var_stat, updated_at)"
-            " VALUES (?,?,?,?)"
-            " ON CONFLICT(scope_id) DO UPDATE SET n_trials=excluded.n_trials,"
+            "INSERT INTO stratum_stats (family, scope_id, n_trials, var_stat, updated_at)"
+            " VALUES (?,?,?,?,?)"
+            " ON CONFLICT(family, scope_id) DO UPDATE SET n_trials=excluded.n_trials,"
             " var_stat=excluded.var_stat, updated_at=excluded.updated_at",
-            (scope_id, n, v, now),
+            (family, scope_id, n, v, now),
         )
 
-    def update_var_stat(self, scope_id: str) -> None:
-        """Recompute the stratum's variance of S4 statistics from the ledger.
+    def update_var_stat(self, scope_id: str, *, family: str = "pairs") -> None:
+        """Recompute the (family, scope_id) stratum's variance of S4 statistics
+        from the ledger.
 
         V is the sample variance of the stratum's recorded S4 `statistic`
         values AFTER converting them from annualized to PER-BAR units
@@ -420,39 +480,44 @@ class Ledger:
         (minting.py tier evidence, decay.py re-eval) consumes status/sr_ann
         semantics, so the conversion happens here, at the single choke
         point, exactly like the deck path (decks/service.py::
-        _deck_stratum_variance). Computed strictly within the scope —
-        never pooled across scopes.
+        _deck_stratum_variance). Computed strictly within (family, scope_id) —
+        never pooled across families or scopes.
         """
         vals = [
             r[0] / _BARS_PER_YEAR_SQRT
             for r in self.con.execute(
                 "SELECT sr.statistic FROM stage_result sr JOIN trial t"
                 " ON sr.trial_id = t.trial_id"
-                " WHERE t.scope_id=? AND sr.stage='s4' AND sr.statistic IS NOT NULL",
-                (scope_id,),
+                " WHERE t.family=? AND t.scope_id=? AND sr.stage='s4'"
+                " AND sr.statistic IS NOT NULL",
+                (family, scope_id),
             ).fetchall()
         ]
         v = sample_variance(vals)
         n = self.con.execute(
-            "SELECT COUNT(*) FROM trial WHERE scope_id=?", (scope_id,)
+            "SELECT COUNT(*) FROM trial WHERE family=? AND scope_id=?",
+            (family, scope_id),
         ).fetchone()[0]
-        self._write_stratum(scope_id, n, v, time.time())
+        self._write_stratum(scope_id, n, v, time.time(), family=family)
         db.maybe_commit(self.con)
 
-    def _write_stratum(self, scope_id: str, n: int, v: float, now: float) -> None:
+    def _write_stratum(
+        self, scope_id: str, n: int, v: float, now: float, *, family: str = "pairs"
+    ) -> None:
         self.con.execute(
-            "INSERT INTO stratum_stats (scope_id, n_trials, var_stat, updated_at)"
-            " VALUES (?,?,?,?)"
-            " ON CONFLICT(scope_id) DO UPDATE SET n_trials=excluded.n_trials,"
+            "INSERT INTO stratum_stats (family, scope_id, n_trials, var_stat, updated_at)"
+            " VALUES (?,?,?,?,?)"
+            " ON CONFLICT(family, scope_id) DO UPDATE SET n_trials=excluded.n_trials,"
             " var_stat=excluded.var_stat, updated_at=excluded.updated_at",
-            (scope_id, n, v, now),
+            (family, scope_id, n, v, now),
         )
 
-    def stratum_stats(self, scope_id: str) -> tuple[int, float]:
-        """(N, V̄) for the scope stratum — the DSR denominator. N includes kills."""
+    def stratum_stats(self, scope_id: str, *, family: str = "pairs") -> tuple[int, float]:
+        """(N, V̄) for the (family, scope_id) stratum — the DSR denominator.
+        N includes kills."""
         row = self.con.execute(
-            "SELECT n_trials, var_stat FROM stratum_stats WHERE scope_id=?",
-            (scope_id,),
+            "SELECT n_trials, var_stat FROM stratum_stats WHERE family=? AND scope_id=?",
+            (family, scope_id),
         ).fetchone()
         if row is None:
             return (0, 0.0)
@@ -464,13 +529,15 @@ class Ledger:
                              n_eff: float, rho_bar: float, method: str,
                              detail: dict | None = None,
                              n_eff_raw: int | None = None,
-                             now: float | None = None) -> None:
-        """Freeze the stratum's admission denominator at a pre-registered
-        evaluation epoch (sift #59): store the raw registration count AND
-        the DSR-A.3 implied independent N_eff, cached per (scope, epoch).
+                             now: float | None = None,
+                             family: str = "pairs") -> None:
+        """Freeze the (family, scope_id) stratum's admission denominator at a
+        pre-registered evaluation epoch (sift #59): store the raw registration
+        count AND the DSR-A.3 implied independent N_eff, cached per
+        (family, scope_id, epoch).
 
-        Idempotent per (scope_id, epoch): re-freezing the SAME epoch with
-        different values raises (the epoch is pre-registered; silently
+        Idempotent per (family, scope_id, epoch): re-freezing the SAME epoch
+        with different values raises (the epoch is pre-registered; silently
         moving the bar mid-epoch is exactly the defect #59 reports —
         identical trials must face identical bars). Freezing a NEW epoch
         appends a row; old epochs stay for audit.
@@ -478,11 +545,12 @@ class Ledger:
         now = time.time() if now is None else now
         n_raw = (int(n_eff_raw) if n_eff_raw is not None else
                  self.con.execute(
-                     "SELECT COUNT(*) FROM trial WHERE scope_id=?",
-                     (scope_id,)).fetchone()[0])
+                     "SELECT COUNT(*) FROM trial WHERE family=? AND scope_id=?",
+                     (family, scope_id)).fetchone()[0])
         row = self.con.execute(
             "SELECT n_eff_raw, n_eff, rho_bar, method FROM stratum_epoch"
-            " WHERE scope_id=? AND epoch=?", (scope_id, epoch),
+            " WHERE family=? AND scope_id=? AND epoch=?",
+            (family, scope_id, epoch),
         ).fetchone()
         if row is not None:
             if (row["n_eff_raw"] != n_raw or
@@ -490,50 +558,52 @@ class Ledger:
                     abs(row["rho_bar"] - float(rho_bar)) > 1e-12 or
                     row["method"] != method):
                 raise LedgerError(
-                    f"stratum epoch {scope_id}/e{epoch} already frozen with "
+                    f"stratum epoch {family}/{scope_id}/e{epoch} already frozen with "
                     f"different values (n_eff_raw={row['n_eff_raw']}, "
                     f"n_eff={row['n_eff']}, rho_bar={row['rho_bar']}, "
                     f"method={row['method']!r}) — epochs are immutable; "
                     "open a new epoch instead (sift #59)")
             return
         self.con.execute(
-            "INSERT INTO stratum_epoch (scope_id, epoch, n_eff_raw, n_eff,"
-            " rho_bar, method, detail_json, frozen_at) VALUES (?,?,?,?,?,?,?,?)",
-            (scope_id, int(epoch), int(n_raw), float(n_eff), float(rho_bar),
+            "INSERT INTO stratum_epoch (family, scope_id, epoch, n_eff_raw, n_eff,"
+            " rho_bar, method, detail_json, frozen_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (family, scope_id, int(epoch), int(n_raw), float(n_eff), float(rho_bar),
              method, canonical_json(detail or {}), now),
         )
         db.maybe_commit(self.con)
 
     def stratum_epoch_stats(self, scope_id: str,
-                            epoch: int | None = None) -> dict | None:
-        """The frozen admission denominator for (scope, epoch). With
+                            epoch: int | None = None,
+                            *, family: str = "pairs") -> dict | None:
+        """The frozen admission denominator for (family, scope_id, epoch). With
         `epoch=None` the LATEST frozen epoch is returned. Returns
-        {"epoch", "n_eff_raw", "n_eff", "rho_bar", "method", "detail",
-        "frozen_at"} or None when the stratum has no frozen epoch (callers
-        then fall back to the live stratum_stats — raw N, rho_bar=0 — and
-        record method='raw_fallback')."""
+        {"family", "epoch", "n_eff_raw", "n_eff", "rho_bar", "method",
+        "detail", "frozen_at"} or None when the stratum has no frozen epoch
+        (callers then fall back to the live stratum_stats — raw N, rho_bar=0 —
+        and record method='raw_fallback')."""
         if epoch is None:
             row = self.con.execute(
-                "SELECT * FROM stratum_epoch WHERE scope_id=?"
-                " ORDER BY epoch DESC LIMIT 1", (scope_id,),
+                "SELECT * FROM stratum_epoch WHERE family=? AND scope_id=?"
+                " ORDER BY epoch DESC LIMIT 1", (family, scope_id),
             ).fetchone()
         else:
             row = self.con.execute(
-                "SELECT * FROM stratum_epoch WHERE scope_id=? AND epoch=?",
-                (scope_id, epoch),
+                "SELECT * FROM stratum_epoch WHERE family=? AND scope_id=? AND epoch=?",
+                (family, scope_id, epoch),
             ).fetchone()
         if row is None:
             return None
-        return {"epoch": int(row["epoch"]), "n_eff_raw": int(row["n_eff_raw"]),
+        return {"family": row["family"],
+                "epoch": int(row["epoch"]), "n_eff_raw": int(row["n_eff_raw"]),
                 "n_eff": float(row["n_eff"]), "rho_bar": float(row["rho_bar"]),
                 "method": row["method"],
                 "detail": json.loads(row["detail_json"]),
                 "frozen_at": float(row["frozen_at"])}
 
-    def latest_epoch(self, scope_id: str) -> int | None:
+    def latest_epoch(self, scope_id: str, *, family: str = "pairs") -> int | None:
         row = self.con.execute(
-            "SELECT MAX(epoch) FROM stratum_epoch WHERE scope_id=?",
-            (scope_id,),
+            "SELECT MAX(epoch) FROM stratum_epoch WHERE family=? AND scope_id=?",
+            (family, scope_id),
         ).fetchone()
         return None if row is None or row[0] is None else int(row[0])
 
@@ -568,10 +638,17 @@ class Ledger:
             (event_type,),
         ).fetchall()
 
-    def trials_in_scope(self, scope_id: str) -> list[Trial]:
-        rows = self.con.execute(
-            "SELECT * FROM trial WHERE scope_id=? ORDER BY registered_at", (scope_id,)
-        ).fetchall()
+    def trials_in_scope(self, scope_id: str, *, family: str | None = None) -> list[Trial]:
+        if family is not None:
+            rows = self.con.execute(
+                "SELECT * FROM trial WHERE family=? AND scope_id=? ORDER BY registered_at",
+                (family, scope_id),
+            ).fetchall()
+        else:
+            rows = self.con.execute(
+                "SELECT * FROM trial WHERE scope_id=? ORDER BY registered_at",
+                (scope_id,),
+            ).fetchall()
         return [self._to_trial(r) for r in rows]
 
 

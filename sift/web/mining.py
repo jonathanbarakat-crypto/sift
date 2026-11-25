@@ -56,6 +56,7 @@ from sift.cards.service import CardLayer
 from sift.cards.vault import VaultError
 from sift.engine import first_run
 from sift.gauntlet import config as cfg
+from sift.gauntlet import lead_lag as ll
 from sift.gauntlet import stats
 from sift.gauntlet.runner import GauntletRunner, StageResult
 from sift.registry import Ledger, config_hash_of
@@ -63,10 +64,14 @@ from sift.web.compliance import ComplianceError, guard_api_payload
 from sift.web.telemetry import TelemetryStore
 
 ENGINE_VERSION = "gate1-beta-api-v1"
+ALLOWED_FAMILIES = ("pairs", "lead_lag")
 ALLOWED_SCOPES = ("free_5y_top1k", "free_1y_top1k")
 ALLOWED_FORMATIONS = (40, 60, 80)
 ALLOWED_OPEN_Z = (1.5, 2.0, 2.5)
 ALLOWED_CLOSE_Z = (0.3, 0.5, 0.8)
+LEAD_LAG_ALLOWED_LAGS = cfg.LEAD_LAG_LAGS
+LEAD_LAG_ALLOWED_FORMATIONS = cfg.LEAD_LAG_FORMATIONS
+LEAD_LAG_ALLOWED_OPEN_Z = cfg.LEAD_LAG_OPEN_Z
 MINING_MODES = ("direct", "anchored", "uniform_random")
 HOLDOUT_BARS = cfg.BARS_PER_YEAR  # 252-bar frozen holdout (soundness #10)
 REGISTRY_DEPTH_BARS = cfg.scope_T("registry_depth")  # 4032 bars
@@ -90,6 +95,7 @@ CREATE TABLE IF NOT EXISTS beta_run (
     user_id         TEXT NOT NULL,
     trial_id        TEXT NOT NULL,
     candidate_id    TEXT NOT NULL,
+    family          TEXT NOT NULL DEFAULT 'pairs',
     scope_id        TEXT NOT NULL,
     mining_mode     TEXT NOT NULL DEFAULT 'example',
     subspace_filter TEXT NOT NULL DEFAULT 'all',
@@ -155,6 +161,14 @@ class _PairInput:
     panel_corr: np.ndarray | None = None
     m_screened: int = 1
     current_abs_z: float | None = None
+    family: str = "pairs"
+    market_returns: np.ndarray | None = None
+    full_market_returns: np.ndarray | None = None
+    lag_bars: int = 1
+    hold_bars: int = 1
+    formation: int = 60
+    open_z: float = 2.0
+    step: int = 120
 
 
 def _spread_returns(prices: np.ndarray) -> np.ndarray:
@@ -667,6 +681,112 @@ def _synth_regime(
     )
 
 
+def _lead_lag_holdout_baseline(
+    holdout_prices: np.ndarray,
+    holdout_market_returns: np.ndarray | None,
+    *,
+    lag_bars: int,
+    formation: int,
+    open_z: float,
+    holdout_bars: int,
+    holdout_start_bar: int,
+) -> dict[str, Any] | None:
+    """Compute frozen-holdout live baseline once for `lead_lag` (HAC t_net)."""
+    if holdout_prices.shape[0] < max(int(lag_bars) + 10, 20):
+        return None
+    form_eff = min(int(formation), max(holdout_prices.shape[0] // 2, 20))
+    wf = ll.lead_lag_walk_forward(
+        holdout_prices,
+        market_returns=holdout_market_returns,
+        lag_bars=int(lag_bars),
+        hold_bars=int(lag_bars),
+        formation=form_eff,
+        open_z=float(open_z),
+        step=cfg.LEAD_LAG_STEP,
+    )
+    net = wf["net"]
+    net = net[np.isfinite(net)]
+    if net.size < 2:
+        return None
+    sr_ann = stats.sharpe_ratio(net)
+    t_net = float(stats.t_stat_sharpe_hac(net)["t"])
+    return {
+        "t_net": round(float(t_net), 4),
+        "sr_ann": round(float(sr_ann), 4),
+        "holdout_bars": int(holdout_bars),
+        "holdout_start_bar": int(holdout_start_bar),
+    }
+
+
+def _synth_lead_lag(
+    scope_id: str, lag_bars: int, formation: int, open_z: float
+) -> _PairInput:
+    """Planted directed lead-lag preset (synthetic example — survives S0-S5)."""
+    W = int(lag_bars)
+    t_disc = REGISTRY_DEPTH_BARS
+    t_total = t_disc + HOLDOUT_BARS
+    t_scope = cfg.scope_T(scope_id)
+    fx = ll.f_leadlag(T=t_total, lag_true=W, seed=101)
+    prices_all = fx["prices"]
+    rm_all = fx["market_returns"]
+    prices_full = prices_all[:t_disc]
+    rm_full = rm_all[:t_disc]
+    holdout_prices = prices_all[t_disc:]
+    holdout_rm = rm_all[t_disc:]
+    prices_scope = prices_full[-t_scope:]
+    rm_scope = rm_full[-t_scope:]
+    hb = _lead_lag_holdout_baseline(
+        holdout_prices,
+        holdout_rm,
+        lag_bars=W,
+        formation=formation,
+        open_z=open_z,
+        holdout_bars=HOLDOUT_BARS,
+        holdout_start_bar=t_disc,
+    )
+    abs_z = ll.latest_lead_lag_abs_z(
+        prices_scope, market_returns=rm_scope, lag_bars=W, formation=formation
+    )
+    empty = np.zeros(0, dtype=float)
+    return _PairInput(
+        params={
+            "preset": "example-lead-lag-directed",
+            "lag_bars": W,
+            "hold_bars": W,
+            "formation": int(formation),
+            "open_z": float(open_z),
+            "step": cfg.LEAD_LAG_STEP,
+            "holdout_bars": HOLDOUT_BARS,
+            "family": "lead_lag",
+            "scope": scope_id,
+        },
+        vintage="synthetic-example-v1",
+        fixture_x=empty,
+        fixture_y=empty,
+        beta_true=0.0,
+        half_life_true=math.inf,
+        fixture_spread=None,
+        excess_returns=empty,
+        perm_series=empty,
+        prices=prices_scope,
+        full_prices=prices_full,
+        full_spread_returns=None,
+        delist_idx=np.array([t_disc, t_disc], dtype=int),
+        holdout_baseline=hb,
+        panel_corr=np.eye(3, dtype=float),
+        m_screened=6,
+        current_abs_z=round(abs_z, 4) if abs_z is not None else None,
+        family="lead_lag",
+        market_returns=rm_scope,
+        full_market_returns=rm_full,
+        lag_bars=W,
+        hold_bars=W,
+        formation=int(formation),
+        open_z=float(open_z),
+        step=cfg.LEAD_LAG_STEP,
+    )
+
+
 class PairCatalog:
     """Server-side pair catalog. Raw tickers and prices NEVER leave this class."""
 
@@ -700,7 +820,10 @@ class PairCatalog:
         self._wh_sectors: dict[str, str] = {}
         self._wh_all_symbols: frozenset[str] = frozenset()
         self._wh_panel_corr: np.ndarray | None = None
+        self._wh_demeaned_panel_corr: np.ndarray | None = None
+        self._wh_market_returns: np.ndarray | None = None
         self._wh_m_screened: int = 1
+        self._wh_m_screened_directed: int = 1
         self._wh_holdout_start: int | None = None
         self._wh_vintage: str = "no-vintage"
         self._wh_universe_mode: str = "none"
@@ -803,6 +926,20 @@ class PairCatalog:
         self._wh_quarantined_excluded = resolved.quarantined_excluded
         self._wh_pit_listed_count = resolved.pit_listed_count
 
+        # Equal-weight active PIT daily log-return r_M,t across full panel
+        # (used by lead_lag for point-in-time cross-sectional demeaning).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            full_log_p = np.where(prices > 0.0, np.log(prices), np.nan)
+        full_rets = np.full(prices.shape, np.nan, dtype=float)
+        full_rets[1:] = np.diff(full_log_p, axis=0)
+        mkt = np.full(prices.shape[0], np.nan, dtype=float)
+        for t_idx in range(1, prices.shape[0]):
+            row_r = full_rets[t_idx]
+            fin = row_r[np.isfinite(row_r)]
+            if fin.size > 0:
+                mkt[t_idx] = float(np.mean(fin))
+        self._wh_market_returns = mkt
+
         # Lock the trailing 252 bars out of correlation-panel estimation
         # (soundness #10: panel_corr NEVER peeks into the frozen holdout).
         # Per docs/mining-modes-policy.md §2, NO silent top-|corr| shortlist is
@@ -811,17 +948,23 @@ class PairCatalog:
         if prices.shape[0] >= cfg.scope_T("free_1y_top1k") + HOLDOUT_BARS:
             self._wh_holdout_start = prices.shape[0] - HOLDOUT_BARS
             screen_prices = prices[: self._wh_holdout_start]
+            screen_mkt = mkt[1 : self._wh_holdout_start]
         else:
             self._wh_holdout_start = None
             screen_prices = prices
+            screen_mkt = mkt[1:]
 
         with np.errstate(divide="ignore", invalid="ignore"):
             log_p = np.where(screen_prices > 0.0, np.log(screen_prices), np.nan)
         rets = np.diff(log_p, axis=0)
         corr = _pairwise_corr_matrix(rets)
         self._wh_panel_corr = corr
+        # Demeaned panel correlation matrix for lead_lag A.3 n_eff (spec §3 S3)
+        demeaned_rets = rets - screen_mkt[:, None]
+        self._wh_demeaned_panel_corr = _pairwise_corr_matrix(demeaned_rets)
         n_sym = corr.shape[0]
         self._wh_m_screened = max(n_sym * (n_sym - 1) // 2, 1)
+        self._wh_m_screened_directed = max(n_sym * (n_sym - 1), 1)
         return True
 
     def _register_synthetic_presets(self) -> None:
@@ -864,6 +1007,20 @@ class PairCatalog:
                 family="pairs",
                 default_scope="free_5y_top1k",
                 sector_bucket="cross_sectional_pairs_aggregate",
+                is_example=False,
+                synthetic_example=True,
+                data_source="synthetic_example",
+            ),
+            CandidateMeta(
+                candidate_id="example-lead-lag-directed",
+                label="Directed lead-lag example — lag-1 diffusion (synthetic)",
+                description=(
+                    "Pre-loaded directed synthetic example exercising pre-whitened "
+                    "lead-lag S0-S4 plus automatic S5 validation."
+                ),
+                family="lead_lag",
+                default_scope="free_5y_top1k",
+                sector_bucket="directed_lead_lag_aggregate",
                 is_example=False,
                 synthetic_example=True,
                 data_source="synthetic_example",
@@ -954,19 +1111,27 @@ class PairCatalog:
         close_z: float,
         draw_seed: int,
         commitment_secret: bytes,
+        family: str = "pairs",
+        lag_bars: int = cfg.LEAD_LAG_DEFAULT_LAG,
     ) -> tuple[_SlotResolution, _PairInput]:
-        """Resolve Slot A and Slot B into a canonical pair with ZERO pre-screening
-        (docs/mining-modes-policy.md §1-§3).
+        """Resolve Slot A and Slot B into a canonical candidate with ZERO
+        pre-screening (docs/mining-modes-policy.md §1-§3).
 
         - symbol + symbol  -> direct hypothesis
         - symbol + random  -> anchored search (PCG64 uniform draw in subspace)
         - random + random  -> uniform random (PCG64 uniform draw in subspace)
+
+        For `pairs` (undirected), legs are canonically sorted.
+        For `lead_lag` (directed `leader -> follower`), Slot A is ALWAYS the
+        leader and Slot B is ALWAYS the follower — never sorted.
         """
         if not self.has_warehouse:
             raise MiningError(
                 "No server-side point-in-time warehouse is configured for slot mining.",
                 503,
             )
+        fam = str(family or "pairs").strip().lower()
+        directed = fam == "lead_lag"
         ka, va = self._parse_slot(slot_a)
         kb, vb = self._parse_slot(slot_b)
 
@@ -976,14 +1141,24 @@ class PairCatalog:
             ia, ib = self._wh_symbol_idx[va], self._wh_symbol_idx[vb]
             if ia == ib:
                 raise MiningError("Slot A and Slot B must select two distinct symbols.", 400)
-            i, j = (ia, ib) if self._wh_symbols[ia].upper() < self._wh_symbols[ib].upper() else (ib, ia)
+            if directed:
+                i, j = ia, ib
+            else:
+                i, j = (
+                    (ia, ib)
+                    if self._wh_symbols[ia].upper() < self._wh_symbols[ib].upper()
+                    else (ib, ia)
+                )
             res = _SlotResolution(
                 mining_mode="direct",
                 subspace_filter="direct",
                 subspace_size=1,
             )
         elif (ka == "symbol" and kb == "random") or (ka == "random" and kb == "symbol"):
-            anchor_role = "slot_a" if ka == "symbol" else "slot_b"
+            if directed:
+                anchor_role = "leader" if ka == "symbol" else "follower"
+            else:
+                anchor_role = "slot_a" if ka == "symbol" else "slot_b"
             anchor_sym = va if ka == "symbol" else vb
             subspace = vb if ka == "symbol" else va
             a_idx = self._wh_symbol_idx[anchor_sym]
@@ -994,11 +1169,14 @@ class PairCatalog:
                     400,
                 )
             p_idx = pool[int(rng.integers(0, len(pool)))]
-            i, j = (
-                (a_idx, p_idx)
-                if self._wh_symbols[a_idx].upper() < self._wh_symbols[p_idx].upper()
-                else (p_idx, a_idx)
-            )
+            if directed:
+                i, j = (a_idx, p_idx) if ka == "symbol" else (p_idx, a_idx)
+            else:
+                i, j = (
+                    (a_idx, p_idx)
+                    if self._wh_symbols[a_idx].upper() < self._wh_symbols[p_idx].upper()
+                    else (p_idx, a_idx)
+                )
             anchor_hmac = hmac.new(
                 commitment_secret,
                 anchor_sym.encode("utf-8"),
@@ -1024,7 +1202,11 @@ class PairCatalog:
                         "Selected subspace needs at least two eligible symbols.",
                         400,
                     )
-                subspace_size = len(pool_a) * (len(pool_a) - 1) // 2
+                subspace_size = (
+                    len(pool_a) * (len(pool_a) - 1)
+                    if directed
+                    else len(pool_a) * (len(pool_a) - 1) // 2
+                )
                 drawn = rng.choice(pool_a, size=2, replace=False)
                 u, v = int(drawn[0]), int(drawn[1])
                 sub_filter = va
@@ -1040,21 +1222,38 @@ class PairCatalog:
                 subspace_size = len(pairs_pool)
                 u, v = pairs_pool[int(rng.integers(0, len(pairs_pool)))]
                 sub_filter = f"{va}_x_{vb}"
-            i, j = (u, v) if self._wh_symbols[u].upper() < self._wh_symbols[v].upper() else (v, u)
+            if directed:
+                i, j = u, v
+            else:
+                i, j = (
+                    (u, v)
+                    if self._wh_symbols[u].upper() < self._wh_symbols[v].upper()
+                    else (v, u)
+                )
             res = _SlotResolution(
                 mining_mode="uniform_random",
                 subspace_filter=sub_filter,
                 subspace_size=subspace_size,
             )
 
-        pair_in = self._build_warehouse_pair_input(
-            i,
-            j,
-            scope_id=scope_id,
-            formation=formation,
-            open_z=open_z,
-            close_z=close_z,
-        )
+        if directed:
+            pair_in = self._build_warehouse_lead_lag_input(
+                i,
+                j,
+                scope_id=scope_id,
+                lag_bars=int(lag_bars),
+                formation=formation,
+                open_z=open_z,
+            )
+        else:
+            pair_in = self._build_warehouse_pair_input(
+                i,
+                j,
+                scope_id=scope_id,
+                formation=formation,
+                open_z=open_z,
+                close_z=close_z,
+            )
         return res, pair_in
 
     def compute_live_abs_z_for_pair(
@@ -1073,6 +1272,38 @@ class PairCatalog:
             return None
         ps = first_run.pair_series(valid, 0, 1, formation)
         return _latest_abs_z(ps["spread"], window=formation)
+
+    def compute_live_abs_z_for_lead_lag(
+        self,
+        leader: str,
+        follower: str,
+        *,
+        lag_bars: int = cfg.LEAD_LAG_DEFAULT_LAG,
+        formation: int = cfg.LEAD_LAG_DEFAULT_FORMATION,
+    ) -> float | None:
+        """Compute current magnitude-only |z_k| of pre-whitened leader innovation
+        for a directed warehouse `lead_lag` pair (never signed, never slope)."""
+        if not self.has_warehouse or self._wh_prices is None:
+            return None
+        ia = self._wh_symbol_idx.get(leader.upper())
+        ib = self._wh_symbol_idx.get(follower.upper())
+        if ia is None or ib is None or ia == ib:
+            return None
+        pair = self._wh_prices[:, [ia, ib]]
+        valid_mask = np.all(np.isfinite(pair), axis=1)
+        valid_pair = pair[valid_mask]
+        rm = (
+            self._wh_market_returns[valid_mask]
+            if self._wh_market_returns is not None
+            else None
+        )
+        val = ll.latest_lead_lag_abs_z(
+            valid_pair,
+            market_returns=rm,
+            lag_bars=int(lag_bars),
+            formation=int(formation),
+        )
+        return round(val, 4) if val is not None else None
 
     def _build_warehouse_pair_input(
         self,
@@ -1160,6 +1391,119 @@ class PairCatalog:
             panel_corr=self._wh_panel_corr,
             m_screened=self._wh_m_screened,
             current_abs_z=_latest_abs_z(ps["spread"], window=formation),
+            family="pairs",
+            formation=formation,
+            open_z=open_z,
+        )
+
+    def _build_warehouse_lead_lag_input(
+        self,
+        leader_idx: int,
+        follower_idx: int,
+        *,
+        scope_id: str,
+        lag_bars: int,
+        formation: int,
+        open_z: float,
+    ) -> _PairInput:
+        assert self._wh_prices is not None
+        assert self._wh_delist_idx is not None
+        W = int(lag_bars)
+        s_lead, s_foll = self._wh_symbols[leader_idx], self._wh_symbols[follower_idx]
+        full_pair = self._wh_prices[:, [leader_idx, follower_idx]]
+        full_rm = self._wh_market_returns
+        pair_delist = np.array(
+            [self._wh_delist_idx[leader_idx], self._wh_delist_idx[follower_idx]],
+            dtype=int,
+        )
+
+        required_bars = cfg.scope_T(scope_id)
+        holdout_baseline: dict[str, Any] | None = None
+        if self._wh_holdout_start is not None and self._wh_holdout_start >= required_bars:
+            disc_full = full_pair[: self._wh_holdout_start]
+            disc_rm = full_rm[: self._wh_holdout_start] if full_rm is not None else None
+            holdout_slice = full_pair[self._wh_holdout_start:]
+            holdout_rm_raw = (
+                full_rm[self._wh_holdout_start:] if full_rm is not None else None
+            )
+            h_mask = np.all(np.isfinite(holdout_slice), axis=1)
+            finite_h = holdout_slice[h_mask]
+            finite_h_rm = holdout_rm_raw[h_mask] if holdout_rm_raw is not None else None
+            holdout_baseline = _lead_lag_holdout_baseline(
+                finite_h,
+                finite_h_rm,
+                lag_bars=W,
+                formation=formation,
+                open_z=open_z,
+                holdout_bars=HOLDOUT_BARS,
+                holdout_start_bar=int(self._wh_holdout_start),
+            )
+            holdout_used = HOLDOUT_BARS
+        else:
+            disc_full = full_pair
+            disc_rm = full_rm
+            holdout_used = 0
+
+        valid_mask = np.all(np.isfinite(disc_full), axis=1)
+        valid_disc = disc_full[valid_mask]
+        if valid_disc.shape[0] < required_bars:
+            raise MiningError(
+                "Insufficient warehouse history for the requested scope.", 400
+            )
+        scope_pair = valid_disc[-required_bars:]
+        scope_rm = (
+            disc_rm[valid_mask][-required_bars:] if disc_rm is not None else None
+        )
+
+        has_full_depth = full_pair.shape[0] >= REGISTRY_DEPTH_BARS
+        params: dict[str, Any] = {
+            "leader": s_lead.upper(),
+            "follower": s_foll.upper(),
+            "lag_bars": W,
+            "hold_bars": W,
+            "formation": int(formation),
+            "open_z": float(open_z),
+            "step": cfg.LEAD_LAG_STEP,
+            "family": "lead_lag",
+            "scope": scope_id,
+        }
+        if holdout_used > 0:
+            params["holdout_bars"] = holdout_used
+
+        abs_z = ll.latest_lead_lag_abs_z(
+            scope_pair, market_returns=scope_rm, lag_bars=W, formation=formation
+        )
+        empty = np.zeros(0, dtype=float)
+        return _PairInput(
+            params=params,
+            vintage=self._wh_vintage,
+            fixture_x=empty,
+            fixture_y=empty,
+            beta_true=0.0,
+            half_life_true=math.inf,
+            fixture_spread=None,
+            excess_returns=empty,
+            perm_series=empty,
+            prices=scope_pair,
+            full_prices=full_pair if has_full_depth else None,
+            full_spread_returns=None,
+            delist_idx=pair_delist if has_full_depth else None,
+            holdout_baseline=holdout_baseline,
+            panel_corr=(
+                self._wh_demeaned_panel_corr
+                if self._wh_demeaned_panel_corr is not None
+                else self._wh_panel_corr
+            ),
+            m_screened=self._wh_m_screened_directed,
+            current_abs_z=round(abs_z, 4) if abs_z is not None else None,
+            family="lead_lag",
+            market_returns=scope_rm,
+            full_market_returns=full_rm if has_full_depth else None,
+            lag_bars=W,
+            hold_bars=W,
+            formation=int(formation),
+            open_z=float(open_z),
+            step=cfg.LEAD_LAG_STEP,
         )
 
     def build_input(
@@ -1170,6 +1514,7 @@ class PairCatalog:
         formation: int,
         open_z: float,
         close_z: float,
+        lag_bars: int = cfg.LEAD_LAG_DEFAULT_LAG,
     ) -> tuple[CandidateMeta, _PairInput]:
         meta = self._meta.get(candidate_id)
         if meta is None:
@@ -1182,6 +1527,8 @@ class PairCatalog:
             return meta, _synth_noise(scope_id, formation, open_z, close_z)
         if candidate_id == "example-pair-regime":
             return meta, _synth_regime(scope_id, formation, open_z, close_z)
+        if candidate_id == "example-lead-lag-directed":
+            return meta, _synth_lead_lag(scope_id, lag_bars, formation, open_z)
 
         raise MiningError("Unknown candidate_id.", 404)
 
@@ -1365,6 +1712,7 @@ class MiningStore:
             r[1] for r in self.con.execute("PRAGMA table_info(beta_run)").fetchall()
         }
         additions = (
+            ("family", "TEXT NOT NULL DEFAULT 'pairs'"),
             ("mining_mode", "TEXT NOT NULL DEFAULT 'example'"),
             ("subspace_filter", "TEXT NOT NULL DEFAULT 'all'"),
             ("subspace_size", "INTEGER NOT NULL DEFAULT 1"),
@@ -1409,6 +1757,7 @@ class MiningStore:
         status: str,
         verdict: str,
         survivor_class: str,
+        family: str = "pairs",
         mining_mode: str = "example",
         subspace_filter: str = "all",
         subspace_size: int = 1,
@@ -1425,17 +1774,18 @@ class MiningStore:
         try:
             self.con.execute(
                 "INSERT INTO beta_run"
-                " (run_id, user_id, trial_id, candidate_id, scope_id,"
+                " (run_id, user_id, trial_id, candidate_id, family, scope_id,"
                 "  mining_mode, subspace_filter, subspace_size,"
                 "  anchor_role, anchor_id_hmac, anchor_sector, cached,"
                 "  status, verdict, survivor_class, killed_at, card_id, error_message,"
                 "  created_at, completed_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run_id,
                     user_id,
                     trial_id,
                     candidate_id,
+                    str(family or "pairs"),
                     scope_id,
                     mining_mode,
                     subspace_filter,
@@ -1529,7 +1879,7 @@ class MiningStore:
 
 
 class MiningManager:
-    """Orchestrates pre-registered pairs gauntlet runs + bounded SSE channels."""
+    """Orchestrates pre-registered gauntlet runs + bounded SSE channels."""
 
     def __init__(
         self,
@@ -1558,7 +1908,7 @@ class MiningManager:
         self._channels: OrderedDict[str, _RunChannel] = OrderedDict()
         self._live_z: OrderedDict[str, float] = OrderedDict()
         self._in_flight: dict[str, _InFlightTrial] = {}
-        self._frozen_epochs: set[str] = set()
+        self._frozen_epochs: set[tuple[str, str]] = set()
 
     def _config_commitment(self, config_hash: str) -> str:
         """Keyed HMAC commitment of config_hash for telemetry (prevents ticker
@@ -1597,23 +1947,60 @@ class MiningManager:
     def validate_config(
         self,
         *,
+        family: str = "pairs",
         candidate_id: str | None = None,
         example: bool = False,
         slot_a: dict[str, Any] | None = None,
         slot_b: dict[str, Any] | None = None,
         scope_id: str,
-        formation: int,
-        open_z: float,
-        close_z: float,
-    ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None, str, int, float, float]:
+        formation: int | None = None,
+        open_z: float | None = None,
+        close_z: float | None = None,
+        lag_bars: int | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        fam = str(family or "pairs").strip().lower()
+        if candidate_id == "example-lead-lag-directed":
+            fam = "lead_lag"
+        if fam not in ALLOWED_FAMILIES:
+            raise MiningError("Unsupported strategy family.", 400)
+        if fam == "lead_lag" and not flags.family_lead_lag_enabled(user_id):
+            raise MiningError("Lead-lag family is currently disabled.", 503)
         if scope_id not in ALLOWED_SCOPES:
             raise MiningError("Unsupported scope_id.", 400)
-        if formation not in ALLOWED_FORMATIONS:
-            raise MiningError("Unsupported formation window.", 400)
-        if open_z not in ALLOWED_OPEN_Z:
-            raise MiningError("Unsupported open_z threshold.", 400)
-        if close_z not in ALLOWED_CLOSE_Z:
-            raise MiningError("Unsupported close_z threshold.", 400)
+
+        if fam == "lead_lag":
+            eff_lag = (
+                cfg.LEAD_LAG_DEFAULT_LAG if lag_bars is None else int(lag_bars)
+            )
+            eff_form = (
+                cfg.LEAD_LAG_DEFAULT_FORMATION
+                if formation is None
+                else int(formation)
+            )
+            eff_open_z = (
+                cfg.LEAD_LAG_DEFAULT_OPEN_Z
+                if open_z is None
+                else float(open_z)
+            )
+            eff_close_z = 0.0
+            if eff_lag not in LEAD_LAG_ALLOWED_LAGS:
+                raise MiningError("Unsupported lag_bars horizon.", 400)
+            if eff_form not in LEAD_LAG_ALLOWED_FORMATIONS:
+                raise MiningError("Unsupported formation window.", 400)
+            if eff_open_z not in LEAD_LAG_ALLOWED_OPEN_Z:
+                raise MiningError("Unsupported open_z threshold.", 400)
+        else:
+            eff_lag = 1
+            eff_form = 60 if formation is None else int(formation)
+            eff_open_z = 2.0 if open_z is None else float(open_z)
+            eff_close_z = 0.5 if close_z is None else float(close_z)
+            if eff_form not in ALLOWED_FORMATIONS:
+                raise MiningError("Unsupported formation window.", 400)
+            if eff_open_z not in ALLOWED_OPEN_Z:
+                raise MiningError("Unsupported open_z threshold.", 400)
+            if eff_close_z not in ALLOWED_CLOSE_Z:
+                raise MiningError("Unsupported close_z threshold.", 400)
 
         has_slots = slot_a is not None or slot_b is not None
         if has_slots:
@@ -1623,25 +2010,51 @@ class MiningManager:
                 raise MiningError("Both slot_a and slot_b are required.", 400)
             if not isinstance(slot_a, dict) or not isinstance(slot_b, dict):
                 raise MiningError("slot_a and slot_b must be objects.", 400)
-            return None, slot_a, slot_b, scope_id, int(formation), float(open_z), float(close_z)
+            return {
+                "family": fam,
+                "candidate_id": None,
+                "slot_a": slot_a,
+                "slot_b": slot_b,
+                "scope_id": scope_id,
+                "formation": eff_form,
+                "open_z": eff_open_z,
+                "close_z": eff_close_z,
+                "lag_bars": eff_lag,
+            }
 
-        cid = (
-            self.catalog.default_example_id()
-            if (example or not candidate_id)
-            else str(candidate_id)
-        )
-        return cid, None, None, scope_id, int(formation), float(open_z), float(close_z)
+        if fam == "lead_lag" and (example or not candidate_id):
+            cid = "example-lead-lag-directed"
+        else:
+            cid = (
+                self.catalog.default_example_id()
+                if (example or not candidate_id)
+                else str(candidate_id)
+            )
+        return {
+            "family": fam,
+            "candidate_id": cid,
+            "slot_a": None,
+            "slot_b": None,
+            "scope_id": scope_id,
+            "formation": eff_form,
+            "open_z": eff_open_z,
+            "close_z": eff_close_z,
+            "lag_bars": eff_lag,
+        }
 
     def _ensure_admission_epoch(
         self, runner: GauntletRunner, scope_id: str, pair_in: _PairInput
     ) -> None:
-        """sift #59: pre-register/freeze epoch 1 with panel_corr + m_screened
-        before any trial evaluates S3 so identical trials face identical bars."""
-        if scope_id in self._frozen_epochs:
+        """sift #59 + lead_lag §5: pre-register/freeze epoch 1 per
+        `(family, scope_id)` with panel_corr + m_screened before any trial
+        evaluates S3 so identical trials face identical bars."""
+        fam = pair_in.family
+        key = (fam, scope_id)
+        if key in self._frozen_epochs:
             return
-        existing = self.ledger.stratum_epoch_stats(scope_id, epoch=1)
+        existing = self.ledger.stratum_epoch_stats(scope_id, epoch=1, family=fam)
         if existing is not None:
-            self._frozen_epochs.add(scope_id)
+            self._frozen_epochs.add(key)
             return
         corr = pair_in.panel_corr
         if corr is not None and corr.shape[0] >= 2:
@@ -1651,6 +2064,7 @@ class MiningManager:
                 panel_corr=corr,
                 m_trials=max(pair_in.m_screened, 1),
                 detail={"vintage": pair_in.vintage[:16], "m_screened": pair_in.m_screened},
+                family=fam,
             )
         else:
             runner.set_admission_epoch(
@@ -1661,13 +2075,15 @@ class MiningManager:
                 m_trials=max(pair_in.m_screened, 1),
                 method="a3_avg_corr",
                 detail={"vintage": pair_in.vintage[:16], "m_screened": pair_in.m_screened},
+                family=fam,
             )
-        self._frozen_epochs.add(scope_id)
+        self._frozen_epochs.add(key)
 
     def prepare_run(
         self,
         *,
         user_id: str,
+        family: str = "pairs",
         candidate_id: str | None = None,
         slot_a: dict[str, Any] | None = None,
         slot_b: dict[str, Any] | None = None,
@@ -1675,14 +2091,20 @@ class MiningManager:
         formation: int,
         open_z: float,
         close_z: float,
+        lag_bars: int = cfg.LEAD_LAG_DEFAULT_LAG,
         draw_seed: int | None = None,
     ) -> tuple[dict[str, Any], _PairInput | None]:
         """Pre-register trial BEFORE any gauntlet computation (v3 §5).
 
         Handles unified slot mining (`direct` / `anchored` / `uniform_random`,
-        docs/mining-modes-policy.md) as well as synthetic onboarding examples,
-        and manages fresh, cached, coalesced in-flight, and orphaned trials cleanly.
+        docs/mining-modes-policy.md) across `pairs` and `lead_lag`, as well as
+        synthetic onboarding examples, and manages fresh, cached, coalesced
+        in-flight, and orphaned trials cleanly.
         """
+        fam = str(family or "pairs").strip().lower()
+        if fam == "lead_lag" and not flags.family_lead_lag_enabled(user_id):
+            raise MiningError("Lead-lag family is currently disabled.", 503)
+
         run_id = f"run-{uuid.uuid4().hex[:12]}"
         if slot_a is not None and slot_b is not None:
             seed_val = (
@@ -1702,17 +2124,23 @@ class MiningManager:
                 close_z=close_z,
                 draw_seed=seed_val,
                 commitment_secret=self._commitment_secret,
+                family=fam,
+                lag_bars=lag_bars,
             )
             effective_cid = f"slot-{slot_res.mining_mode}"
         else:
             assert candidate_id is not None
-            _, pair_in = self.catalog.build_input(
+            meta, pair_in = self.catalog.build_input(
                 candidate_id,
                 scope_id=scope_id,
                 formation=formation,
                 open_z=open_z,
                 close_z=close_z,
+                lag_bars=lag_bars,
             )
+            fam = meta.family
+            if fam == "lead_lag" and not flags.family_lead_lag_enabled(user_id):
+                raise MiningError("Lead-lag family is currently disabled.", 503)
             slot_res = _SlotResolution(
                 mining_mode="example",
                 subspace_filter="synthetic",
@@ -1720,16 +2148,17 @@ class MiningManager:
             )
             effective_cid = str(candidate_id)
 
+        fam = pair_in.family
         cfg_hash = config_hash_of(pair_in.params)
         existing = self.ledger.con.execute(
             "SELECT trial_id, verdict, survivor_class FROM trial"
-            " WHERE family='pairs' AND scope_id=? AND config_hash=? AND data_vintage_hash=?",
-            (scope_id, cfg_hash, pair_in.vintage),
+            " WHERE family=? AND scope_id=? AND config_hash=? AND data_vintage_hash=?",
+            (fam, scope_id, cfg_hash, pair_in.vintage),
         ).fetchone()
         ledger_cached = existing is not None
 
         trial = self.ledger.register(
-            "pairs",
+            fam,
             scope_id,
             pair_in.params,
             pair_in.vintage,
@@ -1754,6 +2183,7 @@ class MiningManager:
                 "trial_registered",
                 {
                     "trial_id": trial.trial_id,
+                    "family": fam,
                     "scope_id": scope_id,
                     "mining_mode": slot_res.mining_mode,
                     "subspace_filter": slot_res.subspace_filter,
@@ -1767,6 +2197,7 @@ class MiningManager:
             )
 
         mode_meta = {
+            "family": fam,
             "mining_mode": slot_res.mining_mode,
             "subspace_filter": slot_res.subspace_filter,
             "subspace_size": slot_res.subspace_size,
@@ -1792,6 +2223,7 @@ class MiningManager:
                 user_id=user_id,
                 trial_id=trial.trial_id,
                 candidate_id=effective_cid,
+                family=fam,
                 scope_id=scope_id,
                 mining_mode=slot_res.mining_mode,
                 subspace_filter=slot_res.subspace_filter,
@@ -1825,6 +2257,7 @@ class MiningManager:
                     {
                         "run_id": run_id,
                         "trial_id": trial.trial_id,
+                        "family": fam,
                         "verdict": trial.verdict,
                         "survivor_class": trial.survivor_class,
                         "killed_at": killed_at,
@@ -1875,6 +2308,7 @@ class MiningManager:
                 user_id=user_id,
                 trial_id=trial.trial_id,
                 candidate_id=effective_cid,
+                family=fam,
                 scope_id=scope_id,
                 mining_mode=slot_res.mining_mode,
                 subspace_filter=slot_res.subspace_filter,
@@ -1920,6 +2354,7 @@ class MiningManager:
                 user_id=user_id,
                 trial_id=trial.trial_id,
                 candidate_id=effective_cid,
+                family=fam,
                 scope_id=scope_id,
                 mining_mode=slot_res.mining_mode,
                 subspace_filter=slot_res.subspace_filter,
@@ -1968,6 +2403,7 @@ class MiningManager:
             user_id=user_id,
             trial_id=trial.trial_id,
             candidate_id=effective_cid,
+            family=fam,
             scope_id=scope_id,
             mining_mode=slot_res.mining_mode,
             subspace_filter=slot_res.subspace_filter,
@@ -2033,25 +2469,44 @@ class MiningManager:
                     if wch is not None:
                         wch.publish("stage", pub)
 
-            verdict_dict = runner.run_gauntlet(
-                trial_id,
-                fixture_x=pair_in.fixture_x,
-                fixture_y=pair_in.fixture_y,
-                beta_true=pair_in.beta_true,
-                half_life_true=pair_in.half_life_true,
-                fixture_spread=pair_in.fixture_spread,
-                excess_returns=pair_in.excess_returns,
-                perm_series=pair_in.perm_series,
-                perm_statistic_fn=stats.mean_reversion_stat,
-                prices=pair_in.prices,
-                scope_id=scope_id,
-                s2_B=self.s2_B,
-                full_prices=pair_in.full_prices,
-                full_spread_returns=pair_in.full_spread_returns,
-                delist_idx=pair_in.delist_idx,
-                holdout_baseline=pair_in.holdout_baseline,
-                on_stage=_on_stage,
-            )
+            if pair_in.family == "lead_lag":
+                verdict_dict = runner.run_lead_lag_gauntlet(
+                    trial_id,
+                    prices=pair_in.prices,
+                    market_returns=pair_in.market_returns,
+                    lag_bars=pair_in.lag_bars,
+                    hold_bars=pair_in.hold_bars,
+                    formation=pair_in.formation,
+                    open_z=pair_in.open_z,
+                    step=pair_in.step,
+                    scope_id=scope_id,
+                    s2_B=self.s2_B,
+                    full_prices=pair_in.full_prices,
+                    full_market_returns=pair_in.full_market_returns,
+                    delist_idx=pair_in.delist_idx,
+                    holdout_baseline=pair_in.holdout_baseline,
+                    on_stage=_on_stage,
+                )
+            else:
+                verdict_dict = runner.run_gauntlet(
+                    trial_id,
+                    fixture_x=pair_in.fixture_x,
+                    fixture_y=pair_in.fixture_y,
+                    beta_true=pair_in.beta_true,
+                    half_life_true=pair_in.half_life_true,
+                    fixture_spread=pair_in.fixture_spread,
+                    excess_returns=pair_in.excess_returns,
+                    perm_series=pair_in.perm_series,
+                    perm_statistic_fn=stats.mean_reversion_stat,
+                    prices=pair_in.prices,
+                    scope_id=scope_id,
+                    s2_B=self.s2_B,
+                    full_prices=pair_in.full_prices,
+                    full_spread_returns=pair_in.full_spread_returns,
+                    delist_idx=pair_in.delist_idx,
+                    holdout_baseline=pair_in.holdout_baseline,
+                    on_stage=_on_stage,
+                )
             verdict = str(verdict_dict["verdict"])
             survivor_class = str(verdict_dict["survivor_class"])
             killed_at = verdict_dict.get("killed_at")
@@ -2067,6 +2522,7 @@ class MiningManager:
                 "trial_verdict",
                 {
                     "trial_id": trial_id,
+                    "family": pair_in.family,
                     "verdict": verdict,
                     "survivor_class": survivor_class,
                     "killed_at": killed_at,
@@ -2078,8 +2534,13 @@ class MiningManager:
             vault_admitted = False
             card_owner: str | None = None
             if card_id:
-                if pair_in.current_abs_z is not None:
-                    self._put_live_z(card_id, pair_in.current_abs_z)
+                live_z = (
+                    verdict_dict.get("current_abs_z")
+                    if verdict_dict.get("current_abs_z") is not None
+                    else pair_in.current_abs_z
+                )
+                if live_z is not None:
+                    self._put_live_z(card_id, round(abs(float(live_z)), 4))
                 card = self.card_layer.cards.get_card(card_id)
                 card_owner = card.owner_handle
                 self._fast_call(
@@ -2088,6 +2549,7 @@ class MiningManager:
                     {
                         "card_id": card.card_id,
                         "trial_id": trial_id,
+                        "family": card.family,
                         "kind": card.kind,
                         "tier": card.tier,
                         "survivor_class": card.survivor_class,
@@ -2132,6 +2594,7 @@ class MiningManager:
                         {
                             "run_id": wid,
                             "trial_id": trial_id,
+                            "family": pair_in.family,
                             "verdict": verdict,
                             "survivor_class": survivor_class,
                             "killed_at": killed_at,
@@ -2209,6 +2672,7 @@ class MiningManager:
         card_face: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cols = set(row.keys())
+        family = str(row["family"]) if "family" in cols else "pairs"
         mining_mode = str(row["mining_mode"]) if "mining_mode" in cols else "example"
         subspace_filter = str(row["subspace_filter"]) if "subspace_filter" in cols else "all"
         subspace_size = int(row["subspace_size"]) if "subspace_size" in cols else 1
@@ -2218,6 +2682,7 @@ class MiningManager:
             "run_id": str(row["run_id"]),
             "trial_id": str(row["trial_id"]),
             "candidate_id": str(row["candidate_id"]),
+            "family": family,
             "scope_id": str(row["scope_id"]),
             "mining_mode": mining_mode,
             "subspace_filter": subspace_filter,
@@ -2367,13 +2832,24 @@ class MiningManager:
         # Strict allowlist extraction from params_json — NEVER pass params_json through.
         instruments: list[dict[str, str]] = []
         allowed: list[str] = []
-        raw_pair = raw_params.get("pair")
-        if isinstance(raw_pair, list) and len(raw_pair) == 2:
-            for item in raw_pair:
-                stem = _symbol_stem(str(item), exchange="US").upper()
-                if stem:
-                    instruments.append({"role": "leg", "symbol": stem})
-                    allowed.append(stem)
+        if family == "lead_lag":
+            raw_lead = raw_params.get("leader")
+            raw_foll = raw_params.get("follower")
+            if raw_lead and raw_foll:
+                s_lead = _symbol_stem(str(raw_lead), exchange="US").upper()
+                s_foll = _symbol_stem(str(raw_foll), exchange="US").upper()
+                if s_lead and s_foll:
+                    instruments.append({"role": "leader", "symbol": s_lead})
+                    instruments.append({"role": "follower", "symbol": s_foll})
+                    allowed.extend([s_lead, s_foll])
+        else:
+            raw_pair = raw_params.get("pair")
+            if isinstance(raw_pair, list) and len(raw_pair) == 2:
+                for item in raw_pair:
+                    stem = _symbol_stem(str(item), exchange="US").upper()
+                    if stem:
+                        instruments.append({"role": "leg", "symbol": stem})
+                        allowed.append(stem)
 
         latest_run = user_runs[0] if user_runs else None
         run_cols = set(latest_run.keys()) if latest_run is not None else set()
@@ -2400,26 +2876,35 @@ class MiningManager:
             else None
         )
 
-        formation = int(raw_params.get("formation", 60))
-        open_z = float(raw_params.get("open_z", 2.0))
+        default_form = cfg.LEAD_LAG_DEFAULT_FORMATION if family == "lead_lag" else 60
+        default_open = cfg.LEAD_LAG_DEFAULT_OPEN_Z if family == "lead_lag" else 2.0
+        formation = int(raw_params.get("formation", default_form))
+        open_z = float(raw_params.get("open_z", default_open))
         close_z = float(raw_params.get("close_z", 0.5))
+        lag_bars = int(raw_params.get("lag_bars", cfg.LEAD_LAG_DEFAULT_LAG))
+        hold_bars = int(raw_params.get("hold_bars", lag_bars))
         holdout_bars = (
             int(raw_params["holdout_bars"])
             if raw_params.get("holdout_bars") is not None
             else None
         )
 
-        # Stages via _stage_to_public (already strips S0 beta_hat).
+        # Stages via _stage_to_public (already strips S0 statistic/threshold).
         stages = [_stage_to_public(r) for r in self.ledger.stages(trial_id)]
 
-        # Magnitude-only live |z| (never signed).
+        # Magnitude-only live |z| (never signed, never slope).
         abs_z: float | None = None
         if card is not None:
             abs_z = self.current_abs_z(str(card.card_id))
         if abs_z is None and len(allowed) == 2:
-            abs_z = self.catalog.compute_live_abs_z_for_pair(
-                allowed[0], allowed[1], formation=formation
-            )
+            if family == "lead_lag":
+                abs_z = self.catalog.compute_live_abs_z_for_lead_lag(
+                    allowed[0], allowed[1], lag_bars=lag_bars, formation=formation
+                )
+            else:
+                abs_z = self.catalog.compute_live_abs_z_for_pair(
+                    allowed[0], allowed[1], formation=formation
+                )
         if abs_z is not None:
             abs_z = round(abs(float(abs_z)), 4)
 
@@ -2470,10 +2955,14 @@ class MiningManager:
             "subspace_size": subspace_size,
             "formation": formation,
             "open_z": open_z,
-            "close_z": close_z,
             "holdout_bars": holdout_bars,
             "data_vintage_hash": vintage,
         }
+        if family == "lead_lag":
+            parameters["lag_bars"] = lag_bars
+            parameters["hold_bars"] = hold_bars
+        else:
+            parameters["close_z"] = close_z
         if anchor_sector is not None:
             parameters["anchor_sector"] = anchor_sector
 
@@ -2524,6 +3013,7 @@ class MiningManager:
         replay = _RunChannel(extra_symbols=self.catalog.forbidden_symbols)
         status = str(row["status"])
         cols = set(row.keys())
+        family = str(row["family"]) if "family" in cols else "pairs"
         mining_mode = str(row["mining_mode"]) if "mining_mode" in cols else "example"
         try:
             replay.publish(
@@ -2531,6 +3021,7 @@ class MiningManager:
                 {
                     "run_id": str(row["run_id"]),
                     "trial_id": str(row["trial_id"]),
+                    "family": family,
                     "scope_id": str(row["scope_id"]),
                     "mining_mode": mining_mode,
                     "cached": bool(row["cached"]),
@@ -2545,6 +3036,7 @@ class MiningManager:
                     {
                         "run_id": str(row["run_id"]),
                         "trial_id": str(row["trial_id"]),
+                        "family": family,
                         "verdict": str(row["verdict"]),
                         "survivor_class": str(row["survivor_class"]),
                         "killed_at": row["killed_at"],
@@ -2595,11 +3087,15 @@ class MiningManager:
 
 __all__ = [
     "ALLOWED_CLOSE_Z",
+    "ALLOWED_FAMILIES",
     "ALLOWED_FORMATIONS",
     "ALLOWED_OPEN_Z",
     "ALLOWED_SCOPES",
     "CEREMONY_SEGMENT",
     "HOLDOUT_BARS",
+    "LEAD_LAG_ALLOWED_FORMATIONS",
+    "LEAD_LAG_ALLOWED_LAGS",
+    "LEAD_LAG_ALLOWED_OPEN_Z",
     "MAX_CACHED_CHANNELS",
     "MAX_CACHED_LIVE_Z",
     "MINING_MODES",

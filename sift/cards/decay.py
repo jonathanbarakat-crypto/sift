@@ -206,7 +206,7 @@ def live_re_evaluator(live_returns_fn, *, seed: int = 0,
         r = r[np.isfinite(r)]
         if r.size < 2:
             return default_re_evaluator(card, ledger)
-        n, v = ledger.stratum_stats(card.scope_id)
+        n, v = ledger.stratum_stats(card.scope_id, family=card.family)
         end = int(r.size)
         start = max(0, end - WINDOW_BARS)
         ws = _window_stats(r, start=start, end=end,

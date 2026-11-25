@@ -149,6 +149,37 @@ S6_HALF_SPREAD_PROXY = "max(liquidity_concentration, dispersion)"  # recorded in
 S6_EFF_N_MIN = 1.0
 
 
+# ---------------------------------------------------------------------------
+# Cross-stock lead-lag family (`lead_lag`) — docs/lead-lag-family-spec.md
+# ---------------------------------------------------------------------------
+LEAD_LAG_LAGS = (1, 2, 5)           # pre-registered horizons W; hold_bars H = W in v1
+LEAD_LAG_FORMATIONS = (60, 120, 252)
+LEAD_LAG_OPEN_Z = (1.0, 1.5, 2.0)
+LEAD_LAG_STEP = 120                 # fixed in v1; varied only inside S5 CSCV grid
+LEAD_LAG_DEFAULT_LAG = 1
+LEAD_LAG_DEFAULT_FORMATION = 120
+LEAD_LAG_DEFAULT_OPEN_Z = 1.5
+LEAD_LAG_STALE_QUOTE_MAX = 0.25     # S0 cap on zero-return bar fraction per leg
+LEAD_LAG_MIN_SIGMA = 1e-8           # S0 non-degenerate variance floor
+LEAD_LAG_INDEX_HEDGE_BPS = 1.0      # S4 market-hedge leg half-spread floor (Decision 2A)
+LEAD_LAG_S0_GAMMA_TOL = 0.05        # S0 planted fixture tolerance |gamma_hat - gamma*|
+
+# Pre-registered 9-point S5 CSCV variant grid for lead_lag (center L=1).
+# For registered lag_bars in {2, 5}, s5_variant_grid_lead_lag(lag_bars) centers
+# rows 0..6 on lag_bars and puts the other two horizons in rows 7..8.
+S5_VARIANT_GRID_LEAD_LAG = (
+    {"lag_bars": 1, "hold_bars": 1, "formation": 120, "open_z": 1.5, "step": 120},
+    {"lag_bars": 1, "hold_bars": 1, "formation": 60,  "open_z": 1.5, "step": 120},
+    {"lag_bars": 1, "hold_bars": 1, "formation": 252, "open_z": 1.5, "step": 120},
+    {"lag_bars": 1, "hold_bars": 1, "formation": 120, "open_z": 1.0, "step": 120},
+    {"lag_bars": 1, "hold_bars": 1, "formation": 120, "open_z": 2.0, "step": 120},
+    {"lag_bars": 1, "hold_bars": 1, "formation": 120, "open_z": 1.5, "step": 60},
+    {"lag_bars": 1, "hold_bars": 1, "formation": 120, "open_z": 1.5, "step": 252},
+    {"lag_bars": 2, "hold_bars": 2, "formation": 120, "open_z": 1.5, "step": 120},
+    {"lag_bars": 5, "hold_bars": 5, "formation": 120, "open_z": 1.5, "step": 120},
+)
+
+
 def tau_cal(scope_id: str) -> float:
     """Scope-matched t hurdle for S4: tau_cal ~ 3.5 for a 5-yr scope,
     3.0 at full depth (design doc §3.2 table). Research-grade 5y scopes
@@ -172,6 +203,42 @@ def s5_variant_grid_digest() -> str:
     import hashlib
     import json
     canon = json.dumps([dict(v) for v in S5_VARIANT_GRID],
+                       sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canon.encode()).hexdigest()
+
+
+def s5_variant_grid_lead_lag(lag_bars: int = LEAD_LAG_DEFAULT_LAG) -> tuple[dict, ...]:
+    """Pre-registered 9-point S5 CSCV variant grid for `lead_lag`.
+
+    Center and formation/open_z/step perturbations use `lag_bars` (with
+    `hold_bars = lag_bars`), and the final two rows carry the other two
+    allowed horizons in LEAD_LAG_LAGS = (1, 2, 5).
+    """
+    lag = int(lag_bars)
+    if lag not in LEAD_LAG_LAGS:
+        raise ValueError(
+            f"lag_bars must be in {LEAD_LAG_LAGS}, got {lag_bars!r}"
+        )
+    others = [h for h in LEAD_LAG_LAGS if h != lag]
+    return (
+        {"lag_bars": lag, "hold_bars": lag, "formation": 120, "open_z": 1.5, "step": 120},
+        {"lag_bars": lag, "hold_bars": lag, "formation": 60,  "open_z": 1.5, "step": 120},
+        {"lag_bars": lag, "hold_bars": lag, "formation": 252, "open_z": 1.5, "step": 120},
+        {"lag_bars": lag, "hold_bars": lag, "formation": 120, "open_z": 1.0, "step": 120},
+        {"lag_bars": lag, "hold_bars": lag, "formation": 120, "open_z": 2.0, "step": 120},
+        {"lag_bars": lag, "hold_bars": lag, "formation": 120, "open_z": 1.5, "step": 60},
+        {"lag_bars": lag, "hold_bars": lag, "formation": 120, "open_z": 1.5, "step": 252},
+        {"lag_bars": others[0], "hold_bars": others[0], "formation": 120, "open_z": 1.5, "step": 120},
+        {"lag_bars": others[1], "hold_bars": others[1], "formation": 120, "open_z": 1.5, "step": 120},
+    )
+
+
+def s5_variant_grid_lead_lag_digest(lag_bars: int = LEAD_LAG_DEFAULT_LAG) -> str:
+    """SHA-256 over the canonical JSON of the lead_lag S5 variant grid."""
+    import hashlib
+    import json
+    grid = s5_variant_grid_lead_lag(lag_bars)
+    canon = json.dumps([dict(v) for v in grid],
                        sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canon.encode()).hexdigest()
 
