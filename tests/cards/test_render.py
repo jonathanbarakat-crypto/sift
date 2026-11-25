@@ -22,7 +22,6 @@ Covers the deliverable requirements:
 import base64
 import io
 import json
-import re
 
 import numpy as np
 import pytest
@@ -31,9 +30,17 @@ from PIL import Image
 from sift import flags
 from sift.cards import CardError, CardRegistry
 from sift.cards.face import CardFaceRenderer, FaceError, _guard_face_artifact, _guard_no_tickers
-from sift.cards.render import (ART_LABEL, S, W, H, CardImageRenderer,
-                               attach_card_image, assert_no_ink_outside_frame,
-                               inner_frame_rect, render_face_png)
+from sift.cards.render import (
+    ART_LABEL,
+    CardImageRenderer,
+    H,
+    S,
+    W,
+    assert_no_ink_outside_frame,
+    attach_card_image,
+    inner_frame_rect,
+    render_face_png,
+)
 from sift.registry import Ledger
 from tests.cards.test_minting import SECRET, _run_validated_green
 
@@ -47,9 +54,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()

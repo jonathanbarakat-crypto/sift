@@ -9,6 +9,7 @@ full-depth become on-watch-amber, not validated-green (v3 §8.4).
 
 from __future__ import annotations
 
+import contextlib
 import math
 from dataclasses import dataclass, field
 
@@ -16,8 +17,7 @@ import numpy as np
 
 from sift.gauntlet import config as cfg
 from sift.gauntlet import s5 as s5stats
-from sift.gauntlet import stats
-from sift.gauntlet import v42
+from sift.gauntlet import stats, v42
 from sift.registry import Ledger
 
 
@@ -510,7 +510,7 @@ class GauntletRunner:
         the engine on the locked holdout) is passed to the card minter so it
         is persisted on the minted card; it is also surfaced on the verdict
         dict as `holdout_baseline`. None when the run had no holdout."""
-        trial = self.ledger.get(trial_id)
+        self.ledger.get(trial_id)
         if fixture_x is None or fixture_y is None:
             raise ValueError("S0 requires fixture_x/fixture_y")
         if excess_returns is None:
@@ -525,8 +525,6 @@ class GauntletRunner:
             self.record(trial_id, sr)
             results.append(sr)
             if on_stage is not None:
-                import contextlib
-
                 with contextlib.suppress(Exception):
                     on_stage(sr)
 
@@ -582,7 +580,6 @@ class GauntletRunner:
         # fail -> on-watch-amber (v3 §8.4). Without full-window data the trial
         # stays on-watch-amber with the s5 row pending (a stage not run cannot
         # pass).
-        s5_pass: bool | None = None
         if full_prices is not None and full_spread_returns is not None:
             s5 = self.run_s5(
                 trial_id,
@@ -595,7 +592,6 @@ class GauntletRunner:
             )
             _record_and_emit(s5)
             self.ledger.update_var_stat("registry_depth")
-            s5_pass = s5.status == "pass"
             cls = s5.detail["survivor_class"]
             self.ledger.decide(trial_id, "survivor", cls)
             card_id = self._maybe_mint_card(trial_id, "survivor", cls,

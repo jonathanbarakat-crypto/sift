@@ -19,7 +19,6 @@ import pytest
 
 from sift.gauntlet import stats
 
-
 # ---------------------------------------------------------------- #12 HAC
 
 def test_nw_lag_rule_matches_andrews():

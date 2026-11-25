@@ -44,8 +44,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sift import flags
-from sift.cards import CardError, CardRegistry
+from sift import db, flags
+from sift.cards import CardRegistry
 
 # Delivery modes (v3 §7.2 monitoring row: free = daily digest, paid = live).
 MODE_DIGEST = "digest"
@@ -224,7 +224,6 @@ def copy_for_event(event: str, card, detail: dict | None = None) -> str:
         )
     else:
         raise NotifyError(f"unknown notification event {event!r}")
-    low = text.lower()
     banned = contains_banned(text)
     if banned is not None:
         raise NotifyError(f"copy contains banned phrase {banned!r} — refused")
@@ -235,15 +234,29 @@ class Notifier:
     """Per-card opt-in notification prefs + append-only queue.
     Server-side only."""
 
-    def __init__(self, cards: CardRegistry, db_path: str | Path):
+    def __init__(
+        self,
+        cards: CardRegistry,
+        db_path: str | Path | None = None,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
         self.cards = cards
-        self.db_path = Path(db_path)
-        if str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
+        if con is not None or db_path is None:
+            shared = con if con is not None else cards.con
+            self.con = shared
+            self._owns_con = False
+            self.db_path = (
+                Path(db_path) if db_path is not None else (db.db_path_of(shared) or cards.db_path)
+            )
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA foreign_keys = ON")
+        else:
+            self.db_path = Path(db_path)
+            self.con = db.connect(self.db_path)
+            self._owns_con = True
         self.con.executescript(_SCHEMA_SQL)
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def __enter__(self) -> "Notifier":
         return self
@@ -252,7 +265,8 @@ class Notifier:
         self.close()
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     # -- flag guard -------------------------------------------------------------
 
@@ -281,7 +295,7 @@ class Notifier:
         """Opt-in per card (default OFF). `mode` is resolved through
         effective_mode: live only with the paid entitlement. Read-back."""
         self._require_flag(handle)
-        card = self.cards.assert_owned(card_id, handle)   # non-transferable
+        self.cards.assert_owned(card_id, handle)   # non-transferable
         mode = self.effective_mode(handle, mode, entitlement)
         now = time.time() if now is None else now
         self.con.execute(
@@ -291,7 +305,7 @@ class Notifier:
             " mode=excluded.mode, updated_at=excluded.updated_at",
             (card_id, handle, 1 if enabled else 0, mode, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_pref(card_id, handle)             # read-back
 
     def get_pref(self, card_id: str, handle: str) -> NotifyPref:
@@ -406,7 +420,7 @@ class Notifier:
             " payload_json, state, created_at) VALUES (?,?,?,?,?,'queued',?)",
             (card_id, handle, event_kind, mode, json.dumps(payload, default=str), now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         row = self.con.execute(
             "SELECT * FROM notify_log WHERE notif_id=last_insert_rowid()"
         ).fetchone()
@@ -462,7 +476,7 @@ class Notifier:
                 )
             out.append(self.get_notif(int(self.con.execute(
                 "SELECT last_insert_rowid() x").fetchone()["x"])))
-        self.con.commit()
+        db.maybe_commit(self.con)
         return out
 
     # -- delivery ----------------------------------------------------------------------
@@ -494,7 +508,7 @@ class Notifier:
                 (STATE_DELIVERED, now, r["notif_id"], STATE_QUEUED),
             )
             delivered.append(self.get_notif(r["notif_id"]))   # read-back
-        self.con.commit()
+        db.maybe_commit(self.con)
         return delivered
 
     # -- reads --------------------------------------------------------------------------

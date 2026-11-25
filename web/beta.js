@@ -1,7 +1,7 @@
 /* SIFT Gate-1 Invited Beta UI controller.
    All card, onboarding, ToS, glossary, gauge, health, and verdict copy is
    rendered strictly from server responses built in sift/cards/copy.py +
-   sift/cards/decks.py + sift/cards/face.py. Zero raw market data or tickers. */
+   sift/decks/copy.py + sift/cards/face.py. Zero raw market data or tickers. */
 (function () {
   "use strict";
 

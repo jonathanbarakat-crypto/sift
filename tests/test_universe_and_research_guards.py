@@ -76,7 +76,7 @@ def test_universe_research_vintage_flags_delist_idx_unavailable(tmp_path):
     assert rc == 0
     ranked = wh.read_parquet(os.path.join(root, "universe", "ranked_2026-11-15.parquet"))
     assert "delist_idx_available" in ranked.columns
-    assert (ranked["delist_idx_available"] == False).all()  # never survivorship-free
+    assert ranked["delist_idx_available"].eq(False).all()  # never survivorship-free
     manifest = wh.read_json(os.path.join(root, "universe", "manifest.json"))
     assert manifest["research_grade"] is True
     assert manifest["vendor"] == "yfinance"
@@ -96,7 +96,7 @@ def test_universe_production_vintage_keeps_delist_idx_available(tmp_path):
     rc = universe.main(["--warehouse", root, "--n", "10", "--asof", "2026-11-15"])
     assert rc == 0
     ranked = wh.read_parquet(os.path.join(root, "universe", "ranked_2026-11-15.parquet"))
-    assert (ranked["delist_idx_available"] == True).all()
+    assert ranked["delist_idx_available"].eq(True).all()
     manifest = wh.read_json(os.path.join(root, "universe", "manifest.json"))
     assert manifest["research_grade"] is False
     assert manifest["delist_idx_available"] is True

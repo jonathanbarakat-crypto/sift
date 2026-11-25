@@ -39,9 +39,9 @@ T = 1260  # free-scope window (bars)
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 def _populate_stratum(ledger, sr_anns, scope_id=SCOPE):

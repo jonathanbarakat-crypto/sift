@@ -21,8 +21,8 @@ from sift import flags
 from sift.cards import CardRegistry, tier_from_stats
 from sift.cards.decay import (
     GOLD_DSR,
-    GOLD_T_NET,
     GOLD_P_PERM,
+    GOLD_T_NET,
     MINT_T_FULL,
     PLATINUM_P_PERM,
     PLATINUM_T_NET,
@@ -34,8 +34,7 @@ from sift.cards.decay import (
     window_t_hurdle,
 )
 from sift.cards.minting import CardMinter
-from sift.gauntlet import stats
-from sift.gauntlet import v42
+from sift.gauntlet import stats, v42
 from sift.gauntlet.runner import GauntletRunner
 from sift.registry import Ledger
 from tests.fixtures.planted import f_regime
@@ -52,9 +51,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()

@@ -23,7 +23,6 @@ Fixtures/paths covered (one per new path):
 """
 
 import sqlite3
-import time
 
 import pytest
 
@@ -52,9 +51,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()

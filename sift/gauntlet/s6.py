@@ -52,7 +52,6 @@ import numpy as np
 from sift.gauntlet import config as cfg
 from sift.gauntlet import stats
 
-
 # --------------------------------------------------------------------------
 # Realistic per-name half-spreads from the data (replaces the 100 bps placeholder)
 #
@@ -286,7 +285,6 @@ def deck_basket_returns(
     weights_path = np.zeros((T, K))
     turnover = np.zeros(T)
     cost_bps = np.zeros(T)
-    last_rebal = -1
     for t in range(T):
         # NO LOOK-AHEAD (soundness #3): bar t earns the weights as they stand
         # at the START of bar t — i.e. drifted with returns only through
@@ -314,7 +312,6 @@ def deck_basket_returns(
             turnover[t] = to
             cost_bps[t] = cost * 1e4
             w = new_w
-            last_rebal = t
         # drift: w_i <- w_i * (1 + r_i) / sum_j w_j (1 + r_j), using the
         # CURRENT bar's return AFTER gross[t] was computed
         if t + 1 < T:

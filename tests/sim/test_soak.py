@@ -6,7 +6,6 @@ report view + the SIFT_ENV=test hard guard.
 """
 
 import json
-import os
 
 import pytest
 

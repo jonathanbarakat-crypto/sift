@@ -31,8 +31,9 @@ from pathlib import Path
 import pytest
 
 from sift import flags
-from sift.cards import decks as deck_copy
-from sift.cards.decks import (
+from sift.cards.notify import NotifyError, contains_banned
+from sift.decks import copy as deck_copy
+from sift.decks.copy import (
     BANNED_PHRASES_DECK,
     BANNED_WORDS_DECK,
     DECK_EVENT_TYPES,
@@ -49,7 +50,6 @@ from sift.cards.decks import (
     deck_rank_label,
     deck_rank_phrase,
 )
-from sift.cards.notify import NotifyError, contains_banned
 
 
 @pytest.fixture(autouse=True)
@@ -171,7 +171,7 @@ def test_candidates_line_says_no_single_card_is_an_instant_win():
 
 def test_candidates_line_fail_closed_on_injected_banned(monkeypatch):
     orig = cards_are_candidates_line
-    import sift.cards.decks as D
+    import sift.decks.copy as D
     monkeypatch.setattr(D, "cards_are_candidates_line", lambda *a, **k: (
         "No single card is an instant win — buy the top deck now"))
     with pytest.raises(DeckCopyError):
@@ -374,5 +374,22 @@ def test_kill_switch_env_zero_refuses_deck_copy(monkeypatch):
     with pytest.raises(DeckCopyError):
         deck_rank_label("S")
     monkeypatch.delenv("SIFT_CARDS_V4_1")
+    flags.reset()
+    assert "instant win" in cards_are_candidates_line()
+
+
+def test_decks_v4_2_kill_switch_refuses_deck_copy(monkeypatch):
+    monkeypatch.setenv("SIFT_DECKS_V4_2", "0")
+    flags.reset()
+    with pytest.raises(DeckCopyError):
+        cards_are_candidates_line()
+    with pytest.raises(DeckCopyError):
+        deck_rank_label("S")
+    with pytest.raises(DeckCopyError):
+        build_deck_event_payload(deck_id="d", bucket="b", rank="A", now=1.0)
+    with pytest.raises(DeckCopyError):
+        build_deck_artifact(deck_id="d", bucket="b", rank="A",
+                            watermark_handle="alice", now=1.0)
+    monkeypatch.delenv("SIFT_DECKS_V4_2")
     flags.reset()
     assert "instant win" in cards_are_candidates_line()

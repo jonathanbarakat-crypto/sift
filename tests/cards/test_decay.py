@@ -52,9 +52,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()
@@ -355,7 +355,7 @@ def test_flag_off_env_kill_switch(ledger, cards, monkeypatch):
 
 def test_invalid_tier_from_evaluator_raises(ledger, cards):
     card_id, _ = _mint_with_stats(cards, ledger, s5_pass=False)
-    job = RegistryDecayJob(cards, ledger, re_evaluator=lambda c, l: "diamond")
+    job = RegistryDecayJob(cards, ledger, re_evaluator=lambda c, led: "diamond")
     with pytest.raises(DecayError):
         job.run_pass(now=1000.0)
     assert cards.get_card(card_id).tier == "gold"

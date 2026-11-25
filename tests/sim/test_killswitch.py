@@ -12,7 +12,7 @@ from sift.cards.decay import DecayError
 from sift.cards.service import LayerError
 from sift.cards.share import ShareError
 from sift.cards.vault import VaultError
-from sift.sim.antiabuse import mint_sim_card, register_ready, good_post_for, _grant
+from sift.sim.antiabuse import good_post_for, mint_sim_card, register_ready
 from sift.sim.lifecycle import run_lifecycle_sim
 from sift.sim.world import SimWorld
 

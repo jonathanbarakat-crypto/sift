@@ -26,15 +26,12 @@ server-side).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from sift.cards.share import ATTRIBUTION_TAG, ShareError
 
 from .antiabuse import mint_sim_card
-from .clock import SimRng
-from .header import SIM_HEADER
 from .mining import run_one_mining_run
 from .personas import load_personas
 from .report import build_report, dump_json

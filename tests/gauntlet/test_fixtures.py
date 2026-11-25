@@ -13,9 +13,9 @@ from tests.fixtures.planted import f_null, f_pair
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 # -- ledger -------------------------------------------------------------------
@@ -62,7 +62,8 @@ def _run_pair(ledger, scope_id="free_5y_top1k", s2_B=200):
     fx = f_pair()
     prices = fx["prices"]
     x, y = prices[:, 0], prices[:, 1]
-    rx = np.diff(np.log(x)); ry = np.diff(np.log(y))
+    rx = np.diff(np.log(x))
+    ry = np.diff(np.log(y))
     spread_ret = ry - rx                      # true-beta spread returns
     # S1: planted effect = gross strategy returns (positive mean by construction)
     from sift.gauntlet import stats as _stats
@@ -119,7 +120,7 @@ def test_f_null_fails_s2(ledger):
 def test_f_null_fails_s3_dsr(ledger):
     """Under the null, DSR of a noise 'strategy' must be below 0.95 — the
     scope-stratified denominator deflates it."""
-    walks = f_null()
+    f_null()
     T = 1260
     # register 200 null trials in the stratum so N=200
     for i in range(200):

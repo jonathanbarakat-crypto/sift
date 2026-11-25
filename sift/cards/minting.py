@@ -27,7 +27,6 @@ from __future__ import annotations
 from sift import flags
 from sift.cards import CardRegistry
 from sift.gauntlet import stats as gstats
-from sift.gauntlet import v42
 from sift.registry import Ledger
 
 
@@ -83,10 +82,6 @@ class CardMinter:
         rho_bar = s3["rho_bar"] if "rho_bar" in s3.keys() else None
         epoch = s3["epoch"] if "epoch" in s3.keys() else None
         sr_star = None
-        try:
-            d = s3["dsr"]
-        except (KeyError, TypeError):
-            d = None
         # sr_star is recorded on the s3 stage DETAIL, not a column; recompute
         # it from the recorded dsr inputs when the stratum row is available,
         # else read the ledger's stratum stats at mint scope (context only).

@@ -56,11 +56,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from sift.cards import CardError
 from sift.cards import copy as card_copy
-from sift.cards import decks as deck_copy
 from sift.cards.face import FaceError
 from sift.cards.notify import MODE_DIGEST, NotifyError
 from sift.cards.service import CardLayer, LayerError
 from sift.cards.vault import BASE_CAPACITY, VaultError
+from sift.decks import copy as deck_copy
 from sift.gauntlet import config as cfg
 from sift.registry import Ledger
 from sift.web.auth import (
@@ -138,9 +138,10 @@ _FORBIDDEN_RUN_INPUT_KEYS = frozenset({
 
 
 def _onboarding_payload(handle: str | None = None) -> dict[str, Any]:
-    """Build onboarding copy ONLY from sift/cards/copy.py + sift/cards/decks.py
-    when cards_v4_1 is enabled; fall back to the verified static clauses when
-    the kill-switch is off (preserving GET /api/onboarding availability)."""
+    """Build onboarding copy ONLY from sift/cards/copy.py + sift/decks/copy.py
+    when cards_v4_1 / decks_v4_2 are enabled; fall back to the verified static
+    clauses when the kill-switch is off (preserving GET /api/onboarding
+    availability)."""
     try:
         return {
             "statement": card_copy.onboarding_statement(handle=handle),
@@ -149,7 +150,7 @@ def _onboarding_payload(handle: str | None = None) -> dict[str, Any]:
             "cards_are_candidates": deck_copy.cards_are_candidates_line(handle=handle),
             "glossary": card_copy.glossary(handle=handle),
             "privacy_note": PRIVACY_NOTE,
-            "source": "sift.cards.copy + sift.cards.decks (cards_v4_1)",
+            "source": "sift.cards.copy + sift.decks.copy (cards_v4_1 + decks_v4_2)",
         }
     except (card_copy.CopyError, deck_copy.DeckCopyError):
         return {

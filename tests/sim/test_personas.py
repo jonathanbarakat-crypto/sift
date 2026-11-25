@@ -20,8 +20,7 @@ from sift import flags
 from sift.cards.service import LayerError
 from sift.sim.bots import run_persona_session, run_persona_sim
 from sift.sim.header import SIM_HEADER
-from sift.sim.personas import (PERSONAS_PATH, PersonaSpecError, load_personas,
-                               persona_by_id)
+from sift.sim.personas import PERSONAS_PATH, PersonaSpecError, load_personas, persona_by_id
 from sift.sim.report import dump_json, render_text
 from sift.sim.world import SimWorld
 
@@ -52,7 +51,7 @@ def test_personas_json_validates(sim_env):
 def test_personas_json_rejects_bad_specs(sim_env, tmp_path):
     """Schema violations raise PersonaSpecError (negative cases)."""
     raw = json.loads(PERSONAS_PATH.read_text())
-    p = raw["personas"][0]
+    raw["personas"][0]
 
     def write(mutate):
         doc = json.loads(json.dumps(raw))

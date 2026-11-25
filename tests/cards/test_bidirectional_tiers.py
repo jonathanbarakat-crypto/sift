@@ -36,11 +36,9 @@ import numpy as np
 import pytest
 
 from sift import flags
-from sift.cards import CARD_TIERS, CardRegistry
+from sift.cards import CardRegistry
 from sift.cards.decay import (
     DECAY_EVENT,
-    MIN_CARD_AGE_BARS,
-    RATE_LIMIT_S,
     UPGRADE_EVENT,
     WINDOW_BARS,
     DecayError,
@@ -67,9 +65,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()
@@ -470,10 +468,8 @@ def test_public_upgrade_explanation_banned_phrase_free():
 
 
 def test_notify_upgrade_copy_banned_phrase_free(cards):
-    from tests.cards.test_minting import _run_validated_green  # noqa: F401
     # build a minimal card via registry directly
-    import sift.cards as C
-    t_card = None
+    from tests.cards.test_minting import _run_validated_green  # noqa: F401
     # use copy_for_event on a lightweight stub card
     class Stub:
         card_id = "card-stub"

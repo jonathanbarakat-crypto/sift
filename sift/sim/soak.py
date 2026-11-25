@@ -61,11 +61,9 @@ class LaneCtx:
 
 def _open_lane(db_dir: Path, seed: int, rng: SimRng, clock: SimClock, universe) -> LaneCtx:
     ledger = Ledger(db_dir / "ledger.db")
-    layer = CardLayer(ledger, db_dir / "cards", card_secret=b"sim-hmac-secret-test-only")
+    layer = CardLayer(ledger, card_secret=b"sim-hmac-secret-test-only")
     # client-side busy timeout so contending writers wait instead of failing
-    for con in (ledger.con, layer.cards.con, layer.vault.con, layer.shares.con,
-                layer.notify.con):
-        con.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    ledger.con.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     return LaneCtx(ledger=ledger, layer=layer, rng=rng, seed=seed,
                    clock=clock, universe=universe)
 
@@ -166,7 +164,7 @@ def run_soak(db_dir: str | Path, *, n_users: int = DEFAULT_N_USERS,
         queue_depths = [o.queue_depth_at_start for o in outcomes]
 
         # vault capacity pressure: how many vault entries / how full
-        con = sqlite3.connect(str(world.db_dir / "cards" / "vault.db"))
+        con = sqlite3.connect(str(world.layer.vault.db_path))
         try:
             vault_rows = con.execute(
                 "SELECT COUNT(*) FROM vault_entry WHERE state='vault'").fetchone()[0]

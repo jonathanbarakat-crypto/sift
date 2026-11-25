@@ -22,16 +22,13 @@ Covers (per hermes-tasks #206 / #181 findings #3 P0, #7 P1, #2 deck-side):
      design is undefined (fail closed), and the pbo check fails on None.
    - known-answer fixture: the N=3 mirror-overfit matrix -> PBO ~ 0.619.
 """
-import math
 
 import numpy as np
 import pytest
 
-from sift.gauntlet import config as gcfg
+from sift.decks import service as dsvc
 from sift.gauntlet import s6 as s6stats
 from sift.gauntlet import stats
-from sift.decks import service as dsvc
-
 
 # ---------------------------------------------------------------------------
 # #3 — basket look-ahead
@@ -66,7 +63,7 @@ def test_basket_weights_entering_bar_use_only_past_returns():
     out2 = s6stats.deck_basket_returns(R2, rebalance_cadence=10,
                                        cost_model=cost, formation=5)
     # gross[t] = dot(w_t, R[t]); w_t must be identical across the two runs
-    w1 = out["gross"][t] / R[t] if np.all(R[t] != 0) else None
+    out["gross"][t] / R[t] if np.all(R[t] != 0) else None
     # reconstruct w from weights_path: the stored row t is the weight set at
     # the last rebalance <= t, drifted with returns through t (bug) or t-1 (fix)
     # direct check: gross[t] with R[t] replaced by 0 must be 0 in BOTH runs and
@@ -74,7 +71,8 @@ def test_basket_weights_entering_bar_use_only_past_returns():
     assert out["gross"][t] != out2["gross"][t]  # R[t] changed, so gross changes
     # but the IMPLIED weight on component i must be unchanged: solve for w
     # from two different R[t] perturbations
-    R3 = R.copy(); R3[t] = np.zeros(3)
+    R3 = R.copy()
+    R3[t] = np.zeros(3)
     out3 = s6stats.deck_basket_returns(R3, rebalance_cadence=10,
                                        cost_model=cost, formation=5)
     assert out3["gross"][t] == pytest.approx(0.0, abs=1e-15)
@@ -82,8 +80,10 @@ def test_basket_weights_entering_bar_use_only_past_returns():
     eps = 1e-6
     w_implied = []
     for i in range(3):
-        Rp = R.copy(); Rp[t, i] += eps
-        Rm = R.copy(); Rm[t, i] -= eps
+        Rp = R.copy()
+        Rp[t, i] += eps
+        Rm = R.copy()
+        Rm[t, i] -= eps
         gp = s6stats.deck_basket_returns(Rp, rebalance_cadence=10,
                                          cost_model=cost, formation=5)["gross"][t]
         gm = s6stats.deck_basket_returns(Rm, rebalance_cadence=10,
@@ -92,10 +92,13 @@ def test_basket_weights_entering_bar_use_only_past_returns():
     w_implied = np.array(w_implied)
     # weights applied to bar t must not depend on R[t]: rebuild with R[t] changed
     w_implied2 = []
-    Rb = R.copy(); Rb[t] = R[t] * 3 + 0.02
+    Rb = R.copy()
+    Rb[t] = R[t] * 3 + 0.02
     for i in range(3):
-        Rp = Rb.copy(); Rp[t, i] += eps
-        Rm = Rb.copy(); Rm[t, i] -= eps
+        Rp = Rb.copy()
+        Rp[t, i] += eps
+        Rm = Rb.copy()
+        Rm[t, i] -= eps
         gp = s6stats.deck_basket_returns(Rp, rebalance_cadence=10,
                                          cost_model=cost, formation=5)["gross"][t]
         gm = s6stats.deck_basket_returns(Rm, rebalance_cadence=10,
@@ -125,7 +128,7 @@ def test_basket_equal_weight_buy_and_hold_identity_between_rebalances():
     assert np.allclose(out["weights"][a + 1], w), (
         f"bar after rebalance must open at equal weight drifted with R[a] only, "
         f"got {out['weights'][a+1]}")
-    bh = float(np.mean(np.prod(1.0 + R[a + 1:k + 1, :], axis=0)) - 1.0)
+    float(np.mean(np.prod(1.0 + R[a + 1:k + 1, :], axis=0)) - 1.0)
     # the basket compounds per-bar weights, so the exact identity against a
     # pure equal-weight buy-and-hold is on the LOG/wealth growth per bar up
     # to the cross-terms; the sharp invariant is PER-BAR: gross[t] must

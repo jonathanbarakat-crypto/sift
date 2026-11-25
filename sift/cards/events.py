@@ -51,15 +51,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sift import flags
+from sift import db, flags
 from sift.cards import Card, CardRegistry
 from sift.cards.notify import (
-    BANNED_PHRASES,
     DAY,
-    MODE_DIGEST,
-    MODE_LIVE,
-    NotifyError,
     Notifier,
+    NotifyError,
     copy_for_event,
 )
 
@@ -188,8 +185,6 @@ def persistence_facts(ledger, card: Card, *, now: float,
     - half_life_days: the S0 stage row's recorded half-life (survival fact,
       same source discipline as the card face).
     """
-    rows = _stage_rows(ledger, card.trial_id)
-    s0 = rows.get("s0", {})
     # stage rows store the calibration detail in the S0 statistic row only
     # via columns; half_life lives in the ledger event written at mint when
     # present — read it from the append-only events, never params_json.
@@ -457,20 +452,32 @@ class SignalEventService:
     on mutations; reads stay available). Kill-switch SIFT_CARDS_V4_1=0.
     """
 
-    def __init__(self, notifier: Notifier, ledger=None,
-                 db_path: str | Path | None = None):
+    def __init__(
+        self,
+        notifier: Notifier,
+        ledger=None,
+        db_path: str | Path | None = None,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
         self.notifier = notifier
         self.cards = notifier.cards
         self.ledger = ledger
-        if db_path is None:
-            db_path = self.notifier.db_path.parent / "signal.db"
-        self.db_path = Path(db_path)
-        if str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
+        if con is not None or db_path is None:
+            shared = con if con is not None else notifier.con
+            self.con = shared
+            self._owns_con = False
+            self.db_path = (
+                Path(db_path) if db_path is not None else (db.db_path_of(shared) or notifier.db_path)
+            )
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA foreign_keys = ON")
+        else:
+            self.db_path = Path(db_path)
+            self.con = db.connect(self.db_path)
+            self._owns_con = True
         self.con.executescript(_SCHEMA_SQL)
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def __enter__(self) -> "SignalEventService":
         return self
@@ -479,7 +486,8 @@ class SignalEventService:
         self.close()
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     # -- flag guard -------------------------------------------------------------
 
@@ -511,7 +519,7 @@ class SignalEventService:
             " updated_at=excluded.updated_at",
             (card_id, handle, channel, quiet_start, quiet_end, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_channel(card_id, handle)      # read-back
 
     def get_channel(self, card_id: str, handle: str) -> ChannelPref:
@@ -540,7 +548,7 @@ class SignalEventService:
             " VALUES (?,?,0,?)",
             (token, handle, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_rss_token(token)             # read-back
 
     def get_rss_token(self, token: str) -> RssToken:
@@ -565,7 +573,7 @@ class SignalEventService:
             "UPDATE rss_token SET revoked=1, revoked_at=? WHERE token=?",
             (now, token),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_rss_token(token)             # read-back
 
     def owner_for_rss_token(self, token: str) -> str | None:
@@ -601,7 +609,7 @@ class SignalEventService:
             " VALUES (?,?,?,1,?)",
             (handle, url, secret, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_webhook(int(cur.lastrowid))   # read-back
 
     def get_webhook(self, hook_id: int) -> Webhook:
@@ -624,7 +632,7 @@ class SignalEventService:
             "UPDATE webhook SET active=0, revoked_at=? WHERE hook_id=?",
             (now, hook_id),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_webhook(hook_id)              # read-back
 
     def active_webhooks(self, handle: str) -> list[Webhook]:
@@ -741,7 +749,7 @@ class SignalEventService:
             rb = self.notifier.get_notif(e["notif_id"])   # read-back
             e["state"] = rb.state
             e["delivered_at"] = rb.delivered_at
-        self.notifier.con.commit()
+        db.maybe_commit(self.notifier.con)
         return manifest                              # read-back manifest
 
 

@@ -32,7 +32,6 @@ from sift.cards.share import (
     MAX_SHARE_SLOTS,
     ShareError,
 )
-from sift.cards.vault import VaultError
 
 from .clock import DEFAULT_SEED
 from .report import build_report, dump_json
@@ -336,7 +335,7 @@ def run_antiabuse_sims(db_dir: str | Path, *, seed: int = DEFAULT_SEED) -> Attac
         }
 
         # ---- append-only integrity probe: triggers must block UPDATE/DELETE ---
-        con = sqlite3.connect(str(world.db_dir / "cards" / "shares.db"))
+        con = sqlite3.connect(str(world.layer.shares.db_path))
         update_blocked = delete_blocked = False
         try:
             try:

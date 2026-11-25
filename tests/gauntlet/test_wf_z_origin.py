@@ -49,8 +49,10 @@ def _block_params(prices, t, formation=FORMATION):
     """h, mu, sd, train_spread for the block starting at t (bars <= t only)."""
     w = slice(max(0, t - formation), t)
     x, y = prices[w, 0], prices[w, 1]
-    rx = np.zeros(len(x)); rx[1:] = np.diff(np.log(x))
-    ry = np.zeros(len(y)); ry[1:] = np.diff(np.log(y))
+    rx = np.zeros(len(x))
+    rx[1:] = np.diff(np.log(x))
+    ry = np.zeros(len(y))
+    ry[1:] = np.diff(np.log(y))
     vx = rx.var(ddof=1)
     h = float(np.cov(rx, ry, ddof=1)[0, 1] / vx) if vx > 0 else 0.0
     train_spread = np.cumsum(ry - h * rx)
@@ -77,8 +79,10 @@ def wf_anchored_reference(prices, formation=FORMATION, step=STEP,
     for (t, end) in block_layout(T, formation, step):
         h, mu, sd, train_spread = _block_params(prices, t, formation)
         block = prices[t:end]
-        bx = np.zeros(len(block)); bx[1:] = np.diff(np.log(block[:, 0]))
-        by = np.zeros(len(block)); by[1:] = np.diff(np.log(block[:, 1]))
+        bx = np.zeros(len(block))
+        bx[1:] = np.diff(np.log(block[:, 0]))
+        by = np.zeros(len(block))
+        by[1:] = np.diff(np.log(block[:, 1]))
         rs = by - h * bx
         spread = float(train_spread[-1]) + np.cumsum(rs)
         pos = np.zeros(len(block))
@@ -110,8 +114,10 @@ def wf_reset_positions(prices, formation=FORMATION, step=STEP,
     for (t, end) in block_layout(T, formation, step):
         h, mu, sd, _ = _block_params(prices, t, formation)
         block = prices[t:end]
-        bx = np.zeros(len(block)); bx[1:] = np.diff(np.log(block[:, 0]))
-        by = np.zeros(len(block)); by[1:] = np.diff(np.log(block[:, 1]))
+        bx = np.zeros(len(block))
+        bx[1:] = np.diff(np.log(block[:, 0]))
+        by = np.zeros(len(block))
+        by[1:] = np.diff(np.log(block[:, 1]))
         rs = by - h * bx
         spread = np.cumsum(rs)  # the bug
         pos = np.zeros(len(block))
@@ -140,8 +146,10 @@ def continuous_reference(prices, formation=FORMATION, step=STEP,
     for (t, end) in block_layout(T, formation, step):
         h, mu, sd, _ = _block_params(prices, t, formation)
         xa, ya = prices[:end, 0], prices[:end, 1]
-        rxa = np.zeros(end); rxa[1:] = np.diff(np.log(xa))
-        rya = np.zeros(end); rya[1:] = np.diff(np.log(ya))
+        rxa = np.zeros(end)
+        rxa[1:] = np.diff(np.log(xa))
+        rya = np.zeros(end)
+        rya[1:] = np.diff(np.log(ya))
         spread = np.cumsum(rya - h * rxa)
         for k in range(t + 1, end):
             zk = (spread[k] - mu) / sd
@@ -181,8 +189,10 @@ def test_wf_z_not_reset_jump_at_block_boundaries():
     for (t, end) in block_layout(T):
         h, mu, sd, train_spread = _block_params(prices, t)
         block = prices[t:end]
-        bx = np.zeros(len(block)); bx[1:] = np.diff(np.log(block[:, 0]))
-        by = np.zeros(len(block)); by[1:] = np.diff(np.log(block[:, 1]))
+        bx = np.zeros(len(block))
+        bx[1:] = np.diff(np.log(block[:, 0]))
+        by = np.zeros(len(block))
+        by[1:] = np.diff(np.log(block[:, 1]))
         rs = by - h * bx
         z_reset = (0.0 - mu) / sd                       # the buggy value
         z_anchored = (float(train_spread[-1]) + rs[1] - mu) / sd
@@ -250,8 +260,10 @@ def _wf_prefix(prices, formation=FORMATION, step=STEP,
         end = min(t + step, T)
         h, mu, sd, _ = _block_params(prices, t, formation)
         block = prices[t:end]
-        bx = np.zeros(len(block)); bx[1:] = np.diff(np.log(block[:, 0]))
-        by = np.zeros(len(block)); by[1:] = np.diff(np.log(block[:, 1]))
+        bx = np.zeros(len(block))
+        bx[1:] = np.diff(np.log(block[:, 0]))
+        by = np.zeros(len(block))
+        by[1:] = np.diff(np.log(block[:, 1]))
         rs = by - h * bx
         spread = np.cumsum(rs)
         pos = np.zeros(len(block))

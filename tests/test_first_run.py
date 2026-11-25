@@ -7,21 +7,17 @@ must cost ~0 wall-clock vs a unique trial.
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
-import time
 
 import numpy as np
 import pandas as pd
-import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) + "/..")
 
 from data import warehouse as wh
 from sift.engine import first_run as fr
-from sift.gauntlet import stats
 
 
 def _planted_pair(T=250, phi=0.9, seed=7):

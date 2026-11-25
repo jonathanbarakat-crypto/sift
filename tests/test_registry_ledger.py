@@ -199,7 +199,7 @@ def test_decide_rejects_invalid_combinations(ledger):
 # ----------------------------------------------------------- stratum_stats
 def test_stratum_n_counts_kills_and_registrations(ledger):
     t1 = ledger.register("pairs", SCOPE_FREE, PARAMS, VINTAGE_A)
-    t2 = ledger.register("pairs", SCOPE_FREE, PARAMS_VARIANT, VINTAGE_A)
+    ledger.register("pairs", SCOPE_FREE, PARAMS_VARIANT, VINTAGE_A)
     ledger.decide(t1.trial_id, "killed", "none")  # a kill still counts in N
     n, v = ledger.stratum_stats(SCOPE_FREE)
     assert n == 2          # includes the kill
@@ -231,6 +231,7 @@ def test_stratum_var_is_variance_of_s4_stats_within_scope(ledger):
     # SR^2 — matching the per-bar sr_hat fed to stats.dsr (deck-path
     # convention). Variance scales by 1/BARS_PER_YEAR under the conversion.
     import math as _math
+
     from sift.registry import BARS_PER_YEAR as _BPY
     assert v == pytest.approx(sample_variance(vals) / _BPY)
     # sample variance of [0.5, 1.0, 1.5, 2.0] = 5/12 = 0.41666... annualized;

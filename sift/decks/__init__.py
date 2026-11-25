@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sift import flags
+from sift import db, flags
 from sift.gauntlet import config as gcfg
 
 # Deck ranking F D C B A S — DISTINCT from card tiers (bronze/silver/gold).
@@ -234,15 +234,29 @@ def deck_rank_from_stats(dsr: float | None, t_net: float | None,
 class DeckRegistry:
     """Append-only deck registry + deck-trial ledger. Server-side only."""
 
-    def __init__(self, db_path: str | Path, secret: bytes | None = None):
-        self.db_path = Path(db_path)
-        if str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
-        self.con.execute("PRAGMA foreign_keys = ON")
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        secret: bytes | None = None,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
+        if con is not None:
+            self.con = con
+            self._owns_con = False
+            self.db_path = (
+                Path(db_path) if db_path is not None else (db.db_path_of(con) or Path(":memory:"))
+            )
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA foreign_keys = ON")
+        else:
+            if db_path is None:
+                raise ValueError("DeckRegistry requires db_path or con")
+            self.db_path = Path(db_path)
+            self.con = db.connect(self.db_path)
+            self._owns_con = True
         self.con.executescript(_SCHEMA_SQL)
-        self.con.commit()
+        db.maybe_commit(self.con)
         self._secret = secret if secret is not None else _default_secret()
 
     def __enter__(self) -> "DeckRegistry":
@@ -252,7 +266,8 @@ class DeckRegistry:
         self.close()
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     # -- flag -----------------------------------------------------------------
     def _require_flag(self, handle: str | None = None) -> None:
@@ -346,7 +361,7 @@ class DeckRegistry:
              None if kind == "custom" else "F",   # ranked starts unranked-at-F until S6 sets it
              owner_handle, data_vintage_hash, None, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         self.record_event(deck_id, "deck_register",
                           {"kind": kind, "scope_id": scope_id, "config": config,
                            "dedupe_key": key, "K": len(member_card_ids)},
@@ -367,7 +382,7 @@ class DeckRegistry:
             "UPDATE deck SET s6_pass=?, s6_detail_json=? WHERE deck_id=?",
             (1 if passed else 0, canonical_json(detail), deck_id),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         rank = None
         if deck.kind == "ranked" and passed:
             rank = deck_rank_from_stats(
@@ -379,7 +394,7 @@ class DeckRegistry:
                 # passed the S6 bar but below the B evidence bar -> C
                 rank = "C"
             self.con.execute("UPDATE deck SET rank=? WHERE deck_id=?", (rank, deck_id))
-            self.con.commit()
+            db.maybe_commit(self.con)
         self.record_event(
             deck_id, "deck_trial",
             {"passed": bool(passed), "rank": rank, "kind": deck.kind,
@@ -400,7 +415,7 @@ class DeckRegistry:
             " VALUES (?,?,?,?)",
             (deck_id, event_type, canonical_json(payload), now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         assert cur.lastrowid is not None
         return int(cur.lastrowid)
 

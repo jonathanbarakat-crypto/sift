@@ -27,7 +27,7 @@ from sift.gauntlet.runner import GauntletRunner
 from sift.registry import Ledger
 
 from .clock import SimClock, SimRng
-from .world import SIM_SCOPE_ID, SIM_VINTAGE, SimWorld
+from .world import SIM_SCOPE_ID, SIM_VINTAGE
 
 # Registration is the transactional bottleneck (trial_id minted from the
 # ledger count — the production design registers BEFORE compute, behind a

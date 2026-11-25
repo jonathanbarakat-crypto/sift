@@ -22,15 +22,19 @@ from sift.gauntlet import stats
 from sift.gauntlet.runner import GauntletRunner
 from sift.registry import Ledger
 from tests.fixtures.planted import (
-    T_5Y, T_EDGE, T_FULL, f_delist, f_pair, f_regime,
+    T_5Y,
+    T_FULL,
+    f_delist,
+    f_pair,
+    f_regime,
 )
 
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 def _spread_returns(prices):
@@ -226,7 +230,7 @@ def test_f_delist_valid_returns_nan_not_zero():
     """Post-delist returns are NaN, never a fabricated 0% return."""
     fx = f_delist(T=T_FULL, n=50, delist_frac=0.20)
     r = s5stats.valid_returns(fx["prices"], fx["delist_idx"])
-    mask = s5stats.delist_mask(fx["prices"], fx["delist_idx"])
+    s5stats.delist_mask(fx["prices"], fx["delist_idx"])
     for j in range(fx["n"]):
         d = fx["delist_idx"][j]
         if d < fx["T"]:

@@ -63,6 +63,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from sift import db
+
 CARD_KINDS = ("regular", "ghost")
 # v4.2 §3 (owner decision 2026-11-18, hermes-tasks #170): index = strength;
 # decay moves down. Tiers are computed from RAW, N-INDEPENDENT stats only
@@ -239,13 +241,27 @@ class CardRegistry:
     """Append-only card registry. The only writer is the server-side
     engine (mint on survivor) and the server-side decay job."""
 
-    def __init__(self, db_path: str | Path, secret: bytes | None = None):
-        self.db_path = Path(db_path)
-        if str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
-        self.con.execute("PRAGMA foreign_keys = ON")
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        secret: bytes | None = None,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
+        if con is not None:
+            self.con = con
+            self._owns_con = False
+            self.db_path = (
+                Path(db_path) if db_path is not None else (db.db_path_of(con) or Path(":memory:"))
+            )
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA foreign_keys = ON")
+        else:
+            if db_path is None:
+                raise ValueError("CardRegistry requires db_path or con")
+            self.db_path = Path(db_path)
+            self.con = db.connect(self.db_path)
+            self._owns_con = True
         self.con.executescript(_SCHEMA_SQL)
         # migration: older card DBs predate the minted_bar anchor column
         cols = {r[1] for r in self.con.execute("PRAGMA table_info(card)").fetchall()}
@@ -271,7 +287,7 @@ class CardRegistry:
                           ("baseline_holdout_bars", "INTEGER")):
             if col not in cols:
                 self.con.execute(f"ALTER TABLE card ADD COLUMN {col} {decl}")
-        self.con.commit()
+        db.maybe_commit(self.con)
         self._secret = secret if secret is not None else _default_secret()
 
     def __enter__(self) -> "CardRegistry":
@@ -281,7 +297,8 @@ class CardRegistry:
         self.close()
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     # -- id commitment ------------------------------------------------------
 
@@ -384,7 +401,7 @@ class CardRegistry:
                  dsr, sr_star, n_stratum, n_eff, rho_bar, epoch,
                  baseline_t_net, baseline_sr_ann, baseline_holdout_bars),
             )
-            self.con.commit()
+            db.maybe_commit(self.con)
             return self.get_card(card_id + f":g{no}")   # read-back
 
         self.con.execute(
@@ -401,7 +418,7 @@ class CardRegistry:
              dsr, sr_star, n_stratum, n_eff, rho_bar, epoch,
              baseline_t_net, baseline_sr_ann, baseline_holdout_bars),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_card(card_id)                    # read-back
 
     def _next_ghost_no(self, spec_hash: str) -> int:
@@ -491,7 +508,7 @@ class CardRegistry:
             (downgraded, now, card.tier if downgraded != card.tier else card.decayed_from,
              card_id),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_card(card_id)
 
     def set_tier(self, card_id: str, new_tier: str, now: float | None = None) -> Card:
@@ -507,13 +524,13 @@ class CardRegistry:
         Read-back before returning."""
         if new_tier not in CARD_TIERS:
             raise CardError(f"invalid tier {new_tier!r}")
-        card = self.get_card(card_id)
+        self.get_card(card_id)
         now = time.time() if now is None else now
         self.con.execute(
             "UPDATE card SET tier=?, tier_updated_at=? WHERE card_id=?",
             (new_tier, now, card_id),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_card(card_id)
 
     def assert_owned(self, card_id: str, handle: str) -> Card:

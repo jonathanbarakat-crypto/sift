@@ -37,19 +37,16 @@ import json
 import os
 import sqlite3
 
-import numpy as np
 import pytest
 
 from sift import flags
-from sift.cards import CardRegistry
-from sift.cards.decay import DecayError, RegistryDecayJob
-from sift.cards.face import CardFaceRenderer, FaceError
-from sift.cards.metrics import MetricError, Metrics
-from sift.cards.minting import CardMinter
-from sift.cards.notify import Notifier, NotifyError
+from sift.cards.decay import DecayError
+from sift.cards.face import FaceError
+from sift.cards.metrics import MetricError
+from sift.cards.notify import NotifyError
 from sift.cards.service import CardLayer, LayerError
-from sift.cards.share import MAX_SHARE_SLOTS, ShareError, ShareService
-from sift.cards.vault import Vault, VaultError
+from sift.cards.share import MAX_SHARE_SLOTS, ShareError
+from sift.cards.vault import VaultError
 from sift.gauntlet.runner import GauntletRunner
 from sift.registry import Ledger
 from tests.cards.test_minting import SECRET, _run_validated_green
@@ -68,9 +65,9 @@ def _flags_reset():
 
 @pytest.fixture()
 def ledger(tmp_path):
-    l = Ledger(tmp_path / "ledger.db")
-    yield l
-    l.close()
+    led = Ledger(tmp_path / "ledger.db")
+    yield led
+    led.close()
 
 
 @pytest.fixture()
@@ -94,19 +91,22 @@ def _row_counts(db_path) -> dict:
         con.close()
 
 
+_LEDGER_TABLES = frozenset({
+    "trial", "stage_result", "stratum_stats", "stratum_epoch", "ledger_event",
+    "sqlite_sequence",
+})
+
+
 def _layer_db_counts(layer, tmp_db_dir) -> dict:
-    out = {}
-    for name in ("cards.db", "vault.db", "shares.db", "notify.db"):
-        p = tmp_db_dir / name
-        if p.exists():
-            out[name] = _row_counts(p)
-    return out
+    _ = tmp_db_dir
+    all_counts = _row_counts(layer.db_path)
+    return {t: c for t, c in all_counts.items() if t not in _LEDGER_TABLES}
 
 
 def _run_and_mint(layer, handle=HANDLE, fixture="F-PAIR-FULL"):
     """Full gauntlet run on the planted full-window pair -> validated-green
     -> exactly one card minted for `handle` (flag ON)."""
-    runner = GauntletRunner(layer.ledger, seed=7, card_minter=layer.minter)
+    GauntletRunner(layer.ledger, seed=7, card_minter=layer.minter)
     # reuse the shared validated-green helper against this layer's stores
     verdict, trial = _run_validated_green(layer.ledger, layer.cards,
                                            handle=handle, fixture=fixture)
@@ -450,9 +450,8 @@ def test_share_grant_uniqueness_cap_and_prereqs(layer):
 
 def test_share_device_rate_limit_and_cluster_flag(layer):
     verdict, _ = _run_and_mint(layer)
-    t = layer.ledger.get(layer.cards.get_card(verdict["card_id"]).trial_id)
+    layer.ledger.get(layer.cards.get_card(verdict["card_id"]).trial_id)
     _ready_account(layer.shares, HANDLE)
-    post = lambda cid, h: f"https://s.example/{cid} card={cid} @{h} #SIFT"  # noqa: E731
 
     def farm_post(cid):
         layer.shares.post_fetcher = lambda url: (
@@ -602,7 +601,8 @@ def test_production_hard_fail_on_ephemeral_hmac_secret(monkeypatch, tmp_path):
         _default_secret()
     # dev default: warns loudly but still returns the dev secret
     monkeypatch.setenv("SIFT_ENV", "dev")
-    import io, contextlib
+    import contextlib
+    import io
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         s = _default_secret()

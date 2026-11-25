@@ -28,8 +28,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from sift import flags
-from sift.cards import CARD_TIERS, Card, CardError, CardRegistry
+from sift import db, flags
+from sift.cards import Card, CardRegistry
 
 VAULT_STATES = ("vault", "archive")     # custody states; pool membership is separate
 BASE_CAPACITY = {"platinum": 8, "gold": 6, "silver": 4, "bronze": 2}
@@ -73,15 +73,29 @@ class VaultEntry:
 class Vault:
     """Per-user vault over the card registry. Server-side only."""
 
-    def __init__(self, cards: CardRegistry, db_path: str | Path):
+    def __init__(
+        self,
+        cards: CardRegistry,
+        db_path: str | Path | None = None,
+        *,
+        con: sqlite3.Connection | None = None,
+    ):
         self.cards = cards
-        self.db_path = Path(db_path)
-        if str(self.db_path.parent) not in ("", "."):
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(str(self.db_path))
-        self.con.row_factory = sqlite3.Row
+        if con is not None or db_path is None:
+            shared = con if con is not None else cards.con
+            self.con = shared
+            self._owns_con = False
+            self.db_path = (
+                Path(db_path) if db_path is not None else (db.db_path_of(shared) or cards.db_path)
+            )
+            self.con.row_factory = sqlite3.Row
+            self.con.execute("PRAGMA foreign_keys = ON")
+        else:
+            self.db_path = Path(db_path)
+            self.con = db.connect(self.db_path)
+            self._owns_con = True
         self.con.executescript(_SCHEMA_SQL)
-        self.con.commit()
+        db.maybe_commit(self.con)
 
     def __enter__(self) -> "Vault":
         return self
@@ -90,7 +104,8 @@ class Vault:
         self.close()
 
     def close(self) -> None:
-        self.con.close()
+        if self._owns_con:
+            self.con.close()
 
     # -- capacity -------------------------------------------------------------
 
@@ -144,7 +159,7 @@ class Vault:
             " ON CONFLICT(card_id, owner) DO UPDATE SET state='vault', updated_at=excluded.updated_at",
             (card_id, handle, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_entry(card_id, handle)      # read-back
 
     def can_admit(self, handle: str, tier: str) -> bool:
@@ -160,7 +175,7 @@ class Vault:
     def keep(self, card_id: str, handle: str, now: float | None = None) -> VaultEntry:
         """Explicit keep: (re-)assert vault state. Idempotent. Read-back."""
         self._require_flag(handle)
-        card = self.cards.assert_owned(card_id, handle)
+        self.cards.assert_owned(card_id, handle)
         now = time.time() if now is None else now
         self.con.execute(
             "INSERT INTO vault_entry (card_id, owner, state, extra_slots, updated_at)"
@@ -168,7 +183,7 @@ class Vault:
             " ON CONFLICT(card_id, owner) DO UPDATE SET state='vault', updated_at=excluded.updated_at",
             (card_id, handle, now),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_entry(card_id, handle)
 
     def discard(self, card_id: str, handle: str, now: float | None = None) -> dict:
@@ -193,7 +208,7 @@ class Vault:
         shifted = 0
         if card.kind == "ghost":
             shifted = self._shift_ghosts_up(card.spec_hash, card.ghost_no or 0, card.card_id)
-        self.con.commit()
+        db.maybe_commit(self.con)
         # read-back: vault state after discard + pool membership
         entry = self.get_entry(card_id, handle)
         pooled = self.con.execute(
@@ -227,7 +242,7 @@ class Vault:
             self.cards.con.execute(
                 "UPDATE card SET ghost_no=? WHERE card_id=?", (r["ghost_no"] - 1, r["card_id"])
             )
-        self.cards.con.commit()
+        db.maybe_commit(self.cards.con)
         return len(rows)
 
     def promote(self, card_id: str, handle: str, now: float | None = None) -> VaultEntry:
@@ -244,7 +259,7 @@ class Vault:
             "UPDATE vault_entry SET state='vault', updated_at=? WHERE card_id=? AND owner=?",
             (now, card_id, handle),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.get_entry(card_id, handle)
 
     # -- reads ------------------------------------------------------------------
@@ -317,7 +332,7 @@ class Vault:
             "UPDATE vault_entry SET extra_slots=?, updated_at=? WHERE owner=?",
             (value, now, handle),
         )
-        self.con.commit()
+        db.maybe_commit(self.con)
         return self.share_slots(handle)                  # read-back
 
 
