@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import hmac
+import json
 import math
 import os
 import queue
@@ -43,6 +44,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from data import universe as pit_universe
 from data import warehouse as wh
 from sift import flags
 from sift.cards import CardError
@@ -172,18 +174,259 @@ def _pairwise_corr_matrix(log_rets: np.ndarray) -> np.ndarray:
     return np.nan_to_num(corr, nan=0.0)
 
 
+@dataclass(frozen=True)
+class _WarehouseUniverse:
+    """Resolved server-side symbol universe for a warehouse root.
+
+    `symbols` are the screened EOD stems eligible for pair discovery and
+    correlation-panel estimation; `all_symbols` includes every symbol stem on
+    disk or in universe tables (including quarantined/non-top-N names) so the
+    compliance guard blocks all of them from ever appearing in responses.
+    """
+
+    symbols: list[str]
+    all_symbols: frozenset[str]
+    asof: str | None
+    mode: str  # "pit_manifest" | "pit_parquet" | "eod_fallback"
+    quarantined_excluded: int
+    pit_listed_count: int
+
+
+def _symbol_stem(symbol: str, exchange: str = "US") -> str:
+    """Normalize a warehouse symbol (e.g. 'AAPL.US' or 'AAPL') to its EOD file stem."""
+    s = str(symbol).strip()
+    ex_suffix = f".{exchange.upper()}"
+    if s.upper().endswith(ex_suffix):
+        s = s[: -len(ex_suffix)]
+    return s.replace("/", "_").replace("\\", "_")
+
+
+def _resolve_universe_file(root: Path, raw_path: str | None) -> Path | None:
+    """Resolve a manifest-referenced parquet path strictly inside `<root>/universe/`.
+
+    Handles both in-place absolute paths and relocated warehouse directories
+    (falling back to `<root>/universe/<basename>`), while refusing any path
+    outside `<root>/universe/`.
+    """
+    if not raw_path or not isinstance(raw_path, str):
+        return None
+    uroot = (root / "universe").resolve()
+    if not uroot.is_dir():
+        return None
+    cand = Path(raw_path)
+    if cand.is_absolute():
+        with contextlib.suppress(OSError, ValueError):
+            resolved = cand.resolve()
+            if resolved.is_file() and resolved.is_relative_to(uroot):
+                return resolved
+    # Fallback for relocated warehouse mounts: match filename inside <root>/universe/.
+    name = cand.name
+    if not name or name in (".", ".."):
+        return None
+    with contextlib.suppress(OSError, ValueError):
+        rel = (uroot / name).resolve()
+        if rel.is_file() and rel.is_relative_to(uroot):
+            return rel
+    return None
+
+
+def _read_universe_symbols(path: Path, exchange: str = "US") -> list[str] | None:
+    """Read ordered normalized symbol stems from a PIT or quarantine parquet.
+
+    Returns None if the parquet cannot be read or lacks a `symbol` column
+    (allowing callers to fail closed).
+    """
+    try:
+        df = wh.read_parquet(str(path))
+    except Exception:  # noqa: BLE001
+        return None
+    if df is None:
+        return None
+    if df.empty:
+        return []
+    if "symbol" not in df.columns:
+        return None
+    if "exchange" in df.columns:
+        ex_u = exchange.upper()
+        ex_col = df["exchange"].fillna("").astype(str).str.upper()
+        df = df[(ex_col == "") | (ex_col == ex_u)]
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in df["symbol"].dropna().astype(str):
+        stem = _symbol_stem(raw, exchange)
+        key = stem.upper()
+        if stem and key not in seen:
+            seen.add(key)
+            out.append(stem)
+    return out
+
+
+def _resolve_warehouse_universe(
+    root: Path,
+    *,
+    env: str,
+    require_pit_universe: bool,
+    exchange: str = "US",
+) -> _WarehouseUniverse | None:
+    """Resolve the server-side screening universe for `root` (fail-closed).
+
+    Precedence:
+    1. Fail closed in production if `vintage.json` or `universe/manifest.json`
+       marks the warehouse `research_grade=True` (survivorship-biased feed).
+    2. When `universe/manifest.json` exists: require its `top_path` (PIT
+       top-N listing) and subtract any symbols in `quarantined_path` (fail
+       closed if a referenced file is missing or unreadable).
+    3. When `manifest.json` is absent:
+       - If `require_pit_universe` (default in production), fail closed.
+       - Otherwise, if `universe/top*_pit_*.parquet` or
+         `universe/quarantined_*.parquet` exist, honor the latest PIT/quarantine
+         files; if no universe files exist at all, fall back to `eod/<EX>/`.
+    """
+    eod_dir = root / "eod" / exchange.upper()
+    if not eod_dir.is_dir():
+        return None
+    disk_stems = sorted(p.stem for p in eod_dir.glob("*.parquet"))
+    if len(disk_stems) < 2:
+        return None
+    disk_by_upper = {s.upper(): s for s in disk_stems}
+    all_symbols: set[str] = set(disk_stems)
+
+    research_vintage, _ = pit_universe.vintage_is_research(str(root))
+    if env == "production" and research_vintage:
+        return None
+
+    uroot = root / "universe"
+    manifest_path = uroot / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        if env == "production" and bool(manifest.get("research_grade")):
+            return None
+
+        asof_raw = manifest.get("asof")
+        asof = str(asof_raw)[:10] if isinstance(asof_raw, str) and asof_raw.strip() else None
+
+        # Quarantine screen: fail closed if manifest declares quarantined entries
+        # or a quarantined_path that cannot be read.
+        dq = manifest.get("data_quality_screen")
+        dq_dict = dq if isinstance(dq, dict) else {}
+        q_raw_path = dq_dict.get("quarantined_path")
+        q_total = int(dq_dict.get("quarantined_total") or 0)
+        quarantined_upper: set[str] = set()
+        if q_raw_path or q_total > 0:
+            q_file = _resolve_universe_file(root, q_raw_path if isinstance(q_raw_path, str) else None)
+            if q_file is None:
+                return None
+            q_syms = _read_universe_symbols(q_file, exchange=exchange)
+            if q_syms is None:
+                return None
+            all_symbols.update(q_syms)
+            quarantined_upper = {s.upper() for s in q_syms}
+
+        top_file = _resolve_universe_file(
+            root, manifest.get("top_path") if isinstance(manifest.get("top_path"), str) else None
+        )
+        if top_file is None:
+            return None
+        top_syms = _read_universe_symbols(top_file, exchange=exchange)
+        if top_syms is None:
+            return None
+        all_symbols.update(top_syms)
+
+        selected: list[str] = []
+        seen_sel: set[str] = set()
+        for stem in top_syms:
+            key = stem.upper()
+            if key in quarantined_upper or key in seen_sel:
+                continue
+            disk_stem = disk_by_upper.get(key)
+            if disk_stem is not None:
+                seen_sel.add(key)
+                selected.append(disk_stem)
+        if len(selected) < 2:
+            return None
+        return _WarehouseUniverse(
+            symbols=selected,
+            all_symbols=frozenset(all_symbols),
+            asof=asof,
+            mode="pit_manifest",
+            quarantined_excluded=len(quarantined_upper),
+            pit_listed_count=len(top_syms),
+        )
+
+    if require_pit_universe:
+        return None
+
+    # Non-production fallback when manifest.json is absent: still honor any
+    # standalone quarantine / PIT parquet files under <root>/universe/.
+    quarantined_upper = set()
+    if uroot.is_dir():
+        q_files = sorted(uroot.glob("quarantined_*.parquet"))
+        if q_files:
+            q_syms = _read_universe_symbols(q_files[-1], exchange=exchange)
+            if q_syms is None:
+                return None
+            all_symbols.update(q_syms)
+            quarantined_upper = {s.upper() for s in q_syms}
+
+        top_files = sorted(uroot.glob("top*_pit_*.parquet"))
+        if top_files:
+            top_syms = _read_universe_symbols(top_files[-1], exchange=exchange)
+            if top_syms is None:
+                return None
+            all_symbols.update(top_syms)
+            selected = [
+                disk_by_upper[s.upper()]
+                for s in top_syms
+                if s.upper() not in quarantined_upper and s.upper() in disk_by_upper
+            ]
+            if len(selected) < 2:
+                return None
+            return _WarehouseUniverse(
+                symbols=selected,
+                all_symbols=frozenset(all_symbols),
+                asof=None,
+                mode="pit_parquet",
+                quarantined_excluded=len(quarantined_upper),
+                pit_listed_count=len(top_syms),
+            )
+
+    selected = [s for s in disk_stems if s.upper() not in quarantined_upper]
+    if len(selected) < 2:
+        return None
+    return _WarehouseUniverse(
+        symbols=selected,
+        all_symbols=frozenset(all_symbols),
+        asof=None,
+        mode="eod_fallback",
+        quarantined_excluded=len(quarantined_upper),
+        pit_listed_count=len(selected),
+    )
+
+
 def _load_delist_preserving_panel(
-    warehouse_root: str, symbols: list[str], exchange: str = "US"
+    warehouse_root: str,
+    symbols: list[str],
+    exchange: str = "US",
+    *,
+    asof: str | None = None,
 ) -> tuple[np.ndarray, list[str], np.ndarray]:
     """Load adjusted_close panel retaining delisted names (trailing NaNs kept).
 
     Unlike `first_run.load_price_matrix`, this does NOT drop names with <50%
     coverage: delisted stocks keep their pre-delist prices and trailing NaNs,
     and `delist_idx[j]` records the first trailing-NaN bar index (or T if the
-    symbol stayed listed through the end of the panel).
+    symbol stayed listed through the end of the panel). When `asof` is given,
+    bars with date > `asof` are truncated for point-in-time discipline.
     """
     frames: dict[str, pd.Series] = {}
     ex_suffix = f".{exchange.upper()}"
+    asof_cut = str(asof)[:10] if asof else None
     for sym in symbols:
         base = sym[: -len(ex_suffix)] if sym.upper().endswith(ex_suffix) else sym
         df = wh.read_parquet(wh.eod_parquet_path(warehouse_root, exchange, base))
@@ -193,6 +436,8 @@ def _load_delist_preserving_panel(
             continue
         s = df.set_index("date")["adjusted_close"].astype(float)
         s = s[~s.index.duplicated(keep="last")].sort_index()
+        if asof_cut is not None:
+            s = s[s.index.astype(str).str.slice(0, 10) <= asof_cut]
         if s.notna().sum() >= 2:
             frames[sym] = s
     if len(frames) < 2:
@@ -385,6 +630,7 @@ class PairCatalog:
         warehouse_dir: str | Path | None = None,
         allow_synthetic_examples: bool | None = None,
         max_warehouse_pairs: int = 20,
+        require_pit_universe: bool | None = None,
     ):
         self.warehouse_dir = Path(warehouse_dir) if warehouse_dir else None
         env = os.environ.get("SIFT_ENV", "dev").strip().lower()
@@ -395,23 +641,42 @@ class PairCatalog:
             else:
                 allow_synthetic_examples = env != "production"
         self.allow_synthetic_examples = bool(allow_synthetic_examples)
+        self.require_pit_universe = (
+            (env == "production") if require_pit_universe is None else bool(require_pit_universe)
+        )
         self.max_warehouse_pairs = int(max_warehouse_pairs)
 
         self._meta: dict[str, CandidateMeta] = {}
         self._wh_prices: np.ndarray | None = None
         self._wh_delist_idx: np.ndarray | None = None
         self._wh_symbols: list[str] = []
+        self._wh_all_symbols: frozenset[str] = frozenset()
         self._wh_pairs: dict[str, tuple[int, int]] = {}
         self._wh_panel_corr: np.ndarray | None = None
         self._wh_m_screened: int = 1
         self._wh_holdout_start: int | None = None
         self._wh_vintage: str = "no-vintage"
+        self._wh_universe_mode: str = "none"
+        self._wh_universe_asof: str | None = None
+        self._wh_quarantined_excluded: int = 0
+        self._wh_pit_listed_count: int = 0
         self._load()
 
     @property
     def forbidden_symbols(self) -> frozenset[str]:
-        """Loaded warehouse ticker stems (blocked by compliance guard)."""
-        return frozenset(self._wh_symbols)
+        """All warehouse ticker stems (including quarantined/non-top-N names),
+        blocked by the compliance guard from ever appearing in HTTP responses."""
+        return self._wh_all_symbols | frozenset(self._wh_symbols)
+
+    def universe_summary(self) -> dict[str, Any]:
+        """Aggregate-only universe metadata for `/api/mining/catalog` (never
+        exposes ticker symbols or raw counts tied to individual names)."""
+        return {
+            "mode": self._wh_universe_mode,
+            "asof": self._wh_universe_asof,
+            "quarantined_excluded": self._wh_quarantined_excluded,
+            "pit_listed_count": self._wh_pit_listed_count,
+        }
 
     def _load(self) -> None:
         env = os.environ.get("SIFT_ENV", "dev").strip().lower()
@@ -422,20 +687,24 @@ class PairCatalog:
             ) not in ("1", "true", "True", "yes"):
                 wh_loaded = False
             else:
-                wh_loaded = self._load_warehouse(self.warehouse_dir)
+                wh_loaded = self._load_warehouse(self.warehouse_dir, env=env)
 
         if not wh_loaded and self.allow_synthetic_examples:
+            self._wh_universe_mode = "synthetic"
             self._register_synthetic_presets()
 
-    def _load_warehouse(self, root: Path) -> bool:
-        eod_dir = root / "eod" / "US"
-        if not eod_dir.is_dir():
+    def _load_warehouse(self, root: Path, *, env: str) -> bool:
+        resolved = _resolve_warehouse_universe(
+            root,
+            env=env,
+            require_pit_universe=self.require_pit_universe,
+            exchange="US",
+        )
+        if resolved is None:
             return False
-        symbols = sorted(p.stem for p in eod_dir.glob("*.parquet"))
-        if len(symbols) < 2:
-            return False
+        self._wh_all_symbols = resolved.all_symbols
         prices, kept, delist_idx = _load_delist_preserving_panel(
-            str(root), symbols, exchange="US"
+            str(root), resolved.symbols, exchange="US", asof=resolved.asof
         )
         if prices.shape[1] < 2 or prices.shape[0] < cfg.scope_T("free_1y_top1k"):
             return False
@@ -443,6 +712,10 @@ class PairCatalog:
         self._wh_delist_idx = delist_idx
         self._wh_symbols = kept
         self._wh_vintage = wh.read_vintage(str(root)) or wh.warehouse_vintage_hash(str(root))
+        self._wh_universe_mode = resolved.mode
+        self._wh_universe_asof = resolved.asof
+        self._wh_quarantined_excluded = resolved.quarantined_excluded
+        self._wh_pit_listed_count = resolved.pit_listed_count
 
         # Lock the trailing 252 bars out of pair screening (soundness #10:
         # screening correlation NEVER peeks into the frozen holdout).

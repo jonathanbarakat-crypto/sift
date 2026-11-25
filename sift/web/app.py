@@ -814,6 +814,7 @@ def create_app(
         return _json({
             "ok": True,
             "candidates": items,
+            "universe": runtime.catalog.universe_summary(),
             "allowed_scopes": list(ALLOWED_SCOPES),
             "allowed_formations": list(ALLOWED_FORMATIONS),
             "allowed_open_z": list(ALLOWED_OPEN_Z),
