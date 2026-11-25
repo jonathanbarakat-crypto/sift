@@ -85,8 +85,9 @@ SYMBOL_LIST_ACTIVE = [
 ]
 
 
-def std_routes(eod_map=None, delisted_403=True):
+def std_routes(eod_map=None, delisted_403=True, splits_map=None):
     eod_map = eod_map or {}
+    splits_map = splits_map or {}
     routes = [
         (lambda u, p: u.endswith("/exchanges-list"), FakeResponse(200, EXCHANGES)),
         (lambda u, p: u.endswith("/exchange-symbol-list/US") and p.get("delisted") == "0",
@@ -96,6 +97,9 @@ def std_routes(eod_map=None, delisted_403=True):
     ]
     for sym, rows in eod_map.items():
         routes.append((lambda u, p, s=sym: u.endswith(f"/eod/{s}"), FakeResponse(200, rows)))
+    for sym, srows in splits_map.items():
+        routes.append((lambda u, p, s=sym: u.endswith(f"/splits/{s}"), FakeResponse(200, srows)))
+    routes.append((lambda u, p: "/splits/" in u, FakeResponse(200, [])))
     routes.append((lambda u, p: u.endswith("/eod/OLD.US"),
                    FakeResponse(403, {"error": "no data / limit"})))
     routes.append((lambda u, p: u.endswith("/real-time/AAPL.US"),
@@ -448,7 +452,8 @@ def test_universe_pit_no_survivorship_bias(tmp_path):
     _seed_bars(root)
     asof = "2026-11-15"
     bars = universe.load_all_bars(root)
-    ranked = universe.build_ranked_table(bars, asof)
+    ranked, quarantine = universe.build_ranked_table(bars, asof)
+    assert quarantine.empty
     assert list(ranked["symbol"]) == ["AAPL.US", "MSFT.US", "DEAD.US"]  # by avg dollar vol
     dead = ranked[ranked["symbol"] == "DEAD.US"].iloc[0]
     assert dead["ended_before_asof"] is True or bool(dead["ended_before_asof"]) is True
@@ -466,7 +471,8 @@ def test_universe_asof_excludes_future_bars(tmp_path):
     root = str(tmp_path / "wh")
     _seed_bars(root)
     # as of 2026-10-03 only 3 bars exist per name; DEAD still present, AAPL adv over 3 bars
-    ranked = universe.build_ranked_table(universe.load_all_bars(root), "2026-10-05")
+    ranked, quarantine = universe.build_ranked_table(universe.load_all_bars(root), "2026-10-05")
+    assert quarantine.empty
     aapl = ranked[ranked["symbol"] == "AAPL.US"].iloc[0]
     assert int(aapl["bars"]) == 3
     assert float(aapl["avg_dollar_volume"]) == pytest.approx(200.0 * 5_000_000)

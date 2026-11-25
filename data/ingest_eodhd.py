@@ -33,6 +33,7 @@ trade.
 
 Usage:
     python3 -m data.ingest_eodhd --warehouse data/warehouse --plan paid --max-calls 50000
+    python3 -m data.ingest_eodhd --warehouse data/warehouse --plan paid --splits-only
     python3 -m data.ingest_eodhd --warehouse data/warehouse --plan free --max-calls 19
     python3 -m data.ingest_eodhd --tickers AAPL MSFT --refresh-live
     python3 -m data.ingest_eodhd --exchanges-list-only
@@ -50,6 +51,10 @@ import pandas as pd
 if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from data import warehouse as wh  # type: ignore
+    from data.dollar_volume import (  # type: ignore
+        DOLLAR_VOLUME_BASIS,
+        compute_split_adjusted_dollar_volume,
+    )
     from data.eodhd_client import (  # type: ignore
         PLAN_DAILY_CALLS,
         CallBudgetExceeded,
@@ -59,6 +64,10 @@ if __package__ in (None, ""):
     )
 else:
     from . import warehouse as wh
+    from .dollar_volume import (
+        DOLLAR_VOLUME_BASIS,
+        compute_split_adjusted_dollar_volume,
+    )
     from .eodhd_client import (
         PLAN_DAILY_CALLS,
         CallBudgetExceeded,
@@ -93,7 +102,17 @@ def default_window(today: date | None = None, plan: str = "free") -> tuple[str, 
     return ((today - timedelta(days=FREE_TIER_HISTORY_DAYS)).isoformat(), today.isoformat())
 
 
-def _bars_to_frame(rows: list, symbol: str, exchange: str) -> pd.DataFrame:
+def _bars_to_frame(rows: list, symbol: str, exchange: str,
+                   splits: list | None = None) -> pd.DataFrame:
+    """Vendor rows -> canonical EOD frame (``warehouse.EOD_COLUMNS``).
+
+    Dollar volume uses the split-only-adjusted price basis (``split_adjusted_close
+    * volume``) derived from raw ``close`` and ``/api/splits/{SYMBOL}``:
+    EODHD's ``volume`` is split-adjusted only, ``close`` is raw, and
+    ``adjusted_close`` is split+dividend adjusted (explicitly contraindicated
+    for dollar volume by EODHD's methodology because dividends deflate historical
+    dollar volume 1.5x–3x and leak post-asof actions into PIT rankings).
+    """
     df = pd.DataFrame(rows)
     if df.empty:
         return pd.DataFrame(columns=wh.EOD_COLUMNS)
@@ -101,7 +120,8 @@ def _bars_to_frame(rows: list, symbol: str, exchange: str) -> pd.DataFrame:
     for c in ("open", "high", "low", "close", "adjusted_close", "volume"):
         df[c] = pd.to_numeric(df.get(c), errors="coerce")
     df["adjusted_close"] = df["adjusted_close"].fillna(df["close"])
-    df["dollar_volume"] = df["close"] * df["volume"]
+    _, _, dv = compute_split_adjusted_dollar_volume(df, splits=splits)
+    df["dollar_volume"] = dv
     df["symbol"] = symbol
     df["exchange"] = exchange
     return df[wh.EOD_COLUMNS].sort_values("date").reset_index(drop=True)
@@ -186,17 +206,59 @@ def fetch_symbol_list(client: EodhdClient, root: str, exchange: str,
     return data
 
 
+def fetch_splits(client: EodhdClient, root: str, exchange: str, symbol: str,
+                 force: bool = False) -> tuple[list | None, str]:
+    """Fetch and cache ``/api/splits/{SYMBOL}.{EX}`` (1 call per ticker, full history).
+
+    Returns ``(splits_list, status)`` where status is ``'cached'`` or ``'fetched'``.
+    An empty list ``[]`` is a valid cached result (symbol has no historical splits).
+    """
+    path = wh.splits_json_path(root, exchange, symbol)
+    if not force:
+        cached = wh.read_json(path)
+        if cached is not None and isinstance(cached, list):
+            return cached, "cached"
+    data = client.splits(f"{symbol}.{exchange.upper()}")
+    wh.write_json_atomic(data, path)
+    log(f"{symbol}: cached {len(data)} split event(s) (1 call)")
+    return data, "fetched"
+
+
+def _discover_ingested_symbols(root: str, exchange: str) -> list[str]:
+    """Return sorted bare symbols that already have EOD parquets under ``eod/<EX>/``."""
+    eod_dir = os.path.join(root, "eod", exchange.upper())
+    if not os.path.isdir(eod_dir):
+        return []
+    syms = [
+        name[:-len(".parquet")]
+        for name in sorted(os.listdir(eod_dir))
+        if name.endswith(".parquet")
+    ]
+    return syms
+
+
 def ingest_ticker(client: EodhdClient, root: str, exchange: str, symbol: str,
-                  from_date: str, to_date: str, force: bool = False) -> str:
-    """One call per ticker max. Returns 'fetched' | 'cached' | 'empty'.
+                  from_date: str, to_date: str, force: bool = False,
+                  fetch_splits_data: bool = False) -> str:
+    """Ingest EOD bars (and optionally splits) for one ticker. Returns 'fetched' | 'cached' | 'empty'.
 
     A ticker whose parquet is missing or empty is refetched (the vendor may
     simply have had no bars that day); a covered parquet is skipped with 0
-    calls, which is what makes reruns resumable within the 20/day budget.
+    calls, which is what makes reruns resumable within the daily budget.
+    When ``fetch_splits_data=True``, ``/api/splits/`` is also fetched/cached
+    (0 calls once cached) so ``dollar_volume`` uses the split-only-adjusted
+    price basis.
     """
     path = wh.eod_parquet_path(root, exchange, symbol)
     if not force and parquet_covers_window(path, from_date, to_date):
         log(f"{symbol}: cached parquet covers [{from_date}..{to_date}] — skipping (0 calls)")
+        if fetch_splits_data:
+            try:
+                fetch_splits(client, root, exchange, symbol, force=False)
+            except CallBudgetExceeded:
+                raise
+            except EodhdError as e:
+                log(f"{symbol}: splits API error: {e} (continuing)")
         return "cached"
     existing = wh.read_parquet(path)
     if existing is not None and not existing.empty and not force:
@@ -204,19 +266,45 @@ def ingest_ticker(client: EodhdClient, root: str, exchange: str, symbol: str,
         # final — keep it without spending a call
         log(f"{symbol}: series ended {existing['date'].max()} (before window end) — "
             f"keeping cached {len(existing)} bars (0 calls)")
+        if fetch_splits_data:
+            try:
+                fetch_splits(client, root, exchange, symbol, force=False)
+            except CallBudgetExceeded:
+                raise
+            except EodhdError as e:
+                log(f"{symbol}: splits API error: {e} (continuing)")
         return "cached"
     rows = client.eod(f"{symbol}.{exchange.upper()}", from_date=from_date, to_date=to_date)
-    df = _bars_to_frame(rows, f"{symbol}.{exchange.upper()}", exchange.upper())
+    splits: list | None = None
+    budget_exc: CallBudgetExceeded | None = None
+    if rows and fetch_splits_data:
+        try:
+            splits, _ = fetch_splits(client, root, exchange, symbol, force=force)
+        except CallBudgetExceeded as e:
+            budget_exc = e
+        except EodhdError as e:
+            log(f"{symbol}: splits API error: {e} (continuing without splits)")
+    elif not fetch_splits_data:
+        cached_splits = wh.read_json(wh.splits_json_path(root, exchange, symbol))
+        if isinstance(cached_splits, list):
+            splits = cached_splits
+    df = _bars_to_frame(rows, f"{symbol}.{exchange.upper()}", exchange.upper(), splits=splits)
     if df.empty and existing is not None and not existing.empty:
         # vendor returned nothing new (e.g. non-trading day at window end):
         # keep the richer cached series instead of overwriting with empty
         log(f"{symbol}: empty response, keeping cached {len(existing)} bars (1 call)")
+        if budget_exc is not None:
+            raise budget_exc
         return "cached"
     wh.write_parquet_atomic(df, path)
     if df.empty:
         log(f"{symbol}: no rows in window (empty series, e.g. renamed/delisted) — 1 call")
+        if budget_exc is not None:
+            raise budget_exc
         return "empty"
     log(f"{symbol}: wrote {len(df)} bars [{df['date'].min()}..{df['date'].max()}] (1 call)")
+    if budget_exc is not None:
+        raise budget_exc
     return "fetched"
 
 
@@ -260,6 +348,14 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--to", dest="to_date", default=None, help="window end (default: today)")
     ap.add_argument("--refresh-live", action="store_true",
                     help="also fetch the live real-time quote per ticker (1 extra call each)")
+    ap.add_argument("--fetch-splits", dest="fetch_splits", action="store_true", default=None,
+                    help="fetch and cache /api/splits/ per ticker (default: enabled on --plan paid, "
+                         "disabled on --plan free to preserve the 20/day budget)")
+    ap.add_argument("--no-splits", dest="fetch_splits", action="store_false",
+                    help="skip fetching /api/splits/ even on --plan paid")
+    ap.add_argument("--splits-only", action="store_true",
+                    help="backfill /api/splits/ for already-ingested tickers (or --tickers) "
+                         "without re-fetching EOD parquets; resumable")
     ap.add_argument("--exchanges-list-only", action="store_true",
                     help="fetch exchanges-list once and exit (1 call)")
     ap.add_argument("--force", action="store_true", help="ignore parquet/cache coverage, refetch")
@@ -277,6 +373,7 @@ def main(argv: list | None = None) -> int:
         d_from, d_to = default_window(plan=args.plan)
         from_date = from_date or d_from
         to_date = to_date or d_to
+    do_splits = (args.plan == "paid") if args.fetch_splits is None else bool(args.fetch_splits)
 
     try:
         client = EodhdClient(
@@ -310,6 +407,35 @@ def main(argv: list | None = None) -> int:
             return 4
 
     try:
+        if args.splits_only:
+            symbols = list(args.tickers) if args.tickers is not None else _discover_ingested_symbols(
+                root, args.exchange
+            )
+            results = {"fetched": 0, "cached": 0, "errors": 0, "skipped_budget": 0}
+            for idx, sym in enumerate(symbols):
+                try:
+                    _, st = fetch_splits(client, root, args.exchange, sym, force=args.force)
+                    results[st] = results.get(st, 0) + 1
+                except CallBudgetExceeded as e:
+                    log(f"STOP: {e}")
+                    results["skipped_budget"] = len(symbols) - idx
+                    break
+                except EodhdError as e:
+                    log(f"{sym}: splits API error: {e} (continuing)")
+                    results["errors"] += 1
+            rec = wh.write_vintage(root, extra={
+                "built_by": "ingest_eodhd --splits-only",
+                "plan": args.plan,
+                "exchange": args.exchange.upper(),
+                "dollar_volume_basis": DOLLAR_VOLUME_BASIS,
+                "tickers_requested": len(symbols),
+                "results": results,
+                "calls_used_this_run": client.calls_made,
+            })
+            log(f"splits backfill done: {results} | calls used: {client.calls_made}/{client.max_calls} | "
+                f"vintage {rec['vintage'][:16]}…")
+            return 0
+
         fetch_exchanges_list(client, root, force=args.force)
         if args.exchanges_list_only:
             rec = wh.write_vintage(root, extra={"built_by": "ingest_eodhd --exchanges-list-only",
@@ -349,18 +475,17 @@ def main(argv: list | None = None) -> int:
             symbols = list(symbols)
 
         results = {"fetched": 0, "cached": 0, "empty": 0, "live": 0, "skipped_budget": 0}
-        for sym in symbols:
+        for idx, sym in enumerate(symbols):
             try:
                 r = ingest_ticker(client, root, args.exchange, sym, from_date, to_date,
-                                  force=args.force)
+                                  force=args.force, fetch_splits_data=do_splits)
                 results[r] = results.get(r, 0) + 1
                 if args.refresh_live:
                     refresh_live(client, root, args.exchange, sym)
                     results["live"] += 1
             except CallBudgetExceeded as e:
                 log(f"STOP: {e}")
-                results["skipped_budget"] = len(symbols) - sum(
-                    v for k, v in results.items() if k != "skipped_budget")
+                results["skipped_budget"] = len(symbols) - idx
                 break
             except EodhdError as e:
                 log(f"{sym}: API error: {e} (continuing)")
@@ -370,6 +495,8 @@ def main(argv: list | None = None) -> int:
             "plan": args.plan,
             "window": [from_date, to_date],
             "exchange": args.exchange.upper(),
+            "dollar_volume_basis": DOLLAR_VOLUME_BASIS,
+            "fetch_splits": do_splits,
             "tickers_requested": len(symbols),
             "results": results,
             "calls_used_this_run": client.calls_made,

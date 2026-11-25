@@ -7,9 +7,11 @@ gitignored — raw vendor data never leaves the server):
     meta/symbol-list/<EX>-active.json   cached /exchange-symbol-list/<EX>
     meta/symbol-list/<EX>-delisted.json cached ...?delisted=1
     eod/<EX>/<SYMBOL>.parquet           one file per ticker, daily bars
+    splits/<EX>/<SYMBOL>.json           cached /splits/<SYMBOL>.<EX> events
     live/<SYMBOL>.parquet               real-time quote snapshots
     universe/ranked_<asof>.parquet      full ranked candidate table
     universe/top<N>_pit_<asof>.parquet  point-in-time top-N listing
+    universe/quarantined_<asof>.parquet symbols quarantined by quality screens
     universe/manifest.json              latest build metadata
     state/calls.json                    API call accounting (not vintage data)
     VINTAGE                             the data-vintage content hash
@@ -17,7 +19,7 @@ gitignored — raw vendor data never leaves the server):
 
 The *data vintage* (v3 scope doc section 3.2 / 5: "data vintage = content
 hash") is a sha256 over every data file under the warehouse (meta/, eod/,
-live/, universe/ — excluding the call-accounting state and the vintage
+splits/, live/, universe/ — excluding the call-accounting state and the vintage
 files themselves), so any byte change in the warehouse changes the hash.
 """
 from __future__ import annotations
@@ -71,6 +73,11 @@ def read_parquet(path: str) -> Optional[pd.DataFrame]:
 def eod_parquet_path(root: str, exchange: str, symbol: str) -> str:
     safe = symbol.replace("/", "_").replace("\\", "_")
     return os.path.join(root, "eod", exchange.upper(), f"{safe}.parquet")
+
+
+def splits_json_path(root: str, exchange: str, symbol: str) -> str:
+    safe = symbol.replace("/", "_").replace("\\", "_")
+    return os.path.join(root, "splits", exchange.upper(), f"{safe}.json")
 
 
 def live_parquet_path(root: str, symbol: str) -> str:
