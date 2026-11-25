@@ -247,6 +247,21 @@ class EodhdClient:
         params = {"from": from_date, "to": to_date, "period": period}
         return self.get(f"/eod/{symbol}", params=params, deep_history=deep_history)
 
+    def splits(self, symbol: str, from_date: Optional[str] = None,
+               to_date: Optional[str] = None) -> list:
+        """GET /splits/{SYMBOL} — historical split events (1 call per ticker).
+
+        Included on both the paid ``EOD Historical Data — All World`` plan
+        (full history back to 1970) and the free tier (past 1 year). Returns a
+        list of ``{"date": "YYYY-MM-DD", "split": "<new>/<old>"}`` dicts
+        (empty list when the symbol has no splits).
+        """
+        params = {"from": from_date, "to": to_date}
+        data = self.get(f"/splits/{symbol}", params=params)
+        if not isinstance(data, list):
+            raise EodhdError(f"splits/{symbol} returned a non-list response")
+        return data
+
     def realtime(self, symbol: str) -> dict:
         """GET /real-time/{SYMBOL} — live quote (included on the free tier)."""
         data = self.get(f"/real-time/{symbol}")
