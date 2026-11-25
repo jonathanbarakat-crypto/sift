@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS trial (
     parent_trial_id    TEXT,
     engine_version     TEXT NOT NULL,
     budget_consumed    INTEGER NOT NULL DEFAULT 1,
+    beta               INTEGER NOT NULL DEFAULT 0,
     UNIQUE (family, scope_id, config_hash, data_vintage_hash)
 );
 
@@ -167,10 +168,11 @@ class Ledger:
         self.con.commit()
 
     def _migrate(self) -> None:
-        """Additive-only migrations for append-only ledgers (sift #59):
+        """Additive-only migrations for append-only ledgers (sift #59 + beta-plan §5):
         the s3/s5 stage rows gain the admission-N audit columns n_eff /
-        rho_bar / epoch. Existing DBs get the columns via ALTER TABLE;
-        CREATE TABLE IF NOT EXISTS above already has them for new DBs."""
+        rho_bar / epoch, and trial gains the beta flag column. Existing DBs
+        get the columns via ALTER TABLE; CREATE TABLE IF NOT EXISTS above
+        already has them for new DBs."""
         existing = {r[1] for r in self.con.execute(
             "PRAGMA table_info(stage_result)").fetchall()}
         for col, decl in (("n_eff", "REAL"), ("rho_bar", "REAL"),
@@ -178,6 +180,11 @@ class Ledger:
             if col not in existing:
                 self.con.execute(
                     f"ALTER TABLE stage_result ADD COLUMN {col} {decl}")
+        trial_cols = {r[1] for r in self.con.execute(
+            "PRAGMA table_info(trial)").fetchall()}
+        if "beta" not in trial_cols:
+            self.con.execute(
+                "ALTER TABLE trial ADD COLUMN beta INTEGER NOT NULL DEFAULT 0")
 
     def __enter__(self) -> "Ledger":
         return self
@@ -200,6 +207,7 @@ class Ledger:
         engine_version: str = "dev",
         discoverer_handle: str | None = None,
         parent_trial_id: str | None = None,
+        beta: bool = False,
     ) -> Trial:
         """Mint a trial_id before any data access. Re-registering the identical
         (family, scope_id, config_hash, data_vintage_hash) returns the existing
@@ -220,10 +228,10 @@ class Ledger:
         self.con.execute(
             "INSERT INTO trial (trial_id, family, scope_id, params_json, config_hash,"
             " data_vintage_hash, provenance, registered_at, discoverer_handle,"
-            " parent_trial_id, engine_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " parent_trial_id, engine_version, beta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (trial_id, family, scope_id, canonical_json(params), cfg_hash,
              data_vintage_hash, provenance, now, discoverer_handle,
-             parent_trial_id, engine_version),
+             parent_trial_id, engine_version, 1 if beta else 0),
         )
         for s in STAGES:
             self.con.execute(
@@ -242,6 +250,24 @@ class Ledger:
         if row is None:
             raise LedgerError(f"unknown trial_id {trial_id!r} — register it first")
         return self._to_trial(row)
+
+    def trial_owner(self, trial_id: str) -> str | None:
+        """Return discoverer_handle for a trial (never params_json)."""
+        row = self.con.execute(
+            "SELECT discoverer_handle FROM trial WHERE trial_id=?", (trial_id,)
+        ).fetchone()
+        if row is None:
+            raise LedgerError(f"unknown trial_id {trial_id!r} — register it first")
+        return row["discoverer_handle"]
+
+    def trials_for_handle(self, handle: str, limit: int = 100) -> list[Trial]:
+        """Return trials registered by `handle`, newest first (no params_json)."""
+        rows = self.con.execute(
+            "SELECT * FROM trial WHERE discoverer_handle=?"
+            " ORDER BY registered_at DESC, trial_id DESC LIMIT ?",
+            (handle, int(limit)),
+        ).fetchall()
+        return [self._to_trial(r) for r in rows]
 
     def _to_trial(self, row: sqlite3.Row) -> Trial:
         return Trial(

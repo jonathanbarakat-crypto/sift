@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SIFT — Invited Beta</title>
+  <meta name="description" content="SIFT Gate-1 invited beta. Server-side statistical gauntlet. Signals only; SIFT does not trade.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400..900&family=Spectral:ital,wght@0,300;0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230A0C12'/%3E%3Cpath d='M8 22 L16 9 L24 22' stroke='%237FB4C9' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='22' r='2.4' fill='%239BC53D'/%3E%3C/svg%3E">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap nav-row">
+      <a class="brand" href="/" aria-label="SIFT home">
+        <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#12161F"/><path d="M8 22 L16 9 L24 22" stroke="#7FB4C9" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="22" r="2.4" fill="#9BC53D"/></svg>
+        <span>SIFT</span>
+      </a>
+      <nav class="nav-links" aria-label="Beta navigation">
+        <span class="pill inf" id="session-badge">Invited Beta · Signals Only</span>
+        <button type="button" class="btn btn-ghost btn-sm hidden" id="logout-btn">Sign out</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="beta-main">
+    <div class="wrap">
+      <!-- ==================== AUTH VIEW (INVITE-ONLY) ==================== -->
+      <section id="auth-view" class="wrap-narrow" style="margin: 0 auto;">
+        <p class="eyebrow">Limited Invited Beta · n ≈ 10–30 · Free · No Money Changes Hands</p>
+        <h1 style="margin-top: 8px;">Invited Beta Access</h1>
+        <p class="onboarding-statement" id="auth-onboarding-statement">Loading onboarding copy…</p>
+        <p class="fine-print serif" id="auth-candidates-line"></p>
+
+        <div class="tab-row" style="margin-top: 20px;">
+          <button type="button" class="tab-btn active" data-auth-tab="signup">Redeem invite code</button>
+          <button type="button" class="tab-btn" data-auth-tab="login">Sign in</button>
+        </div>
+
+        <form id="signup-form" class="panel-box" novalidate>
+          <div class="field-group">
+            <label class="field-label" for="su-invite">Invite code</label>
+            <input class="input mono" id="su-invite" name="invite_code" placeholder="SIFT-XXXXXX-XXXXXX" autocomplete="off" required>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="su-email">Email (the only PII stored)</label>
+            <input class="input" type="email" id="su-email" name="email" placeholder="you@quant.io" autocomplete="email" required>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="su-password">Password (min 10 characters)</label>
+            <input class="input" type="password" id="su-password" name="password" minlength="10" autocomplete="new-password" required>
+          </div>
+          <label class="tos-row" for="su-tos">
+            <input type="checkbox" id="su-tos" name="tos_accepted" required>
+            <span id="auth-tos-text">Loading day-one terms…</span>
+          </label>
+          <p class="fine-print" id="auth-privacy-note"></p>
+          <div style="margin-top: 16px;">
+            <button type="submit" class="btn btn-primary" id="su-submit">Create beta account</button>
+          </div>
+          <p class="form-msg" id="su-msg" role="status" aria-live="polite"></p>
+        </form>
+
+        <form id="login-form" class="panel-box hidden" novalidate>
+          <div class="field-group">
+            <label class="field-label" for="li-email">Email</label>
+            <input class="input" type="email" id="li-email" name="email" autocomplete="email" required>
+          </div>
+          <div class="field-group">
+            <label class="field-label" for="li-password">Password</label>
+            <input class="input" type="password" id="li-password" name="password" autocomplete="current-password" required>
+          </div>
+          <div style="margin-top: 16px;">
+            <button type="submit" class="btn btn-primary" id="li-submit">Sign in</button>
+          </div>
+          <p class="form-msg" id="li-msg" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+
+      <!-- ==================== AUTHENTICATED WORKSPACE ==================== -->
+      <section id="app-view" class="hidden">
+        <div class="row" style="margin-bottom: 18px;">
+          <div>
+            <span class="eyebrow">Anonymous Beta ID</span>
+            <div class="mono" id="user-id-display" style="font-size: 0.92rem;"></div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <label class="tos-row" style="margin: 0;" for="kill-rate-toggle">
+              <input type="checkbox" id="kill-rate-toggle">
+              <span>Show my kill-rate badge</span>
+            </label>
+            <span class="pill err hidden" id="kill-rate-badge"></span>
+          </div>
+        </div>
+
+        <div class="tab-row">
+          <button type="button" class="tab-btn active" data-app-tab="mine">Guided First Run &amp; Mining</button>
+          <button type="button" class="tab-btn" data-app-tab="trials">Trial History</button>
+          <button type="button" class="tab-btn" data-app-tab="vault">Vault &amp; Card Faces</button>
+        </div>
+
+        <!-- ---- TAB 1: GUIDED FIRST RUN / MINING ---- -->
+        <div id="tab-mine">
+          <div class="dash-grid">
+            <div class="panel-box">
+              <p class="eyebrow">Server-side pairs gauntlet · S5 automatic (never opt-in)</p>
+              <h2 style="margin-top: 6px;">Guided First Run</h2>
+              <p class="serif" style="color: var(--ink-dim); font-size: 0.95rem;" id="mine-candidates-line"></p>
+
+              <div class="field-group">
+                <label class="field-label" for="cand-select">Pre-registered server-side candidate (no raw tickers)</label>
+                <select class="input" id="cand-select"></select>
+                <p class="fine-print serif" id="cand-desc"></p>
+              </div>
+
+              <div class="config-grid">
+                <div>
+                  <label class="field-label" for="scope-select">Scope</label>
+                  <select class="input mono" id="scope-select"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="form-select">Formation (bars)</label>
+                  <select class="input mono" id="form-select"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="openz-select">Entry |z|</label>
+                  <select class="input mono" id="openz-select"></select>
+                </div>
+                <div>
+                  <label class="field-label" for="closez-select">Exit |z|</label>
+                  <select class="input mono" id="closez-select"></select>
+                </div>
+              </div>
+
+              <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px;">
+                <button type="button" class="btn btn-primary" id="run-gauntlet-btn">Run server-side gauntlet</button>
+                <button type="button" class="btn btn-brass" id="run-example-btn">One-click guided example</button>
+              </div>
+              <p class="form-msg" id="mine-msg" role="status" aria-live="polite"></p>
+            </div>
+
+            <div class="panel-box">
+              <p class="eyebrow">Three-segment ceremony · Live SSE stream</p>
+              <h3 style="margin-top: 6px;">Gauntlet Progress</h3>
+              <p class="fine-print mono" id="run-meta-line">No active run yet.</p>
+
+              <div class="ceremony-bar">
+                <div class="ceremony-seg" id="seg-flicker"><strong>1 · Flicker</strong>S0–S2 screen &amp; permutation null</div>
+                <div class="ceremony-seg" id="seg-amber"><strong>2 · Amber control</strong>S4 walk-forward &amp; S3 DSR/BH</div>
+                <div class="ceremony-seg" id="seg-s5"><strong>3 · Automatic S5</strong>Full-depth registry validation</div>
+              </div>
+
+              <div class="stages" id="live-stages">
+                <span class="stage pending">S0 pending</span>
+                <span class="stage pending">S1 pending</span>
+                <span class="stage pending">S2 pending</span>
+                <span class="stage pending">S4 pending</span>
+                <span class="stage pending">S3 pending</span>
+                <span class="stage pending">S5 pending</span>
+              </div>
+
+              <div id="live-verdict" class="verdict-box hidden">
+                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 8px;">
+                  <span class="pill" id="live-verdict-pill"></span>
+                  <span class="mono" style="font-size: 0.8rem; color: var(--ink-dim);" id="live-trial-id"></span>
+                </div>
+                <p class="serif" id="live-verdict-copy" style="margin: 0 0 12px;"></p>
+                <div id="live-verdict-actions" style="display: flex; gap: 8px; flex-wrap: wrap;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---- TAB 2: TRIAL HISTORY ---- -->
+        <div id="tab-trials" class="hidden">
+          <div class="panel-box">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 14px;">
+              <div>
+                <p class="eyebrow">Append-only ledger · Scope-stratified</p>
+                <h2 style="margin: 4px 0 0;">Your Trial History</h2>
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm" id="refresh-trials-btn">Refresh</button>
+            </div>
+            <div class="rows" id="trials-list"></div>
+          </div>
+        </div>
+
+        <!-- ---- TAB 3: VAULT & CARD FACES ---- -->
+        <div id="tab-vault" class="hidden">
+          <div class="dash-grid">
+            <div class="panel-box">
+              <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div>
+                  <p class="eyebrow">Non-transferable custody · FIFO ghosts</p>
+                  <h2 style="margin: 4px 0 0;">Vault &amp; Saved Connections</h2>
+                </div>
+                <button type="button" class="btn btn-ghost btn-sm" id="refresh-vault-btn">Refresh</button>
+              </div>
+              <p class="fine-print mono" id="vault-capacity-line"></p>
+
+              <h3 style="margin-top: 16px;">Active Vault</h3>
+              <div class="rows" id="vault-list"></div>
+
+              <h3 style="margin-top: 18px;">Saved Connections</h3>
+              <p class="fine-print serif" id="vault-hit-hint"></p>
+              <div class="rows" id="connections-list"></div>
+
+              <h3 style="margin-top: 18px;">Personal Archive</h3>
+              <div class="rows" id="archive-list"></div>
+            </div>
+
+            <div id="card-face-panel">
+              <div class="panel-box">
+                <p class="eyebrow">Server-rendered anonymized face</p>
+                <h3 style="margin-top: 6px;">Select a card to inspect</h3>
+                <p class="serif" style="color: var(--ink-dim); font-size: 0.92rem;">
+                  Every card face is rendered server-side from ledger stage rows only — never raw tickers, never direction, never P&amp;L.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-row">
+      <span class="brand-footer">SIFT</span>
+      <p id="footer-statement">SIFT mines patterns server-side; it does not trade. Public content shows survival facts only.</p>
+      <p class="fine-print">&copy; 2026 SIFT. Signals only, never execution. No money changes hands in beta.</p>
+    </div>
+  </footer>
+
+  <script src="/beta.js"></script>
+</body>
+</html>

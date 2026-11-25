@@ -5,21 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SIFT — honest pattern mining for systematic traders</title>
   <meta name="description" content="SIFT mines cross-stock patterns server-side against a pre-registered statistical gauntlet. It does not trade. Public registry shows survival facts only.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400..900&family=Spectral:ital,wght@0,300;0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b1220'/%3E%3Cpath d='M8 22 L16 9 L24 22' stroke='%2338bdf8' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='22' r='2.4' fill='%23a3e635'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230A0C12'/%3E%3Cpath d='M8 22 L16 9 L24 22' stroke='%237FB4C9' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='22' r='2.4' fill='%239BC53D'/%3E%3C/svg%3E">
 </head>
 <body>
   <header class="site-header">
     <div class="wrap nav-row">
       <a class="brand" href="/" aria-label="SIFT home">
-        <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#16213a"/><path d="M8 22 L16 9 L24 22" stroke="#38bdf8" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="22" r="2.4" fill="#a3e635"/></svg>
+        <svg viewBox="0 0 32 32" width="26" height="26" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#12161F"/><path d="M8 22 L16 9 L24 22" stroke="#7FB4C9" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy='22' r='2.4' fill='#9BC53D'/></svg>
         <span>SIFT</span>
       </a>
       <nav class="nav-links" aria-label="Sections">
         <a href="#how">How it works</a>
         <a href="#registry">The registry</a>
         <a href="#honesty">What we don't do</a>
-        <a href="#beta" class="nav-cta">Join the beta</a>
+        <a href="/app" class="nav-keep">Beta invite login</a>
+        <a href="#beta" class="nav-cta">Join the waitlist</a>
       </nav>
     </div>
   </header>
@@ -117,9 +121,10 @@
       <div class="wrap wrap-narrow">
         <h2>Private beta</h2>
         <p class="section-intro">
-          The first cohort is <strong>50&ndash;100 quantitative traders</strong>, invited in waves.
-          SIFT is <strong>free during the beta</strong>. We are specifically looking for people who run
-          systematic strategies and are tired of backtests they can't trust.
+          The limited beta is <strong>10&ndash;30 invited quantitative traders</strong>, invited in waves.
+          No public signup; SIFT is <strong>free during the beta</strong> (no money changes hands).
+          We are specifically looking for people who run systematic strategies and want pre-registered
+          validation they can trust.
         </p>
 
         <form id="waitlist-form" class="waitlist-form" action="/api/waitlist" method="POST" novalidate>
@@ -140,11 +145,11 @@
               accept these terms.</span>
           </label>
           <p class="form-msg" id="form-msg" role="status" aria-live="polite"></p>
-          <p class="fine-print">Email only. No newsletter unless you ask; no data sharing; you can leave the waitlist with one click.</p>
+          <p class="fine-print">We store your email and an anonymous ID; product events are stored under the anonymous ID; reports are aggregate-only, ranges and qualitative findings at this small n; we never publish per-user data; you can request deletion.</p>
         </form>
 
         <div class="beta-facts">
-          <div><span class="beta-fact-num">50&ndash;100</span><span class="beta-fact-label">quants in the first cohort</span></div>
+          <div><span class="beta-fact-num">10&ndash;30</span><span class="beta-fact-label">invited quants in the beta</span></div>
           <div><span class="beta-fact-num">$0</span><span class="beta-fact-label">free during beta</span></div>
           <div><span class="beta-fact-num">0</span><span class="beta-fact-label">raw data to your device</span></div>
         </div>
