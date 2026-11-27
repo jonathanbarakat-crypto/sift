@@ -52,15 +52,28 @@ DOLLAR_VOLUME_BASIS = "split_adjusted_close * volume"
 EODHD_SENTINEL_PRICE = 999_999.9999
 EODHD_SENTINEL_TOL = 0.01
 MAX_SINGLE_DAY_PRICE_MULT = 10.0
-MAX_SINGLE_BAR_DOLLAR_VOLUME_USD = 250_000_000_000.0  # $250B single-bar cap
+MAX_SINGLE_BAR_DV_PRE_2010_USD = 25_000_000_000.0   # $25B cap (2000-2009)
+MAX_SINGLE_BAR_DV_2010_2017_USD = 45_000_000_000.0  # $45B cap (2010-2017)
+MAX_SINGLE_BAR_DOLLAR_VOLUME_USD = 250_000_000_000.0  # $250B cap (2018+)
 MIN_MEDIAN_RAW_CLOSE_USD = 0.10
 
-# Split-vs-volume continuity check thresholds.
+# Split-vs-volume & split-price continuity check thresholds.
 SPLIT_CHECK_MIN_RATIO = 1.5
 SPLIT_CHECK_WINDOW_BARS = 20
 SPLIT_VOLUME_MIN_JUMP_FWD = 2.5
-SPLIT_VOLUME_MIN_JUMP_REV = 1.5
+SPLIT_VOLUME_MIN_JUMP_REV = 2.5
 SPLIT_VOLUME_SCORE_TOL = 0.40
+SPLIT_VOLUME_REV_MIN_SCORE = 0.50
+SPLIT_PARTIAL_REV_MAX_RATIO = 0.10
+SPLIT_PARTIAL_REV_MIN_PRE_BARS = 40
+SPLIT_PARTIAL_REV_MIN_POST_BARS = 10
+SPLIT_PARTIAL_REV_MIN_DV_MULT = 15.0
+MAX_SPLIT_EXDATE_PRICE_MULT = 2.5
+
+# Foreign-exchange calendar contamination thresholds (US trading days that are
+# major non-US market holidays: Dec 26 Boxing Day, May 1 Labour Day).
+FOREIGN_CAL_MIN_HOLIDAYS = 3
+FOREIGN_CAL_MIN_MISS_FRAC = 0.80
 
 # Consistency between /api/splits/ and adjusted_close (dividend factor D(t)).
 MAX_ADJ_TO_SPLIT_RATIO = 1.05
@@ -170,14 +183,56 @@ def _as_date_array(series: pd.Series) -> np.ndarray:
     return pd.to_datetime(series).dt.date.to_numpy()
 
 
+def _filter_executed_splits(
+    events: list[tuple[date, float]],
+    vintage_end: date | None,
+) -> list[tuple[date, float]]:
+    """Drop announced future splits (``split_date > vintage_end``) that have not
+    yet been applied to the vintage's bars or volume."""
+    if not events or vintage_end is None:
+        return events
+    return [(d, r) for d, r in events if d <= vintage_end]
+
+
+def _group_split_events(
+    dates: np.ndarray,
+    events: list[tuple[date, float]],
+) -> list[tuple[date, date, float]]:
+    """Merge consecutive splits separated by 0 bars into ``(d_start, d_end, prod_ratio)``.
+
+    Prevents phantom/duplicate vendor split entries with no bars between them
+    (e.g. ``JDSU`` recording 1:8 on both ``2006-10-17`` and ``2006-11-14`` with
+    0 bars in between) from silently bypassing continuity checks.
+    """
+    if not events or len(dates) == 0:
+        return []
+    first_d = dates[0]
+    groups: list[list[Any]] = []
+    for d, r in events:
+        if not groups:
+            groups.append([d, d, r])
+            continue
+        prev_end = groups[-1][1]
+        if prev_end >= first_d and int(np.sum((dates >= prev_end) & (dates < d))) == 0:
+            groups[-1][1] = d
+            groups[-1][2] *= r
+        else:
+            groups.append([d, d, r])
+    return [(g[0], g[1], float(g[2])) for g in groups if abs(g[2] - 1.0) > 1e-12]
+
+
 def compute_split_adjusted_dollar_volume(
     df: pd.DataFrame,
     splits: list[dict[str, Any]] | None = None,
+    *,
+    vintage_end: date | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute ``(split_factors, split_adjusted_close, dollar_volume)`` for ``df``.
 
     Always computes from the primitives ``close``, ``volume``, and ``splits``
-    (never reads a stale stored ``dollar_volume`` column).
+    (never reads a stale stored ``dollar_volume`` column). Announced future
+    splits strictly after ``vintage_end`` (default: ``max(df['date'])``) are
+    ignored because the vintage's bars/volume have not yet been restated.
     """
     if df.empty:
         empty = np.empty(0, dtype=np.float64)
@@ -185,11 +240,58 @@ def compute_split_adjusted_dollar_volume(
     dates = _as_date_array(df["date"])
     close = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype=np.float64)
     volume = pd.to_numeric(df["volume"], errors="coerce").to_numpy(dtype=np.float64)
-    events = parse_split_events(splits)
+    end_dt = vintage_end if vintage_end is not None else max(dates)
+    events = _filter_executed_splits(parse_split_events(splits), end_dt)
     factors = cumulative_split_factors(dates, events)
     split_adj_close = close / factors
     dollar_volume = split_adj_close * volume
     return factors, split_adj_close, dollar_volume
+
+
+def check_split_price_continuity(
+    dates: np.ndarray,
+    close: np.ndarray,
+    events: list[tuple[date, float]],
+) -> list[str]:
+    """Verify that raw ``close`` jumps by roughly ``1 / ratio`` across each
+    split (equivalently, ``split_adjusted_close`` is continuous across the ex-date).
+
+    Catches duplicate/phantom splits (e.g. ``JDSU`` applying 1:8 twice -> 8.2x
+    cliff) and inverted/mis-dated splits (e.g. ``RHT`` 2000-01-10 -> 4.3x jump,
+    ``AMCC`` 2007-12-11 -> 3.8x jump).
+    """
+    if len(dates) < 2 or not events:
+        return []
+    groups = _group_split_events(dates, events)
+    if not groups:
+        return []
+    valid = np.isfinite(close) & (close > 0.0)
+    if int(valid.sum()) < 2:
+        return []
+    factors = cumulative_split_factors(dates, events)
+    split_c = close / factors
+    mismatches: list[str] = []
+    n_groups = len(groups)
+    for i, (d_start, d_end, ratio) in enumerate(groups):
+        if max(ratio, 1.0 / ratio) < SPLIT_CHECK_MIN_RATIO:
+            continue
+        prev_bound = groups[i - 1][1] if i > 0 else date.min
+        next_bound = groups[i + 1][0] if i + 1 < n_groups else date.max
+        pre_idx = np.flatnonzero(valid & (dates > prev_bound) & (dates < d_start))
+        post_idx = np.flatnonzero(valid & (dates >= d_end) & (dates < next_bound))
+        if pre_idx.size == 0 or post_idx.size == 0:
+            continue
+        sc_pre = float(split_c[pre_idx[-1]])
+        sc_post = float(split_c[post_idx[0]])
+        if sc_pre <= 0.0 or sc_post <= 0.0:
+            continue
+        jump = max(sc_post / sc_pre, sc_pre / sc_post)
+        if jump > MAX_SPLIT_EXDATE_PRICE_MULT:
+            mismatches.append(
+                f"{d_start.isoformat()} split (r={ratio:g}): split_adjusted_close "
+                f"jumped {jump:.2g}x across ex-date (> {MAX_SPLIT_EXDATE_PRICE_MULT:g}x)"
+            )
+    return mismatches
 
 
 def check_split_volume_consistency(
@@ -201,61 +303,140 @@ def check_split_volume_consistency(
     """Verify empirically whether EODHD restated ``volume`` across each split.
 
     Compares pre-split vs post-split median dollar volume around each split
-    date ``d_k`` with ratio ``r_k = new / old``.
-
-    Under EODHD's documented convention (volume multiplied by ``r_k`` before
-    ``d_k``), ``(close_pre / r_k) * vol_pre`` matches ``close_post * vol_post``.
-    When EODHD fails to restate ``volume`` across a split (observed on reverse-
-    split microcaps such as ``SOS.US``), ``close_pre * vol_pre`` is continuous
-    and ``log(dv_post / dv_pre_adj) / log(r_k)`` is close to ``1.0``.
+    (merging zero-bar-gap duplicate splits). For reverse splits, flags both:
+      1. Local boundary cliff where split-adjusted DV collapses >= 2.5x and
+         raw ``close * volume`` matches ``dv_post`` better than split-adjusted DV
+         (``unadj_score >= 0.50``, no upper cap).
+      2. Partial historical restatement on large reverse splits (``r <= 0.10``)
+         where EODHD restated only the final few weeks before the split while
+         leaving earlier history unadjusted (e.g. ``CXRXF``, ``USU``, ``BTUUQ``).
 
     Inputs must be sorted ascending by ``dates``. Returns human-readable
     mismatch descriptions (empty list when consistent).
     """
     if len(dates) < 2 or not events:
         return []
+    groups = _group_split_events(dates, events)
+    if not groups:
+        return []
     mismatches: list[str] = []
     valid = np.isfinite(close) & (close > 0.0) & np.isfinite(volume) & (volume > 0.0)
     if int(valid.sum()) < 2:
         return []
 
-    n_events = len(events)
-    for i, (split_dt, ratio) in enumerate(events):
+    factors = cumulative_split_factors(dates, events)
+    dv_adj = (close / factors) * volume
+    n_groups = len(groups)
+    for i, (d_start, d_end, ratio) in enumerate(groups):
         mag = max(ratio, 1.0 / ratio)
         if mag < SPLIT_CHECK_MIN_RATIO:
             continue
-        prev_dt = events[i - 1][0] if i > 0 else date.min
-        next_dt = events[i + 1][0] if i + 1 < n_events else date.max
+        prev_dt = groups[i - 1][1] if i > 0 else date.min
+        next_dt = groups[i + 1][0] if i + 1 < n_groups else date.max
 
-        pre_mask = valid & (dates > prev_dt) & (dates < split_dt)
-        post_mask = valid & (dates >= split_dt) & (dates < next_dt)
-        pre_idx = np.flatnonzero(pre_mask)
-        post_idx = np.flatnonzero(post_mask)
-        if pre_idx.size == 0 or post_idx.size == 0:
+        pre_all = np.flatnonzero(valid & (dates > prev_dt) & (dates < d_start))
+        post_all = np.flatnonzero(valid & (dates >= d_end) & (dates < next_dt))
+        if pre_all.size == 0 or post_all.size == 0:
             continue
-        pre_idx = pre_idx[-SPLIT_CHECK_WINDOW_BARS:]
-        post_idx = post_idx[:SPLIT_CHECK_WINDOW_BARS]
+        pre_idx = pre_all[-SPLIT_CHECK_WINDOW_BARS:]
+        post_idx = post_all[:SPLIT_CHECK_WINDOW_BARS]
 
         dv_pre_raw = float(np.median(close[pre_idx] * volume[pre_idx]))
         dv_post = float(np.median(close[post_idx] * volume[post_idx]))
-        if dv_pre_raw <= 0.0 or dv_post <= 0.0:
-            continue
-        dv_pre_adj = dv_pre_raw / ratio
-        log_r = math.log(ratio)
-        log_jump_adj = math.log(dv_post / dv_pre_adj)
-        unadj_score = log_jump_adj / log_r
-        min_jump = (
-            math.log(SPLIT_VOLUME_MIN_JUMP_REV)
-            if ratio < 1.0
-            else math.log(SPLIT_VOLUME_MIN_JUMP_FWD)
-        )
-        if abs(log_jump_adj) >= min_jump and abs(unadj_score - 1.0) <= SPLIT_VOLUME_SCORE_TOL:
-            kind = "reverse" if ratio < 1.0 else "forward"
-            mismatches.append(
-                f"{split_dt.isoformat()} {kind} split (r={ratio:g}): volume appears "
-                f"unadjusted (score={unadj_score:.2f}, adj dv jump={math.exp(log_jump_adj):.2g}x)"
-            )
+        flagged_local = False
+        if dv_pre_raw > 0.0 and dv_post > 0.0:
+            dv_pre_adj = dv_pre_raw / ratio
+            log_r = math.log(ratio)
+            log_jump_adj = math.log(dv_post / dv_pre_adj)
+            unadj_score = log_jump_adj / log_r
+            if ratio < 1.0:
+                if (
+                    log_jump_adj <= -math.log(SPLIT_VOLUME_MIN_JUMP_REV)
+                    and unadj_score >= SPLIT_VOLUME_REV_MIN_SCORE
+                ):
+                    mismatches.append(
+                        f"{d_start.isoformat()} reverse split (r={ratio:g}): volume appears "
+                        f"unadjusted (score={unadj_score:.2f}, adj dv jump={math.exp(log_jump_adj):.2g}x)"
+                    )
+                    flagged_local = True
+            else:
+                if (
+                    abs(log_jump_adj) >= math.log(SPLIT_VOLUME_MIN_JUMP_FWD)
+                    and abs(unadj_score - 1.0) <= SPLIT_VOLUME_SCORE_TOL
+                ):
+                    mismatches.append(
+                        f"{d_start.isoformat()} forward split (r={ratio:g}): volume appears "
+                        f"unadjusted (score={unadj_score:.2f}, adj dv jump={math.exp(log_jump_adj):.2g}x)"
+                    )
+                    flagged_local = True
+
+        # Partial historical volume restatement check for large reverse splits.
+        if (
+            not flagged_local
+            and ratio <= SPLIT_PARTIAL_REV_MAX_RATIO
+            and pre_all.size >= SPLIT_PARTIAL_REV_MIN_PRE_BARS
+            and post_all.size >= SPLIT_PARTIAL_REV_MIN_POST_BARS
+        ):
+            dv_pre_med = float(np.median(dv_adj[pre_all]))
+            dv_post_med = float(np.median(dv_adj[post_all]))
+            dv_pre_raw_med = float(np.median(close[pre_all] * volume[pre_all]))
+            if dv_pre_med > 0.0 and dv_post_med > 0.0 and dv_pre_raw_med > 0.0:
+                if (
+                    (dv_pre_med / dv_post_med) > SPLIT_PARTIAL_REV_MIN_DV_MULT
+                    and abs(math.log(dv_pre_raw_med / dv_post_med))
+                    < 0.5 * abs(math.log(dv_pre_med / dv_post_med))
+                ):
+                    mismatches.append(
+                        f"{d_start.isoformat()} reverse split (r={ratio:g}): historical pre-split "
+                        f"volume appears partially unadjusted ({dv_pre_med / dv_post_med:.2g}x median DV)"
+                    )
     return mismatches
+
+
+def _era_dollar_volume_caps(dates: np.ndarray) -> np.ndarray:
+    """Era-aware per-bar dollar-volume caps reflecting US equity market scale."""
+    d_2010 = date(2010, 1, 1)
+    d_2018 = date(2018, 1, 1)
+    return np.where(
+        dates < d_2010,
+        MAX_SINGLE_BAR_DV_PRE_2010_USD,
+        np.where(dates < d_2018, MAX_SINGLE_BAR_DV_2010_2017_USD, MAX_SINGLE_BAR_DOLLAR_VOLUME_USD),
+    )
+
+
+def _check_us_foreign_calendar(dates: np.ndarray, volume: np.ndarray) -> list[str]:
+    """Detect non-US exchange series (or multi-year ticker-reuse holes) leaked
+    into EODHD's US symbol list by checking US trading days that are major
+    non-US holidays:
+      * Dec 26 when Tue–Fri (US open; UK/Commonwealth Boxing Day closed)
+      * May 1 when Mon–Fri (US open; Europe/Russia/LatAm/Asia Labour Day closed)
+    """
+    if len(dates) < 20:
+        return []
+    lo, hi = dates[0], dates[-1]
+    if hi.year - lo.year < FOREIGN_CAL_MIN_HOLIDAYS - 1:
+        return []
+    active_dates = set(dates[np.isfinite(volume) & (volume > 0.0)])
+    dec26 = [
+        date(y, 12, 26)
+        for y in range(lo.year, hi.year + 1)
+        if lo <= date(y, 12, 26) <= hi and date(y, 12, 26).weekday() in (1, 2, 3, 4)
+    ]
+    may1 = [
+        date(y, 5, 1)
+        for y in range(lo.year, hi.year + 1)
+        if lo <= date(y, 5, 1) <= hi and date(y, 5, 1).weekday() < 5
+    ]
+    hits: list[str] = []
+    if len(dec26) >= FOREIGN_CAL_MIN_HOLIDAYS:
+        miss = sum(1 for d in dec26 if d not in active_dates)
+        if miss / len(dec26) >= FOREIGN_CAL_MIN_MISS_FRAC:
+            hits.append(f"missing/zero-vol on {miss}/{len(dec26)} US Dec-26 sessions")
+    if len(may1) >= FOREIGN_CAL_MIN_HOLIDAYS:
+        miss = sum(1 for d in may1 if d not in active_dates)
+        if miss / len(may1) >= FOREIGN_CAL_MIN_MISS_FRAC:
+            hits.append(f"missing/zero-vol on {miss}/{len(may1)} US May-1 sessions")
+    return hits
 
 
 def _has_sentinel(values: np.ndarray) -> bool:
@@ -270,14 +451,16 @@ def evaluate_symbol_dollar_volume(
     *,
     full_df: pd.DataFrame | None = None,
     splits: list[dict[str, Any]] | None = None,
+    check_us_calendar: bool = True,
 ) -> dict[str, Any]:
     """Compute split-adjusted dollar volume and data-quality diagnostics for one symbol.
 
     ``asof_df`` contains only bars with ``date <= asof`` (all PIT aggregates and
     per-bar anomaly checks run strictly on ``asof_df``). ``full_df`` (optional)
     is the full loaded vintage series for the symbol and is used ONLY to decode
-    the vendor's retroactive volume-adjustment encoding (split-vs-volume
-    continuity and missing-splits detection).
+    the vendor's retroactive volume-adjustment encoding (vintage end date for
+    filtering unexecuted future splits, split-vs-volume/price continuity, and
+    missing-splits detection).
     """
     dates_raw = _as_date_array(asof_df["date"])
     order = np.argsort(dates_raw, kind="mergesort")
@@ -286,7 +469,19 @@ def evaluate_symbol_dollar_volume(
     adj_close = pd.to_numeric(asof_df["adjusted_close"], errors="coerce").to_numpy(dtype=np.float64)[order]
     volume = pd.to_numeric(asof_df["volume"], errors="coerce").to_numpy(dtype=np.float64)[order]
 
-    events = parse_split_events(splits)
+    # Full vintage arrays for vendor encoding checks (vintage end date, split continuity, missing splits).
+    if full_df is not None and not full_df.empty:
+        f_dates_raw = _as_date_array(full_df["date"])
+        f_order = np.argsort(f_dates_raw, kind="mergesort")
+        f_dates = f_dates_raw[f_order]
+        f_close = pd.to_numeric(full_df["close"], errors="coerce").to_numpy(dtype=np.float64)[f_order]
+        f_adj = pd.to_numeric(full_df["adjusted_close"], errors="coerce").to_numpy(dtype=np.float64)[f_order]
+        f_vol = pd.to_numeric(full_df["volume"], errors="coerce").to_numpy(dtype=np.float64)[f_order]
+    else:
+        f_dates, f_close, f_adj, f_vol = dates, close, adj_close, volume
+
+    vintage_end = f_dates[-1] if len(f_dates) else None
+    events = _filter_executed_splits(parse_split_events(splits), vintage_end)
     factors = cumulative_split_factors(dates, events)
     split_adj_close = close / factors
     dollar_vol = split_adj_close * volume
@@ -319,19 +514,11 @@ def evaluate_symbol_dollar_volume(
             f"adjusted_close={int(bad_adj.sum())}, volume={int(bad_vol.sum())}",
         )
 
-    # Full vintage arrays for vendor encoding checks (split continuity / missing splits).
-    if full_df is not None and not full_df.empty:
-        f_dates_raw = _as_date_array(full_df["date"])
-        f_order = np.argsort(f_dates_raw, kind="mergesort")
-        f_dates = f_dates_raw[f_order]
-        f_close = pd.to_numeric(full_df["close"], errors="coerce").to_numpy(dtype=np.float64)[f_order]
-        f_adj = pd.to_numeric(full_df["adjusted_close"], errors="coerce").to_numpy(dtype=np.float64)[f_order]
-        f_vol = pd.to_numeric(full_df["volume"], errors="coerce").to_numpy(dtype=np.float64)[f_order]
-    else:
-        f_dates, f_close, f_adj, f_vol = dates, close, adj_close, volume
-
-    # 3. Split-vs-volume consistency check (when splits table is present).
+    # 3. Split-vs-price & split-vs-volume consistency checks (when splits table is present).
     if splits is not None and events:
+        price_mismatches = check_split_price_continuity(f_dates, f_close, events)
+        if price_mismatches:
+            _flag("split_price_mismatch", "; ".join(price_mismatches))
         mismatches = check_split_volume_consistency(f_dates, f_close, f_vol, events)
         if mismatches:
             _flag("split_volume_mismatch", "; ".join(mismatches))
@@ -359,15 +546,23 @@ def evaluate_symbol_dollar_volume(
                     f"run ingest_eodhd --splits-only",
                 )
 
+    # 5. Foreign-calendar / multi-year-gap check (catches LSE/MOEX/Euronext/B3
+    #    series leaked into EODHD's US symbol list, plus multi-year ticker reuse).
+    if check_us_calendar:
+        cal_hits = _check_us_foreign_calendar(dates, volume)
+        if cal_hits:
+            _flag("foreign_calendar_mismatch", "; ".join(cal_hits))
+
     # Remaining per-bar checks on valid as-of bars.
     ok_bars = (~bad_close) & (~bad_adj) & (~bad_vol)
     if bool(np.any(ok_bars)):
+        ok_dates = dates[ok_bars]
         ok_close = close[ok_bars]
         ok_split = split_adj_close[ok_bars]
         ok_adj = adj_close[ok_bars]
         ok_dv = dollar_vol[ok_bars]
 
-        # 5. Consistency between /api/splits/ and adjusted_close (dividend factor D(t)).
+        # 6. Consistency between /api/splits/ and adjusted_close (dividend factor D(t)).
         if splits is not None and not (sent_close or sent_adj):
             div_factor = ok_adj / ok_split
             max_div = float(np.max(div_factor))
@@ -382,7 +577,7 @@ def evaluate_symbol_dollar_volume(
                     f"(max={max_div:.3g}, max_daily_step={max_div_step:.3g}x)",
                 )
 
-        # 6. Unsplit single-day price scale break (catches PROSY $900k -> $7 cliff,
+        # 7. Unsplit single-day price scale break (catches PROSY $900k -> $7 cliff,
         #    currency-unit flips, and unrecorded splits without touching BRK-A).
         if ok_split.size >= 2:
             p_steps = ok_split[1:] / ok_split[:-1]
@@ -394,16 +589,18 @@ def evaluate_symbol_dollar_volume(
                     f"(> {MAX_SINGLE_DAY_PRICE_MULT:g}x)",
                 )
 
-        # 7. Implausible single-bar dollar volume cap ($250B/day).
-        max_bar_dv = float(np.max(ok_dv))
-        if max_bar_dv > MAX_SINGLE_BAR_DOLLAR_VOLUME_USD:
+        # 8. Era-aware single-bar dollar volume cap ($25B pre-2010, $45B 2010-2017, $250B 2018+).
+        caps = _era_dollar_volume_caps(ok_dates)
+        over = ok_dv > caps
+        if bool(np.any(over)):
+            worst_i = int(np.argmax(ok_dv / caps))
             _flag(
                 "implausible_bar_dollar_volume",
-                f"single-bar dollar volume ${max_bar_dv:,.0f} exceeds "
-                f"${MAX_SINGLE_BAR_DOLLAR_VOLUME_USD:,.0f}",
+                f"single-bar dollar volume ${float(ok_dv[worst_i]):,.0f} on "
+                f"{ok_dates[worst_i].isoformat()} exceeds era cap ${float(caps[worst_i]):,.0f}",
             )
 
-        # 8. Sub-dime raw close screen (evaluated on RAW close, never adjusted_close,
+        # 9. Sub-dime raw close screen (evaluated on RAW close, never adjusted_close,
         #    so forward-split winners like NVDA/AAPL are never falsely dropped).
         med_close = float(np.median(ok_close))
         if med_close < MIN_MEDIAN_RAW_CLOSE_USD:

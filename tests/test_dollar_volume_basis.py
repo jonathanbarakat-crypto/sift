@@ -540,3 +540,182 @@ def test_adj_split_divergence_catches_unrecorded_split_but_allows_special_divide
     assert list(ranked["symbol"]) == ["SPDIV.US"]
     assert list(quarantine["symbol"]) == ["OMITTED.US"]
     assert "adj_split_divergence" in str(quarantine.loc[0, "reason_codes"])
+
+
+# --------------------------------------------------------------------------
+# 8. EODHD real-warehouse regressions: future splits, duplicate/inverted splits,
+#    partial reverse-split restatement, foreign calendar, era DV cap, metadata
+# --------------------------------------------------------------------------
+def test_announced_future_splits_after_vintage_end_are_ignored(tmp_path):
+    """LAB/CAN-shaped regression: EODHD /api/splits/ lists announced upcoming
+    reverse splits (date > last bar date) whose bars/volume are NOT yet restated.
+    They must be ignored instead of multiplying historical DV by 25x-35x.
+    """
+    root = str(tmp_path / "wh")
+    rows = _bars_from_triples([(10.0, 10.0, 1_000_000.0)] * 30, start="2026-10-01")
+    _write_eod(root, "LAB", rows)
+    _write_splits(root, "LAB", [{"date": "2026-12-15", "split": "1.000000/35.000000"}])
+
+    ranked, quarantine = universe.build_ranked_table(
+        universe.load_all_bars(root), "2026-11-25",
+        splits_by_symbol=universe.load_all_splits(root),
+    )
+    assert quarantine.empty
+    assert list(ranked["symbol"]) == ["LAB.US"]
+    # Exact $10M/day — NOT $350M/day from applying the future 1:35 split
+    assert float(ranked.loc[0, "avg_dollar_volume"]) == pytest.approx(10_000_000.0)
+
+
+def test_duplicate_zero_gap_splits_and_inverted_exdate_split_quarantined(tmp_path):
+    """JDSU-shaped duplicate 1:8 split with 0 bars between (8x cliff) and
+    RHT-shaped inverted 2:1 split (4x jump) must be caught by split_price_mismatch.
+    """
+    root = str(tmp_path / "wh")
+    # JDSU-like: raw close jumps 8x ($2 -> $16), but /api/splits/ lists 1:8 TWICE
+    # with zero bars between 2006-10-17 and 2006-11-14 (and adj_close also 64x)
+    jdsu = (
+        _bars_from_triples([(2.0, 128.0, 20_000_000.0)] * 20, start="2006-09-18")
+        + _bars_from_triples([(16.0, 16.0, 2_500_000.0)] * 20, start="2006-11-14")
+    )
+    _write_eod(root, "JDSU", jdsu)
+    _write_splits(root, "JDSU", [
+        {"date": "2006-10-17", "split": "1.000000/8.000000"},
+        {"date": "2006-11-14", "split": "1.000000/8.000000"},
+    ])
+    # RHT-like: 2:1 split on 2000-01-10, but raw close jumped UP 2x ($66 -> $140)
+    # while split/adj divided pre-split by 2 -> 4.2x cliff in split_adjusted_close
+    rht = (
+        _bars_from_triples([(66.0, 33.0, 4_000_000.0)] * 5, start="2000-01-03")
+        + _bars_from_triples([(140.0, 140.0, 2_000_000.0)] * 20, start="2000-01-10")
+    )
+    _write_eod(root, "RHT", rht)
+    _write_splits(root, "RHT", [{"date": "2000-01-10", "split": "2.000000/1.000000"}])
+
+    ranked, quarantine = universe.build_ranked_table(
+        universe.load_all_bars(root), "2026-11-25",
+        splits_by_symbol=universe.load_all_splits(root),
+    )
+    assert ranked.empty
+    by_sym = dict(zip(quarantine["symbol"], quarantine["reason_codes"]))
+    assert "split_price_mismatch" in by_sym["JDSU.US"]
+    assert "split_price_mismatch" in by_sym["RHT.US"]
+
+
+def test_partial_historical_reverse_split_volume_restatement_caught(tmp_path):
+    """CXRXF-shaped regression: EODHD divided volume by 300 only in the last 20 bars
+    before a 1:300 reverse split while leaving earlier history unadjusted (300x DV).
+    """
+    root = str(tmp_path / "wh")
+    early_unadj = _bars_from_triples([(10.0, 3000.0, 1_000_000.0)] * 50, start="2017-01-03")
+    late_adj = _bars_from_triples([(0.10, 30.0, 100.0)] * 20, start="2018-08-13")
+    post = _bars_from_triples([(30.0, 30.0, 50_000.0)] * 20, start="2018-09-11")
+    _write_eod(root, "CXRXF", early_unadj + late_adj + post)
+    _write_splits(root, "CXRXF", [{"date": "2018-09-11", "split": "1.000000/300.000000"}])
+
+    ranked, quarantine = universe.build_ranked_table(
+        universe.load_all_bars(root), "2026-11-25",
+        splits_by_symbol=universe.load_all_splits(root),
+    )
+    assert ranked.empty
+    assert list(quarantine["symbol"]) == ["CXRXF.US"]
+    assert "split_volume_mismatch" in str(quarantine.loc[0, "reason_codes"])
+
+
+def test_foreign_calendar_and_era_dv_cap_screens(tmp_path):
+    """HSBA-shaped UK Boxing Day missing bars -> foreign_calendar_mismatch;
+    2000-era $50B single-bar DV -> implausible_bar_dollar_volume, while
+    2020-era $150B single-bar DV (TSLA S&P inclusion scale) passes.
+    """
+    root = str(tmp_path / "wh")
+    # 2012-2018 US business days (~1800 bars): drop every Dec 26 -> UK LSE pattern
+    all_days = pd.bdate_range("2012-01-03", "2018-12-31")
+    uk_days = [d for d in all_days if not (d.month == 12 and d.day == 26)]
+    uk_rows = [
+        {"date": d.date().isoformat(), "open": 700.0, "high": 700.0, "low": 700.0,
+         "close": 700.0, "adjusted_close": 700.0, "volume": 1_000_000}
+        for d in uk_days
+    ]
+    us_rows = [
+        {"date": d.date().isoformat(), "open": 100.0, "high": 100.0, "low": 100.0,
+         "close": 100.0, "adjusted_close": 100.0, "volume": 1_000_000}
+        for d in all_days
+    ]
+    # 2000 dotcom glitch: $50B single bar (> $25B pre-2010 cap)
+    dotcom = _bars_from_triples([(2000.0, 2000.0, 25_000_000.0)] * 25, start="2000-03-01")
+    # 2020 mega-cap: $150B single bar (< $250B 2018+ cap)
+    mega2020 = _bars_from_triples([(500.0, 500.0, 300_000_000.0)] * 25, start="2020-12-01")
+
+    _write_eod(root, "UKLEAK", uk_rows)
+    _write_splits(root, "UKLEAK", [])
+    _write_eod(root, "USCLEAN", us_rows)
+    _write_splits(root, "USCLEAN", [])
+    _write_eod(root, "DOTBAD", dotcom)
+    _write_splits(root, "DOTBAD", [])
+    _write_eod(root, "MEGA", mega2020)
+    _write_splits(root, "MEGA", [])
+
+    ranked, quarantine = universe.build_ranked_table(
+        universe.load_all_bars(root), "2026-11-25",
+        splits_by_symbol=universe.load_all_splits(root),
+    )
+    assert set(ranked["symbol"]) == {"USCLEAN.US", "MEGA.US"}
+    by_sym = dict(zip(quarantine["symbol"], quarantine["reason_codes"]))
+    assert "foreign_calendar_mismatch" in by_sym["UKLEAK.US"]
+    assert "implausible_bar_dollar_volume" in by_sym["DOTBAD.US"]
+
+
+def test_security_type_multi_segment_futures_and_metadata_filtering(tmp_path):
+    """Multi-segment warrants (BAC-WS-A), preferred series (ORCL-PD), when-issued
+    (VYLR-WI), futures codes (FGBLZ26), and EODHD Exchange=='US' / Future names
+    must be excluded as non-common without touching legitimate class shares (BRK-B).
+    """
+    from data.security_type import is_common_stock_metadata, is_common_stock_symbol
+
+    for bad in ("BAC-WS-A", "GM-WS-B", "ORCL-PD", "VYLR-WI", "FDXF-WI", "FGBLZ26", "FMWOM26"):
+        assert not is_common_stock_symbol(bad), f"{bad} should be non-common"
+    for good in ("AAPL", "BRK-A", "BRK-B", "BF-B", "LOW", "ARW"):
+        assert is_common_stock_symbol(good), f"{good} should be common"
+
+    assert not is_common_stock_metadata("KLS", name="Kelsian Group Ltd", exchange="US", sec_type="Common Stock")
+    assert not is_common_stock_metadata("TYM1", name="Us 10yr Note (Cbt)jun21", exchange="NYSE", sec_type="Common Stock")
+    assert not is_common_stock_metadata("WBDWV", name="Warner Bros When Issued", exchange="NASDAQ", sec_type="Common Stock")
+    assert is_common_stock_metadata("AAPL", name="Apple Inc.", exchange="NASDAQ", sec_type="Common Stock")
+
+    # End-to-end streaming CLI matches metadata exclusions
+    root = str(tmp_path / "wh")
+    for sym in ("AAPL", "BAC-WS-A", "FGBLZ26", "KLS", "TYM1"):
+        _write_eod(root, sym, _bars_from_triples([(100.0, 100.0, 1_000_000.0)] * 25, start="2026-09-01"))
+        _write_splits(root, sym, [])
+    wh.write_json_atomic([
+        {"Code": "AAPL", "Exchange": "NASDAQ", "Name": "Apple Inc.", "Type": "Common Stock"},
+        {"Code": "KLS", "Exchange": "US", "Name": "Kelsian Group Ltd", "Type": "Common Stock"},
+        {"Code": "TYM1", "Exchange": "NYSE", "Name": "Us 10yr Note (Cbt)jun21", "Type": "Common Stock"},
+    ], os.path.join(root, "meta", "symbol-list", "US-active.json"))
+
+    rc = universe.main(["--warehouse", root, "--n", "10", "--asof", "2026-11-25"])
+    assert rc == 0
+    ranked = wh.read_parquet(os.path.join(root, "universe", "ranked_2026-11-25.parquet"))
+    assert list(ranked["symbol"]) == ["AAPL.US"]
+    manifest = wh.read_json(os.path.join(root, "universe", "manifest.json"))
+    assert manifest["non_common_excluded"] == 4
+
+
+def test_eodhd_client_resets_call_counter_across_utc_midnight(tmp_path, monkeypatch):
+    """Long-running ingest crossing UTC midnight must reset calls_made to 0."""
+    from data.eodhd_client import EodhdClient
+
+    state_file = str(tmp_path / "calls.json")
+    day = ["2026-11-26"]
+    monkeypatch.setattr(EodhdClient, "_state_key_today", lambda self: day[0])
+    sess = FakeSession(routes=[(lambda u, p: True, FakeResponse(200, []))])
+    client = EodhdClient(token="t", max_calls=2, state_file=state_file, session=sess, plan="paid")
+    client.exchanges_list()
+    client.exchanges_list()
+    assert client.calls_remaining() == 0
+
+    # Cross UTC midnight -> budget resets cleanly to 0 for the new day
+    day[0] = "2026-11-27"
+    assert client.calls_remaining() == 2
+    client.exchanges_list()
+    assert client.calls_made == 1
+    assert wh.read_json(state_file) == {"date": "2026-11-27", "calls_today": 1}

@@ -47,22 +47,28 @@ if __package__ in (None, ""):
         DOLLAR_VOLUME_BASIS,
         EODHD_SENTINEL_PRICE,
         MAX_SINGLE_BAR_DOLLAR_VOLUME_USD,
+        MAX_SINGLE_BAR_DV_2010_2017_USD,
+        MAX_SINGLE_BAR_DV_PRE_2010_USD,
         MAX_SINGLE_DAY_PRICE_MULT,
+        MAX_SPLIT_EXDATE_PRICE_MULT,
         MIN_MEDIAN_RAW_CLOSE_USD,
         evaluate_symbol_dollar_volume,
     )
-    from data.security_type import is_common_stock_symbol  # type: ignore
+    from data.security_type import is_common_stock_metadata  # type: ignore
 else:
     from . import warehouse as wh
     from .dollar_volume import (
         DOLLAR_VOLUME_BASIS,
         EODHD_SENTINEL_PRICE,
         MAX_SINGLE_BAR_DOLLAR_VOLUME_USD,
+        MAX_SINGLE_BAR_DV_2010_2017_USD,
+        MAX_SINGLE_BAR_DV_PRE_2010_USD,
         MAX_SINGLE_DAY_PRICE_MULT,
+        MAX_SPLIT_EXDATE_PRICE_MULT,
         MIN_MEDIAN_RAW_CLOSE_USD,
         evaluate_symbol_dollar_volume,
     )
-    from .security_type import is_common_stock_symbol
+    from .security_type import is_common_stock_metadata
 
 DEFAULT_WAREHOUSE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "data", "warehouse")
@@ -148,6 +154,64 @@ def load_all_splits(root: str) -> dict[str, list]:
     return out
 
 
+def load_symbol_metadata(root: str) -> dict[str, dict]:
+    """Load cached EODHD symbol-list metadata from ``<root>/meta/symbol-list/``.
+
+    Reads ``*-delisted.json`` first, then ``*-active.json`` so active records
+    take precedence when a ticker code appears in both lists. Returns a dict
+    keyed by both ``"<CODE>.<EX>"`` and bare ``"<CODE>"``. Missing directory
+    returns ``{}``.
+    """
+    sl_root = os.path.join(root, "meta", "symbol-list")
+    out: dict[str, dict] = {}
+    if not os.path.isdir(sl_root):
+        return out
+    files = sorted(f for f in os.listdir(sl_root) if f.endswith(".json"))
+    # Process delisted first, active second so active wins on code collisions.
+    ordered = [f for f in files if "-delisted.json" in f] + [
+        f for f in files if "-delisted.json" not in f
+    ]
+    for name in ordered:
+        data = wh.read_json(os.path.join(sl_root, name))
+        if not isinstance(data, list):
+            continue
+        ex = name.split("-")[0].upper()
+        for rec in data:
+            if not isinstance(rec, dict):
+                continue
+            code = rec.get("Code")
+            if not code:
+                continue
+            code_str = str(code).strip()
+            if not code_str:
+                continue
+            out[f"{code_str}.{ex}"] = rec
+            out[code_str] = rec
+    return out
+
+
+def _lookup_symbol_meta(symbol: str, symbol_metadata: dict[str, dict] | None) -> dict | None:
+    if not symbol_metadata:
+        return None
+    if symbol in symbol_metadata:
+        return symbol_metadata[symbol]
+    bare = str(symbol).split(".")[0]
+    return symbol_metadata.get(bare)
+
+
+def _symbol_is_common(symbol: str, symbol_metadata: dict[str, dict] | None = None) -> bool:
+    bare = str(symbol).split(".")[0]
+    meta = _lookup_symbol_meta(str(symbol), symbol_metadata)
+    if meta is None:
+        return is_common_stock_metadata(bare)
+    return is_common_stock_metadata(
+        bare,
+        name=meta.get("Name"),
+        exchange=meta.get("Exchange"),
+        sec_type=meta.get("Type"),
+    )
+
+
 def _empty_tables(n_non_common: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
     ranked = pd.DataFrame(columns=RANKED_COLUMNS)
     ranked.attrs["non_common_excluded"] = n_non_common
@@ -158,143 +222,15 @@ def _empty_tables(n_non_common: int = 0) -> tuple[pd.DataFrame, pd.DataFrame]:
     return ranked, quarantine
 
 
-def build_ranked_table(
-    bars: pd.DataFrame,
-    asof: str,
-    research_grade: bool = False,
-    min_bars: int = 0,
-    min_avg_dollar_volume: float = 0.0,
-    splits_by_symbol: dict[str, list] | None = None,
+def _finalize_tables(
+    ranked_rows: list[dict],
+    quarantine_rows: list[dict],
+    *,
+    n_non_common: int,
+    n_splits_verified: int,
+    n_splits_missing: int,
+    reason_counts: dict[str, int],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Point-in-time ranking as of ``asof`` (YYYY-MM-DD).
-
-    Returns ``(ranked, quarantine)``:
-      * ``ranked`` — clean, rankable common-stock symbols sorted by average
-        split-consistent dollar volume (``split_adjusted_close * volume``),
-        recomputed from the primitives ``close``, ``volume``, and ``splits``
-        (never trusting a stale stored ``dollar_volume`` column).
-      * ``quarantine`` — common-stock symbols excluded by the per-bar quality
-        and split-volume-consistency screens, with ``passes_quality_floors``,
-        machine-readable ``reason_codes``, and human-readable ``reason``.
-
-    Uses only bars with ``date <= asof`` for all PIT aggregates and per-bar
-    checks. Symbols whose last bar is before ``asof`` stay in the ranking (no
-    survivorship bias) and are flagged.
-
-    Quality floors (hermes-tasks #182): non-common-stock symbols (warrants,
-    units, rights, preferred — classified by data/security_type.py) are
-    ALWAYS excluded; rows with ``bars < min_bars`` or
-    ``avg_dollar_volume < min_avg_dollar_volume`` are excluded when the
-    caller passes floors > 0.
-    """
-    if bars.empty:
-        return _empty_tables()
-
-    asof_date = date.fromisoformat(asof)
-    df_all = bars.copy()
-    df_all["date"] = pd.to_datetime(df_all["date"]).dt.date
-
-    # Restrict to bars <= asof for PIT membership; filter non-common stocks
-    # before running vendor-artifact screens so warrants/units aren't counted
-    # as quarantined common stocks.
-    df_asof = df_all[df_all["date"] <= asof_date]
-    if df_asof.empty:
-        return _empty_tables()
-
-    unique_syms = df_asof["symbol"].drop_duplicates()
-    common_syms = {
-        sym for sym in unique_syms
-        if is_common_stock_symbol(str(sym).split(".")[0])
-    }
-    n_non_common = int(len(unique_syms) - len(common_syms))
-    if not common_syms:
-        return _empty_tables(n_non_common=n_non_common)
-
-    df_asof_common = df_asof[df_asof["symbol"].isin(common_syms)]
-    df_all_common = df_all[df_all["symbol"].isin(common_syms)]
-    full_groups = {
-        key: grp for key, grp in df_all_common.groupby(["symbol", "exchange"], sort=False)
-    }
-
-    ranked_rows: list[dict] = []
-    quarantine_rows: list[dict] = []
-    n_splits_verified = 0
-    n_splits_missing = 0
-    reason_counts: dict[str, int] = {}
-
-    for (sym, ex), g_asof in df_asof_common.groupby(["symbol", "exchange"], sort=True):
-        sym_splits: list | None = None
-        if splits_by_symbol is not None:
-            if sym in splits_by_symbol:
-                sym_splits = splits_by_symbol[sym]
-            else:
-                bare = str(sym).split(".")[0]
-                if bare in splits_by_symbol:
-                    sym_splits = splits_by_symbol[bare]
-
-        ev = evaluate_symbol_dollar_volume(
-            g_asof,
-            full_df=full_groups.get((sym, ex)),
-            splits=sym_splits,
-        )
-        if ev["splits_verified"]:
-            n_splits_verified += 1
-        else:
-            n_splits_missing += 1
-
-        adv = ev["avg_dollar_volume"]
-        n_bars = ev["bars"]
-        passes_floors = (
-            (min_bars <= 0 or n_bars >= min_bars)
-            and (
-                min_avg_dollar_volume <= 0.0
-                or (math.isfinite(adv) and adv >= min_avg_dollar_volume)
-            )
-        )
-
-        if ev["reason_codes"]:
-            for code in ev["reason_codes"]:
-                reason_counts[code] = reason_counts.get(code, 0) + 1
-            quarantine_rows.append({
-                "symbol": sym,
-                "exchange": ex,
-                "bars": n_bars,
-                "avg_dollar_volume": adv,
-                "median_dollar_volume": ev["median_dollar_volume"],
-                "max_bar_dollar_volume": ev["max_bar_dollar_volume"],
-                "mean_close": ev["mean_close"],
-                "median_close": ev["median_close"],
-                "mean_split_adjusted_close": ev["mean_split_adjusted_close"],
-                "mean_adjusted_close": ev["mean_adjusted_close"],
-                "last_date": ev["last_date"],
-                "passes_quality_floors": bool(passes_floors),
-                "reason_codes": ",".join(ev["reason_codes"]),
-                "reason": ev["reason"],
-            })
-            continue
-
-        if not passes_floors:
-            continue
-
-        ended = ev["last_date"] < asof_date
-        ranked_rows.append({
-            "symbol": sym,
-            "exchange": ex,
-            "avg_dollar_volume": adv,
-            "bars": n_bars,
-            "first_date": ev["first_date"],
-            "last_date": ev["last_date"],
-            "asof": asof,
-            "ended_before_asof": ended,
-            # Within a free-tier 1y window we cannot distinguish "delisted"
-            # from "series simply ends"; on paid vintages delisted=1 symbols
-            # end before asof and stay ranked with their actual history.
-            "delisted": ended,
-            # v3 §4.5/§12.8: research-grade vintages have no delisted list, so
-            # delist_idx is unavailable for S5 delist-mask logic.
-            "delist_idx_available": not research_grade,
-        })
-
     if ranked_rows:
         out = pd.DataFrame(ranked_rows)
         out = out.sort_values(
@@ -330,6 +266,288 @@ def build_ranked_table(
     return out, quarantine
 
 
+def _evaluate_symbol_group(
+    sym: str,
+    ex: str,
+    g_asof: pd.DataFrame,
+    g_full: pd.DataFrame | None,
+    *,
+    asof: str,
+    asof_date: date,
+    research_grade: bool,
+    min_bars: int,
+    min_avg_dollar_volume: float,
+    splits_by_symbol: dict[str, list] | None,
+    ranked_rows: list[dict],
+    quarantine_rows: list[dict],
+    reason_counts: dict[str, int],
+) -> bool:
+    """Evaluate one `(sym, ex)` group and append to `ranked_rows` or `quarantine_rows`.
+
+    Returns ``True`` when the symbol had a verified cached splits file.
+    """
+    sym_splits: list | None = None
+    if splits_by_symbol is not None:
+        if sym in splits_by_symbol:
+            sym_splits = splits_by_symbol[sym]
+        else:
+            bare = str(sym).split(".")[0]
+            if bare in splits_by_symbol:
+                sym_splits = splits_by_symbol[bare]
+
+    ev = evaluate_symbol_dollar_volume(
+        g_asof,
+        full_df=g_full,
+        splits=sym_splits,
+        check_us_calendar=(str(ex).upper() == "US"),
+    )
+
+    adv = ev["avg_dollar_volume"]
+    n_bars = ev["bars"]
+    passes_floors = (
+        (min_bars <= 0 or n_bars >= min_bars)
+        and (
+            min_avg_dollar_volume <= 0.0
+            or (math.isfinite(adv) and adv >= min_avg_dollar_volume)
+        )
+    )
+
+    if ev["reason_codes"]:
+        for code in ev["reason_codes"]:
+            reason_counts[code] = reason_counts.get(code, 0) + 1
+        quarantine_rows.append({
+            "symbol": sym,
+            "exchange": ex,
+            "bars": n_bars,
+            "avg_dollar_volume": adv,
+            "median_dollar_volume": ev["median_dollar_volume"],
+            "max_bar_dollar_volume": ev["max_bar_dollar_volume"],
+            "mean_close": ev["mean_close"],
+            "median_close": ev["median_close"],
+            "mean_split_adjusted_close": ev["mean_split_adjusted_close"],
+            "mean_adjusted_close": ev["mean_adjusted_close"],
+            "last_date": ev["last_date"],
+            "passes_quality_floors": bool(passes_floors),
+            "reason_codes": ",".join(ev["reason_codes"]),
+            "reason": ev["reason"],
+        })
+        return bool(ev["splits_verified"])
+
+    if not passes_floors:
+        return bool(ev["splits_verified"])
+
+    ended = ev["last_date"] < asof_date
+    ranked_rows.append({
+        "symbol": sym,
+        "exchange": ex,
+        "avg_dollar_volume": adv,
+        "bars": n_bars,
+        "first_date": ev["first_date"],
+        "last_date": ev["last_date"],
+        "asof": asof,
+        "ended_before_asof": ended,
+        # Within a free-tier 1y window we cannot distinguish "delisted"
+        # from "series simply ends"; on paid vintages delisted=1 symbols
+        # end before asof and stay ranked with their actual history.
+        "delisted": ended,
+        # v3 §4.5/§12.8: research-grade vintages have no delisted list, so
+        # delist_idx is unavailable for S5 delist-mask logic.
+        "delist_idx_available": not research_grade,
+    })
+    return bool(ev["splits_verified"])
+
+
+def build_ranked_table(
+    bars: pd.DataFrame,
+    asof: str,
+    research_grade: bool = False,
+    min_bars: int = 0,
+    min_avg_dollar_volume: float = 0.0,
+    splits_by_symbol: dict[str, list] | None = None,
+    symbol_metadata: dict[str, dict] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Point-in-time ranking as of ``asof`` (YYYY-MM-DD).
+
+    Returns ``(ranked, quarantine)``:
+      * ``ranked`` — clean, rankable common-stock symbols sorted by average
+        split-consistent dollar volume (``split_adjusted_close * volume``),
+        recomputed from the primitives ``close``, ``volume``, and ``splits``
+        (never trusting a stale stored ``dollar_volume`` column).
+      * ``quarantine`` — common-stock symbols excluded by the per-bar quality
+        and split-volume-consistency screens, with ``passes_quality_floors``,
+        machine-readable ``reason_codes``, and human-readable ``reason``.
+
+    Uses only bars with ``date <= asof`` for all PIT aggregates and per-bar
+    checks. Symbols whose last bar is before ``asof`` stay in the ranking (no
+    survivorship bias) and are flagged.
+
+    Quality floors (hermes-tasks #182): non-common-stock symbols (warrants,
+    units, rights, preferred, when-issued, futures — classified by
+    data/security_type.py) are ALWAYS excluded; rows with ``bars < min_bars``
+    or ``avg_dollar_volume < min_avg_dollar_volume`` are excluded when the
+    caller passes floors > 0.
+    """
+    if bars.empty:
+        return _empty_tables()
+
+    asof_date = date.fromisoformat(asof)
+    df_all = bars.copy()
+    df_all["date"] = pd.to_datetime(df_all["date"]).dt.date
+
+    # Restrict to bars <= asof for PIT membership; filter non-common stocks
+    # before running vendor-artifact screens so warrants/units aren't counted
+    # as quarantined common stocks.
+    df_asof = df_all[df_all["date"] <= asof_date]
+    if df_asof.empty:
+        return _empty_tables()
+
+    unique_syms = df_asof["symbol"].drop_duplicates()
+    common_syms = {
+        sym for sym in unique_syms
+        if _symbol_is_common(str(sym), symbol_metadata)
+    }
+    n_non_common = int(len(unique_syms) - len(common_syms))
+    if not common_syms:
+        return _empty_tables(n_non_common=n_non_common)
+
+    df_asof_common = df_asof[df_asof["symbol"].isin(common_syms)]
+    df_all_common = df_all[df_all["symbol"].isin(common_syms)]
+    full_groups = {
+        key: grp for key, grp in df_all_common.groupby(["symbol", "exchange"], sort=False)
+    }
+
+    ranked_rows: list[dict] = []
+    quarantine_rows: list[dict] = []
+    n_splits_verified = 0
+    n_splits_missing = 0
+    reason_counts: dict[str, int] = {}
+
+    for (sym, ex), g_asof in df_asof_common.groupby(["symbol", "exchange"], sort=True):
+        verified = _evaluate_symbol_group(
+            sym,
+            ex,
+            g_asof,
+            full_groups.get((sym, ex)),
+            asof=asof,
+            asof_date=asof_date,
+            research_grade=research_grade,
+            min_bars=min_bars,
+            min_avg_dollar_volume=min_avg_dollar_volume,
+            splits_by_symbol=splits_by_symbol,
+            ranked_rows=ranked_rows,
+            quarantine_rows=quarantine_rows,
+            reason_counts=reason_counts,
+        )
+        if verified:
+            n_splits_verified += 1
+        else:
+            n_splits_missing += 1
+
+    return _finalize_tables(
+        ranked_rows,
+        quarantine_rows,
+        n_non_common=n_non_common,
+        n_splits_verified=n_splits_verified,
+        n_splits_missing=n_splits_missing,
+        reason_counts=reason_counts,
+    )
+
+
+def build_ranked_table_from_warehouse(
+    root: str,
+    asof: str,
+    *,
+    research_grade: bool = False,
+    min_bars: int = 0,
+    min_avg_dollar_volume: float = 0.0,
+    splits_by_symbol: dict[str, list] | None = None,
+    symbol_metadata: dict[str, dict] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, int, int]:
+    """Stream EOD parquets one file at a time to build ``(ranked, quarantine)``.
+
+    Produces the exact same tables as :func:`build_ranked_table` while keeping
+    peak memory bounded on full active+delisted warehouses (~90M+ rows).
+    Returns ``(ranked, quarantine, total_bars, total_symbols)``.
+    """
+    eod_root = os.path.join(root, "eod")
+    if not os.path.isdir(eod_root):
+        ranked, quarantine = _empty_tables()
+        return ranked, quarantine, 0, 0
+
+    asof_date = date.fromisoformat(asof)
+    ranked_rows: list[dict] = []
+    quarantine_rows: list[dict] = []
+    n_splits_verified = 0
+    n_splits_missing = 0
+    reason_counts: dict[str, int] = {}
+    seen_all_symbols: set[str] = set()
+    seen_non_common: set[str] = set()
+    total_bars = 0
+
+    for dirpath, dirnames, filenames in os.walk(eod_root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if not name.endswith(".parquet"):
+                continue
+            df = wh.read_parquet(os.path.join(dirpath, name))
+            if df is None or df.empty:
+                continue
+            total_bars += int(len(df))
+            for sym in df["symbol"].dropna().unique():
+                seen_all_symbols.add(str(sym))
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+            df_asof = df[df["date"] <= asof_date]
+            if df_asof.empty:
+                continue
+
+            unique_syms = df_asof["symbol"].drop_duplicates()
+            common_syms: set[str] = set()
+            for sym in unique_syms:
+                s_str = str(sym)
+                if _symbol_is_common(s_str, symbol_metadata):
+                    common_syms.add(s_str)
+                else:
+                    seen_non_common.add(s_str)
+            if not common_syms:
+                continue
+
+            df_asof_common = df_asof[df_asof["symbol"].isin(common_syms)]
+            df_all_common = df[df["symbol"].isin(common_syms)]
+            full_groups = {
+                key: grp for key, grp in df_all_common.groupby(["symbol", "exchange"], sort=False)
+            }
+            for (sym, ex), g_asof in df_asof_common.groupby(["symbol", "exchange"], sort=True):
+                verified = _evaluate_symbol_group(
+                    sym,
+                    ex,
+                    g_asof,
+                    full_groups.get((sym, ex)),
+                    asof=asof,
+                    asof_date=asof_date,
+                    research_grade=research_grade,
+                    min_bars=min_bars,
+                    min_avg_dollar_volume=min_avg_dollar_volume,
+                    splits_by_symbol=splits_by_symbol,
+                    ranked_rows=ranked_rows,
+                    quarantine_rows=quarantine_rows,
+                    reason_counts=reason_counts,
+                )
+                if verified:
+                    n_splits_verified += 1
+                else:
+                    n_splits_missing += 1
+
+    ranked, quarantine = _finalize_tables(
+        ranked_rows,
+        quarantine_rows,
+        n_non_common=len(seen_non_common),
+        n_splits_verified=n_splits_verified,
+        n_splits_missing=n_splits_missing,
+        reason_counts=reason_counts,
+    )
+    return ranked, quarantine, total_bars, len(seen_all_symbols)
+
+
 def build_pit_listing(ranked: pd.DataFrame, n: int) -> pd.DataFrame:
     """Top-N by rank. Delisted/ended names that made the cut stay in the listing."""
     top = ranked.head(n).copy()
@@ -361,20 +579,21 @@ def main(argv: list | None = None) -> int:
             f"research_grade={vrec.get('research_grade')}) — the source vendor has NO "
             f"delisted list: this universe is ACTIVE-ONLY and survivorship-biased "
             f"(v3 §4.5/§12.8). delist_idx is marked UNAVAILABLE for the S5 delist-mask.")
-    log(f"loading bars from {root}/eod …")
-    bars = load_all_bars(root)
+    log(f"streaming bars from {root}/eod …")
     splits_by_symbol = load_all_splits(root)
-    log(f"loaded {len(bars)} bars, {bars['symbol'].nunique() if not bars.empty else 0} symbols, "
-        f"{len(splits_by_symbol)} cached splits file(s)")
-
-    ranked, quarantine = build_ranked_table(
-        bars,
+    symbol_metadata = load_symbol_metadata(root)
+    ranked, quarantine, total_bars, total_symbols = build_ranked_table_from_warehouse(
+        root,
         asof,
         research_grade=research,
         min_bars=args.min_bars,
         min_avg_dollar_volume=args.min_avg_dollar_volume,
         splits_by_symbol=splits_by_symbol,
+        symbol_metadata=symbol_metadata,
     )
+    log(f"scanned {total_bars} bars, {total_symbols} symbols, "
+        f"{len(splits_by_symbol)} cached splits file(s), "
+        f"{len(symbol_metadata)} symbol metadata entry(ies)")
     n_non_common = int(ranked.attrs.get("non_common_excluded", 0))
     n_splits_verified = int(ranked.attrs.get("splits_verified_symbols", 0))
     n_splits_missing = int(ranked.attrs.get("splits_missing_symbols", 0))
@@ -456,6 +675,9 @@ def main(argv: list | None = None) -> int:
             "thresholds": {
                 "eodhd_sentinel_price": EODHD_SENTINEL_PRICE,
                 "max_single_day_price_mult": MAX_SINGLE_DAY_PRICE_MULT,
+                "max_split_exdate_price_mult": MAX_SPLIT_EXDATE_PRICE_MULT,
+                "max_single_bar_dv_pre_2010_usd": MAX_SINGLE_BAR_DV_PRE_2010_USD,
+                "max_single_bar_dv_2010_2017_usd": MAX_SINGLE_BAR_DV_2010_2017_USD,
                 "max_single_bar_dollar_volume_usd": MAX_SINGLE_BAR_DOLLAR_VOLUME_USD,
                 "min_median_raw_close_usd": MIN_MEDIAN_RAW_CLOSE_USD,
             },
@@ -471,9 +693,16 @@ def main(argv: list | None = None) -> int:
         "built_utc": datetime.now(timezone.utc).isoformat(),
     }
     wh.write_json_atomic(manifest, os.path.join(uroot, "manifest.json"))
-    rec = wh.write_vintage(root, extra={"built_by": "universe", "universe": manifest,
-                                       **({"vendor": vrec.get("vendor"),
-                                           "research_grade": True} if research else {})})
+    vintage_extra: dict = {"built_by": "universe", "universe": manifest}
+    if vrec.get("plan") is not None:
+        vintage_extra["plan"] = vrec["plan"]
+    if vrec.get("window") is not None:
+        vintage_extra["window"] = vrec["window"]
+    if vrec.get("vendor") is not None:
+        vintage_extra["vendor"] = vrec["vendor"]
+    if research:
+        vintage_extra["research_grade"] = True
+    rec = wh.write_vintage(root, extra=vintage_extra)
 
     log(f"ranked {len(ranked)} symbols as of {asof} ({n_ended} ended before asof — kept, flagged); "
         f"top {len(top)} written ({n_ended_top} ended names inside top-N)")
