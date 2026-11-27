@@ -126,13 +126,22 @@ class EodhdClient:
         self.session = session if session is not None else requests.Session()
         self.timeout = timeout
         self.calls_made = 0
+        self._state_date = self._state_key_today()
         if state_file:
-            self.calls_made = self._load_state().get("calls_today", 0)
+            st = self._load_state()
+            self._state_date = str(st.get("date") or self._state_key_today())
+            self.calls_made = int(st.get("calls_today", 0))
 
     # ------------------------------------------------------------------ state
     def _state_key_today(self) -> str:
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _rollover_if_new_utc_day(self) -> None:
+        today = self._state_key_today()
+        if today != self._state_date:
+            self._state_date = today
+            self.calls_made = 0
 
     def _load_state(self) -> dict:
         if not self.state_file or not os.path.exists(self.state_file):
@@ -150,13 +159,14 @@ class EodhdClient:
         if not self.state_file:
             return
         os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-        st = {"date": self._state_key_today(), "calls_today": self.calls_made}
+        st = {"date": self._state_date, "calls_today": self.calls_made}
         tmp = self.state_file + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(st, f)
         os.replace(tmp, self.state_file)
 
     def calls_remaining(self) -> int:
+        self._rollover_if_new_utc_day()
         return max(0, self.max_calls - self.calls_made)
 
     # ------------------------------------------------------------------ calls
