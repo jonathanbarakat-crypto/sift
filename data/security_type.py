@@ -55,6 +55,17 @@ _NON_COMMON_NAME_MARKERS = (
     " etf",
 )
 
+# Per-feed unmapped / noisy OTC exchange tiers excluded from production common-stock
+# universes by default. On US, EODHD dumps Eurex futures & foreign tickers into
+# Exchange == "US" and noisy OTC/foreign shells into PINK/OTCGREY/OTCCE/OTCBB,
+# while legitimate legacy NYSE delistings (e.g. WYE, XTO, BLS) appear under OTCMKTS.
+UNMAPPED_EXCHANGES_BY_FEED: dict[str, frozenset[str]] = {
+    "US": frozenset({"US"}),
+}
+NOISY_OTC_EXCHANGES_BY_FEED: dict[str, frozenset[str]] = {
+    "US": frozenset({"PINK", "OTCGREY", "OTCCE", "OTCBB"}),
+}
+
 
 def is_common_stock_symbol(symbol: str) -> bool:
     """True when ``symbol`` looks like a COMMON STOCK ticker (not a warrant,
@@ -92,14 +103,18 @@ def is_common_stock_metadata(
     name: str | None = None,
     exchange: str | None = None,
     sec_type: str | None = None,
+    feed_exchange: str = "US",
+    include_otc: bool = False,
 ) -> bool:
     """Metadata-aware common-stock filter using EODHD symbol-list fields.
 
-    Drops non-common ticker patterns plus EODHD's unmapped ``Exchange == "US"``
-    catch-all bucket (where Eurex futures, foreign LSE/TSX/PSE/MOEX tickers,
-    ETFs, and when-issued symbols land) and explicit non-equity name markers.
-    When metadata fields are ``None`` (e.g. synthetic fixtures without meta/),
-    behaves identically to :func:`is_common_stock_symbol`.
+    Drops non-common ticker patterns, EODHD's unmapped ``Exchange == "US"``
+    catch-all bucket, noisy OTC tiers (``PINK``, ``OTCGREY``, ``OTCCE``,
+    ``OTCBB`` unless ``include_otc=True``), and explicit non-equity name
+    markers. Keeps ``OTCMKTS`` / ``OTCQX`` / ``OTCQB`` so legacy delisted
+    NYSE/NASDAQ names retain coverage. When metadata fields are ``None``
+    (e.g. synthetic fixtures without ``meta/``), behaves identically to
+    :func:`is_common_stock_symbol`.
     """
     if not is_common_stock_symbol(symbol):
         return False
@@ -109,7 +124,10 @@ def is_common_stock_metadata(
             return False
     if exchange is not None:
         ex = str(exchange).strip().upper()
-        if ex == "US":
+        feed = str(feed_exchange or "US").strip().upper()
+        if ex in UNMAPPED_EXCHANGES_BY_FEED.get(feed, frozenset()):
+            return False
+        if not include_otc and ex in NOISY_OTC_EXCHANGES_BY_FEED.get(feed, frozenset()):
             return False
     if name is not None:
         padded = f" {str(name).strip().lower()} "

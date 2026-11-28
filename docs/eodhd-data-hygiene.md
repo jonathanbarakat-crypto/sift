@@ -69,10 +69,35 @@ were implemented with general, zero-hardcoding rules:
 
 ---
 
-## 5. Follow-Up Hardening Tracked for PR #2
+## 5. Production Hardening Pass (PR #2 — Implemented)
 
-1. Exclude noisy US OTC tiers (`PINK`, `OTCGREY`, `OTCCE`, `OTCBB`) while retaining `OTCMKTS`/`OTCQX`/`OTCQB`.
-2. Add internal dormancy / ticker-reuse gap screen (`> 90` calendar days between consecutive bars).
-3. Detect copied pre-spinoff history clusters (`IAC`/`PPLI`/`MTCH`) and block intra-cluster pair formation.
-4. Expand US foreign-calendar holidays (Easter Monday, UK Bank Holidays) + single-bar volume print-glitch guard.
-5. Add multi-exchange currency/sub-unit normalization registry, `--adv-window-bars` trailing PIT ADV option, independent cross-source audit script, Bulk API `--bulk-update`, and automated post-ingest validation gate.
+All P0–P2 hardening items have been implemented and verified on the rebuilt
+warehouse (`asof = 2026-11-25`, `VINTAGE = d56a637048c5c947...`):
+
+1. **Noisy US OTC tier filter (`data/security_type.py`, `data/universe.py`):**
+   Excludes `PINK`, `OTCGREY`, `OTCCE`, `OTCBB` by default (dropping `HLAN`,
+   `BAAPL`, `GOOGM`, `GOOGN`, `CXRXF`, `SAEX`) while retaining
+   `OTCMKTS`/`OTCQX`/`OTCQB` (`WYE`, `XTO`, `BLS`); `--include-otc` opt-in.
+2. **Internal dormancy / ticker-reuse gap screen (`data/dollar_volume.py`):**
+   `internal_trading_gap` quarantines stitched ticker-reuse gaps `> 90` calendar
+   days (`NBIS`, `ATH`, `FOX1`, `FIT`, `GBT`, `TOY`, `PDG`, `BAM`, `CPN`).
+3. **Duplicate / copied pre-spinoff history guard (`data/universe.py`,
+   `sift/web/mining.py`, `sift/engine/first_run.py`):** Detects copied-return
+   clusters (`14` clusters / `28` symbols in `duplicate_clusters_2026-11-25.json`,
+   including `SQ`/`XYZ`, `CDAY`/`DAY`, `CPRI`/`KORS`, `FEYE`/`MNDT`,
+   `IPOE`/`SOFI`, `FNM`/`FNMA`) and blocks intra-cluster pair formation while
+   retaining all symbols in the PIT universe.
+4. **Expanded US non-US holiday calendar & single-bar print-glitch guard
+   (`data/dollar_volume.py`):** Added Easter Monday and UK Early-May / Summer
+   Bank Holidays for 1-year foreign leak detection, plus causal
+   `single_bar_volume_spike` (`> 500x` trailing 60-bar median AND `> $25B`,
+   skipping first 5 IPO bars — preserving S&P 500 inclusions like `BRK-A`/
+   `BRK-B` and M&A closes like `CELG` while catching microcap prints like `AGE`).
+5. **Global multi-exchange & operational readiness:** Added `EXCHANGE_SPECS`
+   sub-unit scaling (`LSE` GBX `0.01`, `JSE`, `TA`) in `data/warehouse.py`,
+   `--adv-window-bars` trailing PIT ADV in `data/universe.py`, Bulk API
+   `--bulk-update` (`100` calls/bulk request) in `data/ingest_eodhd.py`,
+   `scripts/audit_warehouse_crosscheck.py` (v4 §4.5 cross-source audit), and
+   `scripts/validate_warehouse.py` (5-gate automated promotion check — all 5
+   gates passing on `8,431` clean ranked symbols / `4,438` delisted / `240`
+   delisted in Top-1,000).
