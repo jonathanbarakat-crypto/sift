@@ -170,18 +170,26 @@ class EodhdClient:
         return max(0, self.max_calls - self.calls_made)
 
     # ------------------------------------------------------------------ calls
-    def get(self, path: str, params: Optional[dict] = None, deep_history: bool = False) -> Any:
+    def get(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+        deep_history: bool = False,
+        cost: int = 1,
+    ) -> Any:
         """GET ``BASE_URL + path`` with fmt=json&api_token=... .
 
-        Counts against the budget BEFORE the request; raises
-        CallBudgetExceeded when the budget is spent. ``deep_history=True``
+        Counts ``cost`` against the budget BEFORE the request (standard endpoints
+        cost 1 call; EODHD bulk endpoints cost 100 calls); raises
+        CallBudgetExceeded when the budget would be exceeded. ``deep_history=True``
         marks pre-1-year probes: a 403/limit there raises DeepHistoryBlocked
         (expected on the free tier — do not bypass).
         """
-        if self.calls_remaining() <= 0:
+        call_cost = max(int(cost), 1)
+        if self.calls_remaining() < call_cost:
             raise CallBudgetExceeded(
                 f"API call budget exhausted: {self.calls_made}/{self.max_calls} calls used "
-                f"({self.plan}-plan hard limit {PLAN_DAILY_CALLS[self.plan]}/day). "
+                f"(need {call_cost}; {self.plan}-plan hard limit {PLAN_DAILY_CALLS[self.plan]}/day). "
                 "Re-run tomorrow or lower the workload; cached parquet files are reused "
                 "without spending calls."
             )
@@ -193,7 +201,7 @@ class EodhdClient:
             r = self.session.get(url, params=q, timeout=self.timeout)
         except requests.RequestException as e:
             raise EodhdError(f"EODHD request failed: {type(e).__name__}: {e}", url=url) from e
-        self.calls_made += 1
+        self.calls_made += call_cost
         self._save_state()
         if r.status_code == 403 or r.status_code == 429:
             if deep_history:
@@ -277,4 +285,25 @@ class EodhdClient:
         data = self.get(f"/real-time/{symbol}")
         if not isinstance(data, dict):
             raise EodhdError(f"real-time/{symbol} returned a non-dict response")
+        return data
+
+    def bulk_eod_last_day(self, exchange: str, date_str: Optional[str] = None) -> list:
+        """GET /eod-bulk-last-day/{EXCHANGE} — entire exchange's latest (or dated)
+        daily EOD bars in one call (EODHD bills 100 API calls per bulk request;
+        paid plan only)."""
+        params = {"date": date_str} if date_str else None
+        data = self.get(f"/eod-bulk-last-day/{exchange.upper()}", params=params, cost=100)
+        if not isinstance(data, list):
+            raise EodhdError(f"eod-bulk-last-day/{exchange} returned a non-list response")
+        return data
+
+    def bulk_splits_last_day(self, exchange: str, date_str: Optional[str] = None) -> list:
+        """GET /eod-bulk-last-day/{EXCHANGE}?type=splits — exchange-wide split
+        events for a day in one bulk request (100 API calls; paid plan only)."""
+        params: dict[str, Any] = {"type": "splits"}
+        if date_str:
+            params["date"] = date_str
+        data = self.get(f"/eod-bulk-last-day/{exchange.upper()}", params=params, cost=100)
+        if not isinstance(data, list):
+            raise EodhdError(f"eod-bulk-last-day/{exchange}?type=splits returned a non-list response")
         return data

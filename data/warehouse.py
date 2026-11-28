@@ -40,6 +40,37 @@ EOD_COLUMNS = [
     "volume", "dollar_volume", "symbol", "exchange",
 ]
 
+# Per-exchange currency / sub-unit and calendar metadata for EODHD All-World.
+# Sub-unit exchanges quote prices in minor currency units (e.g. LSE in GBX
+# pence = 0.01 GBP); dollar_volume scaling uses `price_subunit_scale` so
+# multi-exchange expansion does not inflate traded value by 100x.
+EXCHANGE_SPECS: dict[str, dict[str, object]] = {
+    "US": {"currency": "USD", "price_subunit_scale": 1.0, "calendar_profile": "US"},
+    "LSE": {"currency": "GBP", "price_subunit_scale": 0.01, "calendar_profile": "UK"},
+    "JSE": {"currency": "ZAR", "price_subunit_scale": 0.01, "calendar_profile": "ZA"},
+    "TA": {"currency": "ILS", "price_subunit_scale": 0.01, "calendar_profile": "IL"},
+    "XETRA": {"currency": "EUR", "price_subunit_scale": 1.0, "calendar_profile": "EU"},
+    "PA": {"currency": "EUR", "price_subunit_scale": 1.0, "calendar_profile": "EU"},
+    "TO": {"currency": "CAD", "price_subunit_scale": 1.0, "calendar_profile": "CA"},
+    "TSE": {"currency": "JPY", "price_subunit_scale": 1.0, "calendar_profile": "JP"},
+    "AU": {"currency": "AUD", "price_subunit_scale": 1.0, "calendar_profile": "AU"},
+}
+
+
+def exchange_spec(exchange: str) -> dict[str, object]:
+    """Return currency, price sub-unit scale, and calendar profile for ``exchange``."""
+    return dict(
+        EXCHANGE_SPECS.get(
+            str(exchange or "US").strip().upper(),
+            {"currency": "UNKNOWN", "price_subunit_scale": 1.0, "calendar_profile": "NON_US"},
+        )
+    )
+
+
+def price_subunit_scale(exchange: str) -> float:
+    """Scale factor converting quoted price units into major currency units."""
+    return float(exchange_spec(exchange)["price_subunit_scale"])
+
 
 def write_json_atomic(obj, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)

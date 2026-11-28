@@ -46,29 +46,41 @@ if __package__ in (None, ""):
     from data.dollar_volume import (  # type: ignore
         DOLLAR_VOLUME_BASIS,
         EODHD_SENTINEL_PRICE,
+        MAX_INTERNAL_GAP_CALENDAR_DAYS,
         MAX_SINGLE_BAR_DOLLAR_VOLUME_USD,
         MAX_SINGLE_BAR_DV_2010_2017_USD,
         MAX_SINGLE_BAR_DV_PRE_2010_USD,
         MAX_SINGLE_DAY_PRICE_MULT,
         MAX_SPLIT_EXDATE_PRICE_MULT,
         MIN_MEDIAN_RAW_CLOSE_USD,
+        SINGLE_BAR_SPIKE_MIN_DV_USD,
+        SINGLE_BAR_SPIKE_MULT,
         evaluate_symbol_dollar_volume,
     )
-    from data.security_type import is_common_stock_metadata  # type: ignore
+    from data.security_type import (  # type: ignore
+        NOISY_OTC_EXCHANGES_BY_FEED,
+        is_common_stock_metadata,
+    )
 else:
     from . import warehouse as wh
     from .dollar_volume import (
         DOLLAR_VOLUME_BASIS,
         EODHD_SENTINEL_PRICE,
+        MAX_INTERNAL_GAP_CALENDAR_DAYS,
         MAX_SINGLE_BAR_DOLLAR_VOLUME_USD,
         MAX_SINGLE_BAR_DV_2010_2017_USD,
         MAX_SINGLE_BAR_DV_PRE_2010_USD,
         MAX_SINGLE_DAY_PRICE_MULT,
         MAX_SPLIT_EXDATE_PRICE_MULT,
         MIN_MEDIAN_RAW_CLOSE_USD,
+        SINGLE_BAR_SPIKE_MIN_DV_USD,
+        SINGLE_BAR_SPIKE_MULT,
         evaluate_symbol_dollar_volume,
     )
-    from .security_type import is_common_stock_metadata
+    from .security_type import (
+        NOISY_OTC_EXCHANGES_BY_FEED,
+        is_common_stock_metadata,
+    )
 
 DEFAULT_WAREHOUSE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                  "data", "warehouse")
@@ -199,16 +211,26 @@ def _lookup_symbol_meta(symbol: str, symbol_metadata: dict[str, dict] | None) ->
     return symbol_metadata.get(bare)
 
 
-def _symbol_is_common(symbol: str, symbol_metadata: dict[str, dict] | None = None) -> bool:
+def _symbol_is_common(
+    symbol: str,
+    symbol_metadata: dict[str, dict] | None = None,
+    *,
+    feed_exchange: str = "US",
+    include_otc: bool = False,
+) -> bool:
     bare = str(symbol).split(".")[0]
     meta = _lookup_symbol_meta(str(symbol), symbol_metadata)
     if meta is None:
-        return is_common_stock_metadata(bare)
+        return is_common_stock_metadata(
+            bare, feed_exchange=feed_exchange, include_otc=include_otc
+        )
     return is_common_stock_metadata(
         bare,
         name=meta.get("Name"),
         exchange=meta.get("Exchange"),
         sec_type=meta.get("Type"),
+        feed_exchange=feed_exchange,
+        include_otc=include_otc,
     )
 
 
@@ -281,6 +303,7 @@ def _evaluate_symbol_group(
     ranked_rows: list[dict],
     quarantine_rows: list[dict],
     reason_counts: dict[str, int],
+    adv_window_bars: int | None = None,
 ) -> bool:
     """Evaluate one `(sym, ex)` group and append to `ranked_rows` or `quarantine_rows`.
 
@@ -295,11 +318,14 @@ def _evaluate_symbol_group(
             if bare in splits_by_symbol:
                 sym_splits = splits_by_symbol[bare]
 
+    ex_spec = wh.exchange_spec(str(ex))
     ev = evaluate_symbol_dollar_volume(
         g_asof,
         full_df=g_full,
         splits=sym_splits,
-        check_us_calendar=(str(ex).upper() == "US"),
+        check_us_calendar=(ex_spec["calendar_profile"] == "US"),
+        price_scale=float(ex_spec["price_subunit_scale"]),
+        adv_window_bars=adv_window_bars,
     )
 
     adv = ev["avg_dollar_volume"]
@@ -365,6 +391,8 @@ def build_ranked_table(
     min_avg_dollar_volume: float = 0.0,
     splits_by_symbol: dict[str, list] | None = None,
     symbol_metadata: dict[str, dict] | None = None,
+    include_otc: bool = False,
+    adv_window_bars: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Point-in-time ranking as of ``asof`` (YYYY-MM-DD).
 
@@ -401,12 +429,17 @@ def build_ranked_table(
     if df_asof.empty:
         return _empty_tables()
 
-    unique_syms = df_asof["symbol"].drop_duplicates()
+    unique_pairs = df_asof[["symbol", "exchange"]].drop_duplicates()
     common_syms = {
-        sym for sym in unique_syms
-        if _symbol_is_common(str(sym), symbol_metadata)
+        str(row["symbol"]) for _, row in unique_pairs.iterrows()
+        if _symbol_is_common(
+            str(row["symbol"]),
+            symbol_metadata,
+            feed_exchange=str(row["exchange"]),
+            include_otc=include_otc,
+        )
     }
-    n_non_common = int(len(unique_syms) - len(common_syms))
+    n_non_common = int(df_asof["symbol"].nunique() - len(common_syms))
     if not common_syms:
         return _empty_tables(n_non_common=n_non_common)
 
@@ -437,6 +470,7 @@ def build_ranked_table(
             ranked_rows=ranked_rows,
             quarantine_rows=quarantine_rows,
             reason_counts=reason_counts,
+            adv_window_bars=adv_window_bars,
         )
         if verified:
             n_splits_verified += 1
@@ -462,6 +496,8 @@ def build_ranked_table_from_warehouse(
     min_avg_dollar_volume: float = 0.0,
     splits_by_symbol: dict[str, list] | None = None,
     symbol_metadata: dict[str, dict] | None = None,
+    include_otc: bool = False,
+    adv_window_bars: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, int, int]:
     """Stream EOD parquets one file at a time to build ``(ranked, quarantine)``.
 
@@ -486,6 +522,7 @@ def build_ranked_table_from_warehouse(
 
     for dirpath, dirnames, filenames in os.walk(eod_root):
         dirnames.sort()
+        dir_ex = os.path.basename(dirpath).upper()
         for name in sorted(filenames):
             if not name.endswith(".parquet"):
                 continue
@@ -500,11 +537,17 @@ def build_ranked_table_from_warehouse(
             if df_asof.empty:
                 continue
 
-            unique_syms = df_asof["symbol"].drop_duplicates()
+            unique_pairs = df_asof[["symbol", "exchange"]].drop_duplicates()
             common_syms: set[str] = set()
-            for sym in unique_syms:
-                s_str = str(sym)
-                if _symbol_is_common(s_str, symbol_metadata):
+            for _, row in unique_pairs.iterrows():
+                s_str = str(row["symbol"])
+                ex_str = str(row["exchange"] or dir_ex)
+                if _symbol_is_common(
+                    s_str,
+                    symbol_metadata,
+                    feed_exchange=ex_str,
+                    include_otc=include_otc,
+                ):
                     common_syms.add(s_str)
                 else:
                     seen_non_common.add(s_str)
@@ -531,6 +574,7 @@ def build_ranked_table_from_warehouse(
                     ranked_rows=ranked_rows,
                     quarantine_rows=quarantine_rows,
                     reason_counts=reason_counts,
+                    adv_window_bars=adv_window_bars,
                 )
                 if verified:
                     n_splits_verified += 1
@@ -546,6 +590,144 @@ def build_ranked_table_from_warehouse(
         reason_counts=reason_counts,
     )
     return ranked, quarantine, total_bars, len(seen_all_symbols)
+
+
+def detect_duplicate_history_clusters(
+    root: str,
+    symbols: list[str],
+    *,
+    exchange: str = "US",
+    asof: str | None = None,
+    min_overlap_bars: int = 60,
+    match_tol: float = 1e-6,
+    min_match_frac: float = 0.90,
+    min_nonzero_matches: int = 40,
+) -> list[list[str]]:
+    """Detect clusters of tickers sharing copied pre-spinoff / dual-class history.
+
+    Uses an inverted index over non-zero daily log-returns ``(date, round(r, 4))``
+    to surface candidate pairs in linear time, then verifies exact overlap
+    (``>= min_overlap_bars`` non-zero return days, with ``>= min_match_frac`` of
+    overlapping dates matching within ``match_tol``). Returns sorted clusters of
+    full symbol strings (e.g. ``[["IAC.US", "MTCH.US", "PPLI.US"]]``).
+    """
+    import numpy as np
+
+    if len(symbols) < 2:
+        return []
+    ex = exchange.upper()
+    ex_suffix = f".{ex}"
+    asof_date = date.fromisoformat(asof) if asof else None
+
+    # Map sym_idx -> dict[date, log_ret] for all valid return days up to asof
+    sym_rets: list[dict[date, float]] = []
+    buckets: dict[tuple[date, int], list[int]] = {}
+    ordered_syms = list(symbols)
+
+    for idx, sym in enumerate(ordered_syms):
+        base = sym[:-len(ex_suffix)] if sym.upper().endswith(ex_suffix) else sym
+        df = wh.read_parquet(wh.eod_parquet_path(root, ex, base))
+        if df is None or df.empty or "adjusted_close" not in df.columns:
+            sym_rets.append({})
+            continue
+        dates = pd.to_datetime(df["date"]).dt.date.to_numpy()
+        adj = pd.to_numeric(df["adjusted_close"], errors="coerce").to_numpy(dtype=np.float64)
+        order = np.argsort(dates, kind="mergesort")
+        dates = dates[order]
+        adj = adj[order]
+        if asof_date is not None:
+            mask = dates <= asof_date
+            dates = dates[mask]
+            adj = adj[mask]
+        if len(dates) < 2:
+            sym_rets.append({})
+            continue
+        valid = np.isfinite(adj) & (adj > 0.0)
+        dates = dates[valid]
+        adj = adj[valid]
+        if len(dates) < 2:
+            sym_rets.append({})
+            continue
+        log_rets = np.diff(np.log(adj))
+        ret_dates = dates[1:]
+        rmap: dict[date, float] = {}
+        for d, r in zip(ret_dates, log_rets):
+            rf = float(r)
+            if not math.isfinite(rf):
+                continue
+            rmap[d] = rf
+            if abs(rf) > 1e-4:
+                key = (d, int(round(rf * 10_000)))
+                buckets.setdefault(key, []).append(idx)
+        sym_rets.append(rmap)
+
+    pair_hits: dict[tuple[int, int], int] = {}
+    for members in buckets.values():
+        m_len = len(members)
+        if m_len < 2 or m_len > 25:
+            continue
+        for a in range(m_len):
+            ia = members[a]
+            for b in range(a + 1, m_len):
+                ib = members[b]
+                pair = (ia, ib) if ia < ib else (ib, ia)
+                pair_hits[pair] = pair_hits.get(pair, 0) + 1
+
+    # Union-find over verified copied-history pairs
+    parent = list(range(len(ordered_syms)))
+
+    def _find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(x: int, y: int) -> None:
+        rx, ry = _find(x), _find(y)
+        if rx != ry:
+            parent[max(rx, ry)] = min(rx, ry)
+
+    for (ia, ib), hits in pair_hits.items():
+        if hits < min_nonzero_matches:
+            continue
+        ra = sym_rets[ia]
+        rb = sym_rets[ib]
+        common = ra.keys() & rb.keys()
+        if len(common) < min_overlap_bars:
+            continue
+        n_match = 0
+        n_nz_match = 0
+        # Check either the full overlap OR the shared prefix before divergence
+        # (copied pre-spinoff history matches identically up to spin-off date
+        # and diverges afterwards).
+        common_sorted = sorted(common)
+        prefix_matches = 0
+        prefix_nz = 0
+        in_prefix = True
+        for d in common_sorted:
+            same = abs(ra[d] - rb[d]) <= match_tol
+            if same:
+                n_match += 1
+                if abs(ra[d]) > 1e-4:
+                    n_nz_match += 1
+                if in_prefix:
+                    prefix_matches += 1
+                    if abs(ra[d]) > 1e-4:
+                        prefix_nz += 1
+            else:
+                in_prefix = False
+        full_dup = (n_nz_match >= min_nonzero_matches) and (n_match / len(common) >= min_match_frac)
+        prefix_dup = (prefix_matches >= min_overlap_bars) and (prefix_nz >= min_nonzero_matches)
+        if full_dup or prefix_dup:
+            _union(ia, ib)
+
+    groups: dict[int, list[str]] = {}
+    for idx, sym in enumerate(ordered_syms):
+        root_id = _find(idx)
+        groups.setdefault(root_id, []).append(sym)
+    clusters = [sorted(v) for v in groups.values() if len(v) >= 2]
+    clusters.sort(key=lambda c: c[0])
+    return clusters
 
 
 def build_pit_listing(ranked: pd.DataFrame, n: int) -> pd.DataFrame:
@@ -569,6 +751,12 @@ def main(argv: list | None = None) -> int:
                     help=f"minimum mean daily dollar volume ({DOLLAR_VOLUME_BASIS}) to be "
                          f"rankable, in USD (default {DEFAULT_MIN_AVG_DOLLAR_VOLUME:.0f} = $1M; "
                          "pre-registered floor — pass 0 to disable)")
+    ap.add_argument("--include-otc", action="store_true",
+                    help="include noisy OTC tiers (PINK/OTCGREY/OTCCE/OTCBB); default excludes "
+                         "them while keeping OTCMKTS/OTCQX/OTCQB")
+    ap.add_argument("--adv-window-bars", type=int, default=None,
+                    help="optional trailing bar window for PIT average dollar volume "
+                         "(e.g. 252 for trailing 1y; default: full history up to asof)")
     args = ap.parse_args(argv)
 
     root = os.path.abspath(args.warehouse)
@@ -590,6 +778,8 @@ def main(argv: list | None = None) -> int:
         min_avg_dollar_volume=args.min_avg_dollar_volume,
         splits_by_symbol=splits_by_symbol,
         symbol_metadata=symbol_metadata,
+        include_otc=bool(args.include_otc),
+        adv_window_bars=args.adv_window_bars,
     )
     log(f"scanned {total_bars} bars, {total_symbols} symbols, "
         f"{len(splits_by_symbol)} cached splits file(s), "
@@ -635,6 +825,28 @@ def main(argv: list | None = None) -> int:
         # Remove stale quarantine file from an earlier run so vintage hash stays clean.
         os.remove(candidate_q_path)
 
+    # Detect copied pre-spinoff / dual-class histories among top-N symbols so
+    # pair discovery never pairs a stock against its own copied history.
+    top_syms = top["symbol"].tolist() if not top.empty else []
+    top_ex = str(top["exchange"].iloc[0]).upper() if not top.empty else "US"
+    dup_clusters = detect_duplicate_history_clusters(
+        root, top_syms, exchange=top_ex, asof=asof
+    )
+    candidate_dup_path = os.path.join(uroot, f"duplicate_clusters_{asof}.json")
+    dup_path: str | None = None
+    if dup_clusters:
+        dup_path = candidate_dup_path
+        wh.write_json_atomic(
+            {"asof": asof, "exchange": top_ex, "clusters": dup_clusters},
+            dup_path,
+        )
+        log(
+            f"duplicate-history guard: detected {len(dup_clusters)} cluster(s) "
+            f"({sum(len(c) for c in dup_clusters)} symbols) -> {dup_path}"
+        )
+    elif os.path.exists(candidate_dup_path):
+        os.remove(candidate_dup_path)
+
     n_ended = int(ranked["ended_before_asof"].sum())
     n_ended_top = int(top["ended_before_asof"].sum())
     if research:
@@ -659,7 +871,14 @@ def main(argv: list | None = None) -> int:
         "n": args.n,
         "min_bars": args.min_bars,
         "min_avg_dollar_volume": args.min_avg_dollar_volume,
+        "adv_window_bars": args.adv_window_bars,
         "dollar_volume_basis": DOLLAR_VOLUME_BASIS,
+        "exchange_filter": {
+            "include_otc": bool(args.include_otc),
+            "excluded_otc_exchanges": (
+                [] if args.include_otc else sorted(NOISY_OTC_EXCHANGES_BY_FEED.get(top_ex, ()))
+            ),
+        },
         "splits_coverage": {
             "symbols_with_splits_file": n_splits_verified,
             "symbols_without_splits_file": n_splits_missing,
@@ -667,6 +886,11 @@ def main(argv: list | None = None) -> int:
         "non_common_excluded": n_non_common,
         "ranked_path": ranked_path,
         "top_path": top_path,
+        "duplicate_history_clusters": {
+            "clusters_count": len(dup_clusters),
+            "symbols_in_clusters": sum(len(c) for c in dup_clusters),
+            "path": dup_path,
+        },
         "data_quality_screen": {
             "quarantined_total": n_quarantined_total,
             "quarantined_would_pass_floors": n_quarantined_post,
@@ -674,11 +898,14 @@ def main(argv: list | None = None) -> int:
             "quarantined_path": quarantined_path,
             "thresholds": {
                 "eodhd_sentinel_price": EODHD_SENTINEL_PRICE,
+                "max_internal_gap_calendar_days": MAX_INTERNAL_GAP_CALENDAR_DAYS,
                 "max_single_day_price_mult": MAX_SINGLE_DAY_PRICE_MULT,
                 "max_split_exdate_price_mult": MAX_SPLIT_EXDATE_PRICE_MULT,
                 "max_single_bar_dv_pre_2010_usd": MAX_SINGLE_BAR_DV_PRE_2010_USD,
                 "max_single_bar_dv_2010_2017_usd": MAX_SINGLE_BAR_DV_2010_2017_USD,
                 "max_single_bar_dollar_volume_usd": MAX_SINGLE_BAR_DOLLAR_VOLUME_USD,
+                "single_bar_spike_mult": SINGLE_BAR_SPIKE_MULT,
+                "single_bar_spike_min_dv_usd": SINGLE_BAR_SPIKE_MIN_DV_USD,
                 "min_median_raw_close_usd": MIN_MEDIAN_RAW_CLOSE_USD,
             },
         },

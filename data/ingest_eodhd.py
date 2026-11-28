@@ -120,7 +120,9 @@ def _bars_to_frame(rows: list, symbol: str, exchange: str,
     for c in ("open", "high", "low", "close", "adjusted_close", "volume"):
         df[c] = pd.to_numeric(df.get(c), errors="coerce")
     df["adjusted_close"] = df["adjusted_close"].fillna(df["close"])
-    _, _, dv = compute_split_adjusted_dollar_volume(df, splits=splits)
+    _, _, dv = compute_split_adjusted_dollar_volume(
+        df, splits=splits, price_scale=wh.price_subunit_scale(exchange)
+    )
     df["dollar_volume"] = dv
     df["symbol"] = symbol
     df["exchange"] = exchange
@@ -308,6 +310,115 @@ def ingest_ticker(client: EodhdClient, root: str, exchange: str, symbol: str,
     return "fetched"
 
 
+def bulk_update_exchange(
+    client: EodhdClient,
+    root: str,
+    exchange: str,
+    *,
+    bulk_date: str | None = None,
+    fetch_splits_data: bool = True,
+) -> dict[str, int]:
+    """Nightly incremental warehouse refresh via EODHD's Bulk API.
+
+    Uses ``GET /eod-bulk-last-day/<EX>?type=splits`` (100 calls) to identify
+    symbols with new split events (refetching full ``/api/splits/`` only for
+    those symbols), then ``GET /eod-bulk-last-day/<EX>`` (100 calls) to
+    append/update that trading date in existing warehouse parquets.
+    """
+    ex = exchange.upper()
+    existing_syms = set(_discover_ingested_symbols(root, ex))
+    stats = {
+        "bulk_rows": 0,
+        "updated": 0,
+        "skipped_unknown": 0,
+        "splits_refreshed": 0,
+        "split_errors": 0,
+    }
+    if not existing_syms:
+        log(f"bulk-update {ex}: no existing parquets under eod/{ex}; run full ingest first")
+        return stats
+
+    if fetch_splits_data:
+        try:
+            split_rows = client.bulk_splits_last_day(ex, date_str=bulk_date)
+        except EodhdError as e:
+            log(f"bulk-update {ex}: bulk splits error ({e}); continuing with cached splits")
+            split_rows = []
+        split_codes = sorted({
+            str(r.get("code") or r.get("Code") or "").strip()
+            for r in split_rows
+            if isinstance(r, dict)
+        } - {""})
+        for code in split_codes:
+            safe = code.replace("/", "_").replace("\\", "_")
+            if safe not in existing_syms:
+                continue
+            try:
+                fetch_splits(client, root, ex, code, force=True)
+                stats["splits_refreshed"] += 1
+            except CallBudgetExceeded:
+                raise
+            except EodhdError as e:
+                log(f"{code}: splits refresh error: {e} (continuing)")
+                stats["split_errors"] += 1
+
+    eod_rows = client.bulk_eod_last_day(ex, date_str=bulk_date)
+    stats["bulk_rows"] = len(eod_rows)
+    scale = wh.price_subunit_scale(ex)
+    for r in eod_rows:
+        if not isinstance(r, dict):
+            continue
+        code = str(r.get("code") or r.get("Code") or "").strip()
+        if not code:
+            continue
+        safe = code.replace("/", "_").replace("\\", "_")
+        if safe not in existing_syms:
+            stats["skipped_unknown"] += 1
+            continue
+        path = wh.eod_parquet_path(root, ex, code)
+        existing_df = wh.read_parquet(path)
+        splits = wh.read_json(wh.splits_json_path(root, ex, code))
+        splits_list = splits if isinstance(splits, list) else None
+        new_row = {
+            "date": r.get("date"),
+            "open": r.get("open"),
+            "high": r.get("high"),
+            "low": r.get("low"),
+            "close": r.get("close"),
+            "adjusted_close": r.get("adjusted_close", r.get("close")),
+            "volume": r.get("volume"),
+        }
+        new_df = _bars_to_frame([new_row], f"{code}.{ex}", ex, splits=splits_list)
+        if new_df.empty:
+            continue
+        if existing_df is not None and not existing_df.empty:
+            existing_df = existing_df.copy()
+            existing_df["date"] = pd.to_datetime(existing_df["date"]).dt.date
+            merged = pd.concat([existing_df, new_df], ignore_index=True)
+            merged = (
+                merged.drop_duplicates(subset=["date"], keep="last")
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            # Recompute dollar_volume across merged history so any newly refreshed
+            # split stays consistent across the entire parquet.
+            _, _, dv = compute_split_adjusted_dollar_volume(
+                merged, splits=splits_list, price_scale=scale
+            )
+            merged["dollar_volume"] = dv
+            merged = merged[wh.EOD_COLUMNS]
+        else:
+            merged = new_df
+        wh.write_parquet_atomic(merged, path)
+        stats["updated"] += 1
+    log(
+        f"bulk-update {ex} (date={bulk_date or 'latest'}): "
+        f"updated={stats['updated']}, splits_refreshed={stats['splits_refreshed']}, "
+        f"bulk_rows={stats['bulk_rows']}"
+    )
+    return stats
+
+
 def refresh_live(client: EodhdClient, root: str, exchange: str, symbol: str) -> str:
     """Live quote snapshot (free tier includes /real-time). 1 call."""
     q = client.realtime(f"{symbol}.{exchange.upper()}")
@@ -356,6 +467,11 @@ def main(argv: list | None = None) -> int:
     ap.add_argument("--splits-only", action="store_true",
                     help="backfill /api/splits/ for already-ingested tickers (or --tickers) "
                          "without re-fetching EOD parquets; resumable")
+    ap.add_argument("--bulk-update", action="store_true",
+                    help="nightly incremental update via EODHD Bulk EOD + Bulk Splits API "
+                         "(100 calls each; paid plan only)")
+    ap.add_argument("--bulk-date", default=None,
+                    help="optional YYYY-MM-DD trading date for --bulk-update (default: latest)")
     ap.add_argument("--exchanges-list-only", action="store_true",
                     help="fetch exchanges-list once and exit (1 call)")
     ap.add_argument("--force", action="store_true", help="ignore parquet/cache coverage, refetch")
@@ -407,6 +523,27 @@ def main(argv: list | None = None) -> int:
             return 4
 
     try:
+        if args.bulk_update:
+            stats = bulk_update_exchange(
+                client,
+                root,
+                args.exchange,
+                bulk_date=args.bulk_date,
+                fetch_splits_data=do_splits,
+            )
+            rec = wh.write_vintage(root, extra={
+                "built_by": "ingest_eodhd --bulk-update",
+                "plan": args.plan,
+                "exchange": args.exchange.upper(),
+                "window": [from_date, args.bulk_date or to_date],
+                "dollar_volume_basis": DOLLAR_VOLUME_BASIS,
+                "bulk_update": stats,
+                "calls_used_this_run": client.calls_made,
+            })
+            log(f"bulk update done: {stats} | calls used: {client.calls_made}/{client.max_calls} | "
+                f"vintage {rec['vintage'][:16]}…")
+            return 0
+
         if args.splits_only:
             symbols = list(args.tickers) if args.tickers is not None else _discover_ingested_symbols(
                 root, args.exchange

@@ -240,6 +240,40 @@ def register_trial(ledger: Ledger, params: dict, vintage: str, provenance: str =
     return trial, (existing is not None), dt
 
 
+def _load_duplicate_cluster_pairs(warehouse_root: str, exchange: str = "US") -> set[tuple[str, str]]:
+    """Load forbidden intra-cluster pairs from ``universe/manifest.json`` when present."""
+    manifest = wh.read_json(os.path.join(warehouse_root, "universe", "manifest.json"))
+    if not isinstance(manifest, dict):
+        return set()
+    dup_meta = manifest.get("duplicate_history_clusters")
+    if not isinstance(dup_meta, dict) or not dup_meta.get("path"):
+        return set()
+    uroot = os.path.realpath(os.path.join(warehouse_root, "universe"))
+    raw = str(dup_meta["path"])
+    cand = raw if os.path.isabs(raw) else os.path.join(uroot, os.path.basename(raw))
+    if not os.path.isfile(cand):
+        cand = os.path.join(uroot, os.path.basename(raw))
+    resolved = os.path.realpath(cand)
+    if not os.path.isfile(resolved) or not resolved.startswith(uroot + os.sep):
+        return set()
+    payload = wh.read_json(resolved)
+    if not isinstance(payload, dict) or not isinstance(payload.get("clusters"), list):
+        return set()
+    ex_suffix = f".{exchange.upper()}"
+    pairs: set[tuple[str, str]] = set()
+    for cluster in payload["clusters"]:
+        if not isinstance(cluster, list):
+            continue
+        stems = sorted({
+            (str(s)[:-len(ex_suffix)] if str(s).upper().endswith(ex_suffix) else str(s)).strip().upper()
+            for s in cluster if str(s).strip()
+        })
+        for a in range(len(stems)):
+            for b in range(a + 1, len(stems)):
+                pairs.add((stems[a], stems[b]))
+    return pairs
+
+
 def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
               max_pairs: int, formation: int, s2_B: int, measurements_path: str,
               exchange: str = "US", max_universe: int = 1000,
@@ -298,12 +332,30 @@ def run_pairs(warehouse_root: str, universe_path: str, ledger_path: str,
         f"peak RSS so far {peak_rss_bytes()/1e9:.2f} GB")
 
     # candidate pairs: rank by |corr| descending, take top max_pairs (screening
-    # stage — the pairs family's discovery step), deterministic order.
+    # stage — the pairs family's discovery step), skipping any copied-history
+    # duplicate cluster pairs (e.g. pre-spinoff twins / dual-class copies).
+    dup_pairs = _load_duplicate_cluster_pairs(warehouse_root, exchange)
+    ex_suffix = f".{exchange.upper()}"
+    kept_stems = [
+        (s[:-len(ex_suffix)] if s.upper().endswith(ex_suffix) else s).strip().upper()
+        for s in kept
+    ]
     iu = np.triu_indices(n, k=1)
     cvals = corr[iu]
     order = np.argsort(-np.abs(np.nan_to_num(cvals)))
-    cand = [(int(iu[0][k]), int(iu[1][k])) for k in order[:max_pairs]]
-    log(f"candidate pairs: {len(cand)} (top by |corr|)")
+    cand = []
+    skipped_dup = 0
+    for k in order:
+        if len(cand) >= max_pairs:
+            break
+        i_idx, j_idx = int(iu[0][k]), int(iu[1][k])
+        if dup_pairs:
+            a, b = kept_stems[i_idx], kept_stems[j_idx]
+            if (a, b) in dup_pairs or (b, a) in dup_pairs:
+                skipped_dup += 1
+                continue
+        cand.append((i_idx, j_idx))
+    log(f"candidate pairs: {len(cand)} (top by |corr|; skipped {skipped_dup} duplicate-history pair(s))")
 
     ledger = Ledger(ledger_path)
     # soundness #10: wire the card layer so survivors actually mint (the

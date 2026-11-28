@@ -40,7 +40,7 @@ Canonical basis implemented here:
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
@@ -71,9 +71,27 @@ SPLIT_PARTIAL_REV_MIN_DV_MULT = 15.0
 MAX_SPLIT_EXDATE_PRICE_MULT = 2.5
 
 # Foreign-exchange calendar contamination thresholds (US trading days that are
-# major non-US market holidays: Dec 26 Boxing Day, May 1 Labour Day).
+# major non-US market holidays: Dec 26 Boxing Day, May 1 Labour Day, Easter
+# Monday, UK Early May Bank Holiday, UK Summer Bank Holiday).
 FOREIGN_CAL_MIN_HOLIDAYS = 3
+FOREIGN_CAL_UK_MIN_HOLIDAYS = 4
 FOREIGN_CAL_MIN_MISS_FRAC = 0.80
+
+# Internal dormancy / ticker-reuse gap threshold (calendar days between
+# consecutive trading bars; catches recycled tickers like WORK/SLW/BFT while
+# leaving wide margin above 9/11 (6d) and Hurricane Sandy (4d) closures).
+MAX_INTERNAL_GAP_CALENDAR_DAYS = 90
+
+# Isolated single-bar volume/DV print-glitch screen (causal rolling 60-bar
+# median; skips initial 5 IPO bars so legitimate IPO surges never trip it).
+# Calibrated above genuine S&P 500 inclusions (BRK-B $24.3B / 205x), M&A closes
+# (CELG $30.8B / 76x), and meme squeezes (GME $32.5B / 256x, AMC $24.3B / 328x)
+# while catching microcap fat-finger prints (e.g. AGE $28.9B / 3,952x).
+SINGLE_BAR_SPIKE_MULT = 500.0
+SINGLE_BAR_SPIKE_MIN_DV_USD = 25_000_000_000.0
+SINGLE_BAR_SPIKE_IPO_GRACE_BARS = 5
+SINGLE_BAR_SPIKE_ROLLING_WINDOW = 60
+SINGLE_BAR_SPIKE_MIN_PERIODS = 20
 
 # Consistency between /api/splits/ and adjusted_close (dividend factor D(t)).
 MAX_ADJ_TO_SPLIT_RATIO = 1.05
@@ -226,6 +244,7 @@ def compute_split_adjusted_dollar_volume(
     splits: list[dict[str, Any]] | None = None,
     *,
     vintage_end: date | None = None,
+    price_scale: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compute ``(split_factors, split_adjusted_close, dollar_volume)`` for ``df``.
 
@@ -233,6 +252,8 @@ def compute_split_adjusted_dollar_volume(
     (never reads a stale stored ``dollar_volume`` column). Announced future
     splits strictly after ``vintage_end`` (default: ``max(df['date'])``) are
     ignored because the vintage's bars/volume have not yet been restated.
+    ``price_scale`` converts sub-unit quotes (e.g. ``0.01`` for LSE GBX pence)
+    into major currency units before computing ``dollar_volume``.
     """
     if df.empty:
         empty = np.empty(0, dtype=np.float64)
@@ -244,7 +265,7 @@ def compute_split_adjusted_dollar_volume(
     events = _filter_executed_splits(parse_split_events(splits), end_dt)
     factors = cumulative_split_factors(dates, events)
     split_adj_close = close / factors
-    dollar_volume = split_adj_close * volume
+    dollar_volume = split_adj_close * float(price_scale) * volume
     return factors, split_adj_close, dollar_volume
 
 
@@ -404,29 +425,77 @@ def _era_dollar_volume_caps(dates: np.ndarray) -> np.ndarray:
     )
 
 
+def _easter_sunday(year: int) -> date:
+    """Gregorian Easter Sunday (Meeus/Jones/Butcher algorithm)."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _first_monday(year: int, month: int) -> date:
+    d = date(year, month, 1)
+    offset = (0 - d.weekday()) % 7
+    return d + timedelta(days=offset)
+
+
+def _last_monday(year: int, month: int) -> date:
+    nxt = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    last = nxt - timedelta(days=1)
+    offset = (last.weekday() - 0) % 7
+    return last - timedelta(days=offset)
+
+
 def _check_us_foreign_calendar(dates: np.ndarray, volume: np.ndarray) -> list[str]:
     """Detect non-US exchange series (or multi-year ticker-reuse holes) leaked
     into EODHD's US symbol list by checking US trading days that are major
     non-US holidays:
       * Dec 26 when Tue–Fri (US open; UK/Commonwealth Boxing Day closed)
       * May 1 when Mon–Fri (US open; Europe/Russia/LatAm/Asia Labour Day closed)
+      * Easter Monday (US open; UK & all European exchanges closed)
+      * UK Early May Bank Holiday (1st Mon of May) & Summer Bank Holiday (last Mon of Aug)
     """
     if len(dates) < 20:
         return []
     lo, hi = dates[0], dates[-1]
-    if hi.year - lo.year < FOREIGN_CAL_MIN_HOLIDAYS - 1:
-        return []
     active_dates = set(dates[np.isfinite(volume) & (volume > 0.0)])
-    dec26 = [
-        date(y, 12, 26)
-        for y in range(lo.year, hi.year + 1)
-        if lo <= date(y, 12, 26) <= hi and date(y, 12, 26).weekday() in (1, 2, 3, 4)
-    ]
-    may1 = [
-        date(y, 5, 1)
-        for y in range(lo.year, hi.year + 1)
-        if lo <= date(y, 5, 1) <= hi and date(y, 5, 1).weekday() < 5
-    ]
+    dec26: list[date] = []
+    may1: list[date] = []
+    easter_mon: list[date] = []
+    uk_all: list[date] = []
+    for y in range(lo.year, hi.year + 1):
+        d26 = date(y, 12, 26)
+        if lo <= d26 <= hi and d26.weekday() in (1, 2, 3, 4):
+            dec26.append(d26)
+            uk_all.append(d26)
+        m1 = date(y, 5, 1)
+        if lo <= m1 <= hi and m1.weekday() < 5:
+            may1.append(m1)
+        em = _easter_sunday(y) + timedelta(days=1)
+        if lo <= em <= hi:
+            easter_mon.append(em)
+            uk_all.append(em)
+        uk_may = _first_monday(y, 5)
+        if lo <= uk_may <= hi:
+            uk_all.append(uk_may)
+        uk_aug = _last_monday(y, 8)
+        if lo <= uk_aug <= hi:
+            uk_all.append(uk_aug)
+
+    eu_all = sorted(set(may1) | set(easter_mon))
+    uk_unique = sorted(set(uk_all))
+
     hits: list[str] = []
     if len(dec26) >= FOREIGN_CAL_MIN_HOLIDAYS:
         miss = sum(1 for d in dec26 if d not in active_dates)
@@ -436,6 +505,14 @@ def _check_us_foreign_calendar(dates: np.ndarray, volume: np.ndarray) -> list[st
         miss = sum(1 for d in may1 if d not in active_dates)
         if miss / len(may1) >= FOREIGN_CAL_MIN_MISS_FRAC:
             hits.append(f"missing/zero-vol on {miss}/{len(may1)} US May-1 sessions")
+    if not hits and len(uk_unique) >= FOREIGN_CAL_UK_MIN_HOLIDAYS:
+        miss = sum(1 for d in uk_unique if d not in active_dates)
+        if miss / len(uk_unique) >= FOREIGN_CAL_MIN_MISS_FRAC:
+            hits.append(f"missing/zero-vol on {miss}/{len(uk_unique)} US-open UK bank-holiday sessions")
+    if not hits and len(eu_all) >= FOREIGN_CAL_MIN_HOLIDAYS:
+        miss = sum(1 for d in eu_all if d not in active_dates)
+        if miss / len(eu_all) >= FOREIGN_CAL_MIN_MISS_FRAC:
+            hits.append(f"missing/zero-vol on {miss}/{len(eu_all)} US-open EU holiday sessions")
     return hits
 
 
@@ -452,6 +529,8 @@ def evaluate_symbol_dollar_volume(
     full_df: pd.DataFrame | None = None,
     splits: list[dict[str, Any]] | None = None,
     check_us_calendar: bool = True,
+    price_scale: float = 1.0,
+    adv_window_bars: int | None = None,
 ) -> dict[str, Any]:
     """Compute split-adjusted dollar volume and data-quality diagnostics for one symbol.
 
@@ -460,7 +539,10 @@ def evaluate_symbol_dollar_volume(
     is the full loaded vintage series for the symbol and is used ONLY to decode
     the vendor's retroactive volume-adjustment encoding (vintage end date for
     filtering unexecuted future splits, split-vs-volume/price continuity, and
-    missing-splits detection).
+    missing-splits detection). When ``adv_window_bars`` is positive,
+    ``avg_dollar_volume`` / ``median_dollar_volume`` summarize the trailing
+    ``adv_window_bars`` valid bars up to ``asof`` while all quality screens
+    continue inspecting the full history up to ``asof``.
     """
     dates_raw = _as_date_array(asof_df["date"])
     order = np.argsort(dates_raw, kind="mergesort")
@@ -484,7 +566,8 @@ def evaluate_symbol_dollar_volume(
     events = _filter_executed_splits(parse_split_events(splits), vintage_end)
     factors = cumulative_split_factors(dates, events)
     split_adj_close = close / factors
-    dollar_vol = split_adj_close * volume
+    scale = float(price_scale)
+    dollar_vol = split_adj_close * scale * volume
 
     reason_codes: list[str] = []
     details: list[str] = []
@@ -546,7 +629,21 @@ def evaluate_symbol_dollar_volume(
                     f"run ingest_eodhd --splits-only",
                 )
 
-    # 5. Foreign-calendar / multi-year-gap check (catches LSE/MOEX/Euronext/B3
+    # 5. Internal dormancy / ticker-reuse gap screen (> 90 calendar days).
+    if len(dates) >= 2:
+        ords = np.fromiter((d.toordinal() for d in dates), dtype=np.int64, count=len(dates))
+        gaps = np.diff(ords)
+        max_gap = int(np.max(gaps))
+        if max_gap > MAX_INTERNAL_GAP_CALENDAR_DAYS:
+            gap_i = int(np.argmax(gaps))
+            _flag(
+                "internal_trading_gap",
+                f"internal trading gap of {max_gap} calendar days between "
+                f"{dates[gap_i].isoformat()} and {dates[gap_i + 1].isoformat()} "
+                f"(> {MAX_INTERNAL_GAP_CALENDAR_DAYS}d)",
+            )
+
+    # 6. Foreign-calendar / multi-year-gap check (catches LSE/MOEX/Euronext/B3
     #    series leaked into EODHD's US symbol list, plus multi-year ticker reuse).
     if check_us_calendar:
         cal_hits = _check_us_foreign_calendar(dates, volume)
@@ -562,7 +659,7 @@ def evaluate_symbol_dollar_volume(
         ok_adj = adj_close[ok_bars]
         ok_dv = dollar_vol[ok_bars]
 
-        # 6. Consistency between /api/splits/ and adjusted_close (dividend factor D(t)).
+        # 7. Consistency between /api/splits/ and adjusted_close (dividend factor D(t)).
         if splits is not None and not (sent_close or sent_adj):
             div_factor = ok_adj / ok_split
             max_div = float(np.max(div_factor))
@@ -577,7 +674,7 @@ def evaluate_symbol_dollar_volume(
                     f"(max={max_div:.3g}, max_daily_step={max_div_step:.3g}x)",
                 )
 
-        # 7. Unsplit single-day price scale break (catches PROSY $900k -> $7 cliff,
+        # 8. Unsplit single-day price scale break (catches PROSY $900k -> $7 cliff,
         #    currency-unit flips, and unrecorded splits without touching BRK-A).
         if ok_split.size >= 2:
             p_steps = ok_split[1:] / ok_split[:-1]
@@ -589,7 +686,7 @@ def evaluate_symbol_dollar_volume(
                     f"(> {MAX_SINGLE_DAY_PRICE_MULT:g}x)",
                 )
 
-        # 8. Era-aware single-bar dollar volume cap ($25B pre-2010, $45B 2010-2017, $250B 2018+).
+        # 9. Era-aware single-bar dollar volume cap ($25B pre-2010, $45B 2010-2017, $250B 2018+).
         caps = _era_dollar_volume_caps(ok_dates)
         over = ok_dv > caps
         if bool(np.any(over)):
@@ -600,9 +697,39 @@ def evaluate_symbol_dollar_volume(
                 f"{ok_dates[worst_i].isoformat()} exceeds era cap ${float(caps[worst_i]):,.0f}",
             )
 
-        # 9. Sub-dime raw close screen (evaluated on RAW close, never adjusted_close,
-        #    so forward-split winners like NVDA/AAPL are never falsely dropped).
-        med_close = float(np.median(ok_close))
+        # 10. Isolated single-bar volume/DV print-glitch screen (causal 60-bar
+        #     rolling median; skips initial 5 IPO bars).
+        if ok_dv.size >= SINGLE_BAR_SPIKE_MIN_PERIODS + SINGLE_BAR_SPIKE_IPO_GRACE_BARS:
+            roll_med = (
+                pd.Series(ok_dv)
+                .shift(1)
+                .rolling(
+                    SINGLE_BAR_SPIKE_ROLLING_WINDOW,
+                    min_periods=SINGLE_BAR_SPIKE_MIN_PERIODS,
+                )
+                .median()
+                .to_numpy(dtype=np.float64)
+            )
+            spike_mask = (
+                (np.arange(ok_dv.size) >= SINGLE_BAR_SPIKE_IPO_GRACE_BARS)
+                & np.isfinite(roll_med)
+                & (roll_med > 0.0)
+                & (ok_dv > SINGLE_BAR_SPIKE_MIN_DV_USD)
+                & (ok_dv > SINGLE_BAR_SPIKE_MULT * roll_med)
+            )
+            if bool(np.any(spike_mask)):
+                ratios = np.where(spike_mask, ok_dv / np.maximum(roll_med, 1.0), 0.0)
+                si = int(np.argmax(ratios))
+                _flag(
+                    "single_bar_volume_spike",
+                    f"single-bar dollar volume ${float(ok_dv[si]):,.0f} on "
+                    f"{ok_dates[si].isoformat()} is {float(ratios[si]):.1f}x trailing "
+                    f"60-bar median (${float(roll_med[si]):,.0f})",
+                )
+
+        # 11. Sub-dime raw close screen (evaluated on RAW close * price_scale, never
+        #     adjusted_close, so forward-split winners like NVDA/AAPL are preserved).
+        med_close = float(np.median(ok_close * scale))
         if med_close < MIN_MEDIAN_RAW_CLOSE_USD:
             _flag(
                 "sub_dime_raw_price",
@@ -610,13 +737,18 @@ def evaluate_symbol_dollar_volume(
             )
 
     finite_dv = dollar_vol[np.isfinite(dollar_vol)]
+    adv_slice = (
+        finite_dv[-int(adv_window_bars):]
+        if (adv_window_bars is not None and int(adv_window_bars) > 0 and finite_dv.size)
+        else finite_dv
+    )
     finite_close = close[np.isfinite(close)]
     finite_split = split_adj_close[np.isfinite(split_adj_close)]
     finite_adj = adj_close[np.isfinite(adj_close)]
 
     return {
-        "avg_dollar_volume": float(np.mean(finite_dv)) if finite_dv.size else float("nan"),
-        "median_dollar_volume": float(np.median(finite_dv)) if finite_dv.size else float("nan"),
+        "avg_dollar_volume": float(np.mean(adv_slice)) if adv_slice.size else float("nan"),
+        "median_dollar_volume": float(np.median(adv_slice)) if adv_slice.size else float("nan"),
         "max_bar_dollar_volume": float(np.max(finite_dv)) if finite_dv.size else float("nan"),
         "bars": int(len(dates)),
         "first_date": dates[0],

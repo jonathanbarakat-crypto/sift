@@ -190,6 +190,36 @@ class _WarehouseUniverse:
     mode: str  # "pit_manifest" | "pit_parquet" | "eod_fallback"
     quarantined_excluded: int
     pit_listed_count: int
+    duplicate_pairs: frozenset[tuple[str, str]] = frozenset()
+
+
+def _read_duplicate_cluster_pairs(
+    path: Path, exchange: str = "US"
+) -> frozenset[tuple[str, str]] | None:
+    """Read duplicate/copied-history clusters JSON and return normalized forbidden pair tuples."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    clusters = payload.get("clusters")
+    if not isinstance(clusters, list):
+        return None
+    pairs: set[tuple[str, str]] = set()
+    for cluster in clusters:
+        if not isinstance(cluster, list):
+            continue
+        stems = sorted({
+            _symbol_stem(str(s), exchange).upper()
+            for s in cluster
+            if str(s).strip()
+        })
+        for a in range(len(stems)):
+            for b in range(a + 1, len(stems)):
+                pairs.add((stems[a], stems[b]))
+    return frozenset(pairs)
 
 
 def _symbol_stem(symbol: str, exchange: str = "US") -> str:
@@ -350,6 +380,21 @@ def _resolve_warehouse_universe(
                 selected.append(disk_stem)
         if len(selected) < 2:
             return None
+        dup_pairs: frozenset[tuple[str, str]] = frozenset()
+        dup_meta = manifest.get("duplicate_history_clusters")
+        if isinstance(dup_meta, dict):
+            dup_raw_path = dup_meta.get("path")
+            dup_count = int(dup_meta.get("clusters_count") or 0)
+            if dup_raw_path or dup_count > 0:
+                dup_file = _resolve_universe_file(
+                    root, dup_raw_path if isinstance(dup_raw_path, str) else None
+                )
+                if dup_file is None:
+                    return None
+                loaded_dup = _read_duplicate_cluster_pairs(dup_file, exchange=exchange)
+                if loaded_dup is None:
+                    return None
+                dup_pairs = loaded_dup
         return _WarehouseUniverse(
             symbols=selected,
             all_symbols=frozenset(all_symbols),
@@ -357,6 +402,7 @@ def _resolve_warehouse_universe(
             mode="pit_manifest",
             quarantined_excluded=len(quarantined_upper),
             pit_listed_count=len(top_syms),
+            duplicate_pairs=dup_pairs,
         )
 
     if require_pit_universe:
@@ -735,10 +781,18 @@ class PairCatalog:
         iu = np.triu_indices(n_sym, k=1)
         self._wh_m_screened = max(int(iu[0].size), 1)
         order = np.argsort(-np.abs(np.nan_to_num(corr[iu])))
-        count = min(len(order), self.max_warehouse_pairs)
-        for rank_idx in range(count):
-            k = int(order[rank_idx])
+        dup_pairs = resolved.duplicate_pairs
+        rank_idx = 0
+        for k_raw in order:
+            if rank_idx >= self.max_warehouse_pairs:
+                break
+            k = int(k_raw)
             i, j = int(iu[0][k]), int(iu[1][k])
+            if dup_pairs:
+                a_key = _symbol_stem(kept[i], "US").upper()
+                b_key = _symbol_stem(kept[j], "US").upper()
+                if (a_key, b_key) in dup_pairs or (b_key, a_key) in dup_pairs:
+                    continue
             cid = f"pair-{rank_idx + 1:03d}"
             self._wh_pairs[cid] = (i, j)
             self._meta[cid] = CandidateMeta(
@@ -755,6 +809,7 @@ class PairCatalog:
                 synthetic_example=False,
                 data_source="eodhd_warehouse",
             )
+            rank_idx += 1
         return len(self._wh_pairs) > 0
 
     def _register_synthetic_presets(self) -> None:
